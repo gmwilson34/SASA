@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# PyInstaller
+*.spec.bak
+
+# Analysis output (generated at runtime)
+analysis/
+
+# Audio data files (WAV recordings — too large for git)
+Audio/
+
+# Node modules (UI)
+ui/node_modules/
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Claude
+.claude/
+
+# Test artifacts
+test_waveform.png
+test_levels.png
+band_analysis.png
+shot_detection.png
+weighting_response.png
+*.stft_z.png
+*.stft_a.png
+*.stft_data.npz

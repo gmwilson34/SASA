@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "sasa"
+version = "1.0.0"
+description = "SASA — Shot Acoustic Spectral Analysis: Professional-grade acoustic analysis for gunshot recordings"
+readme = "README.md"
+license = {text = "Proprietary — Copyright © 2024-2026 Ridgeback Defense"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Ridgeback Defense"},
+]
+keywords = ["acoustics", "audio-analysis", "gunshot-detection", "spectral-analysis", "sound-pressure-level"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "soundfile>=0.12",
+    "matplotlib>=3.7",
+    "plotly>=5.15",
+]
+
+[project.optional-dependencies]
+video = [
+    "moviepy>=2.0",
+    "imageio-ffmpeg>=0.5",
+]
+loudness = [
+    "mosqito>=1.0",
+]
+build = [
+    "pyinstaller>=6.0",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1",
+]
+all = [
+    "sasa[video,loudness,build,dev]",
+]
+
+[project.scripts]
+sasa = "main:cli_main"
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "calibration",
+    "weighting",
+    "shot_detect",
+    "bands",
+    "metrics",
+    "plots",
+    "STFT",
+    "WavLoader",
+    "WaveformPlot",
+    "SignalGenerator",
+    "ExtractAudio",
+    "FileSelector",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

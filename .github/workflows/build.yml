@@ -1,0 +1,100 @@
+name: Build SASA
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Generate app icons
+        run: python assets/generate_icon.py
+
+      - name: Build macOS app
+        run: pyinstaller sasa.spec --noconfirm --clean
+
+      - name: Package macOS app
+        run: |
+          cd dist
+          if [ -d "SASA.app" ]; then
+            zip -r -y ../SASA-macOS.zip SASA.app
+          else
+            zip -r ../SASA-macOS.zip SASA/
+          fi
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SASA-macOS
+          path: SASA-macOS.zip
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SASA-macOS.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Generate app icons
+        run: python assets/generate_icon.py
+
+      - name: Build Windows exe
+        run: pyinstaller sasa.spec --noconfirm --clean
+
+      - name: Package Windows exe
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\SASA.exe") {
+            Compress-Archive -Path "dist\SASA.exe" -DestinationPath "SASA-Windows.zip" -Force
+          } elseif (Test-Path "dist\SASA") {
+            Compress-Archive -Path "dist\SASA\*" -DestinationPath "SASA-Windows.zip" -Force
+          } else {
+            Write-Error "No build output found in dist\"
+            exit 1
+          }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SASA-Windows
+          path: SASA-Windows.zip
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SASA-Windows.zip

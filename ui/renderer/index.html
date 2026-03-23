@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SASA — Shot Acoustic Spectral Analysis</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <div class="app">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="14" width="3" height="8" rx="1" fill="currentColor" opacity="0.4"/>
+            <rect x="6" y="10" width="3" height="16" rx="1" fill="currentColor" opacity="0.55"/>
+            <rect x="10" y="6" width="3" height="24" rx="1" fill="currentColor" opacity="0.7"/>
+            <rect x="14" y="2" width="3" height="28" rx="1" fill="currentColor" opacity="0.85"/>
+            <rect x="18" y="4" width="3" height="24" rx="1" fill="currentColor" opacity="0.9"/>
+            <rect x="22" y="8" width="3" height="16" rx="1" fill="currentColor" opacity="0.7"/>
+            <rect x="26" y="12" width="3" height="8" rx="1" fill="currentColor" opacity="0.5"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">SASA</span>
+          <span class="brand-sub">Shot Acoustic Spectral Analysis</span>
+        </div>
+      </div>
+
+      <div class="sidebar-nav">
+        <button class="nav-item active" data-view="analyze">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd"/></svg>
+          <span>New Analysis</span>
+        </button>
+        <button class="nav-item" data-view="results">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 2A1.5 1.5 0 0014 3.5v13a1.5 1.5 0 001.5 1.5h1a1.5 1.5 0 001.5-1.5v-13A1.5 1.5 0 0016.5 2h-1zM9.5 6A1.5 1.5 0 008 7.5v9A1.5 1.5 0 009.5 18h1a1.5 1.5 0 001.5-1.5v-9A1.5 1.5 0 0010.5 6h-1zM3.5 10A1.5 1.5 0 002 11.5v5A1.5 1.5 0 003.5 18h1A1.5 1.5 0 006 16.5v-5A1.5 1.5 0 004.5 10h-1z"/></svg>
+          <span>Results</span>
+        </button>
+        <button class="nav-item" data-view="history">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-13a.75.75 0 00-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 000-1.5h-3.25V5z" clip-rule="evenodd"/></svg>
+          <span>History</span>
+        </button>
+      </div>
+
+      <div class="sidebar-footer">
+        <span class="version-tag">v1.0</span>
+        <span class="footer-brand">Ridgeback Defense</span>
+      </div>
+    </nav>
+
+    <!-- Content Area -->
+    <main class="content">
+
+      <!-- ═══ ANALYZE VIEW ═══ -->
+      <section class="view active" id="view-analyze">
+        <div class="view-header">
+          <h1>New Analysis</h1>
+          <p class="view-subtitle">Configure and run acoustic analysis on a firearm recording</p>
+        </div>
+
+        <div class="analyze-grid">
+          <!-- File Selection Card -->
+          <div class="card file-card">
+            <div class="card-header">
+              <h2>Input File</h2>
+            </div>
+            <div class="card-body">
+              <div class="file-drop" id="file-drop">
+                <input type="file" id="file-input" accept=".wav,.flac,.aiff,.aif,.mp4,.mkv,.mov,.avi,.mts,.mxf" />
+                <div class="file-drop-icon">
+                  <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M24 32V16m0 0l-6 6m6-6l6 6"/>
+                    <path d="M8 32v4a4 4 0 004 4h24a4 4 0 004-4v-4"/>
+                  </svg>
+                </div>
+                <p class="file-drop-text">Drop a file here or click to browse</p>
+                <p class="file-drop-hint">WAV, FLAC, MP4, MOV, MKV, AVI</p>
+              </div>
+              <div class="file-selected hidden" id="file-selected">
+                <div class="file-info">
+                  <svg viewBox="0 0 20 20" fill="currentColor" class="file-icon"><path d="M3 3.5A1.5 1.5 0 014.5 2h6.879a1.5 1.5 0 011.06.44l4.122 4.12A1.5 1.5 0 0117 7.622V16.5a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 013 16.5v-13z"/></svg>
+                  <div>
+                    <p class="file-name" id="file-name"></p>
+                    <p class="file-path" id="file-path"></p>
+                  </div>
+                </div>
+                <button class="btn-icon" id="file-clear" title="Clear selection">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"/></svg>
+                </button>
+              </div>
+              <div class="path-input-section">
+                <div class="path-divider"><span>or enter file path</span></div>
+                <div class="path-row">
+                  <input type="text" id="file-path-input" class="form-input" placeholder="/path/to/recording.wav" />
+                  <button class="btn-secondary btn-sm" id="btn-set-path">Set</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Calibration Card -->
+          <div class="card">
+            <div class="card-header">
+              <h2>Calibration</h2>
+              <span class="card-badge">IEC 61672-1</span>
+            </div>
+            <div class="card-body">
+              <div class="form-group">
+                <label for="cal-mode">Calibration Method</label>
+                <select id="cal-mode" class="form-select">
+                  <option value="default">Default (143.96 Pa/FS)</option>
+                  <option value="direct">Direct Pa/FS</option>
+                  <option value="sensitivity">Microphone Sensitivity</option>
+                </select>
+              </div>
+              <div class="cal-fields hidden" id="cal-direct">
+                <div class="form-group">
+                  <label for="pa-per-fs">Pa per Full Scale</label>
+                  <input type="number" id="pa-per-fs" class="form-input" value="143.96" step="0.01" />
+                </div>
+              </div>
+              <div class="cal-fields hidden" id="cal-sensitivity">
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="sensitivity-mv">Sensitivity (mV/Pa)</label>
+                    <input type="number" id="sensitivity-mv" class="form-input" placeholder="e.g. 10" step="0.1" />
+                  </div>
+                  <div class="form-group">
+                    <label for="v-per-fs">V per Full Scale</label>
+                    <input type="number" id="v-per-fs" class="form-input" placeholder="e.g. 1.0" step="0.1" />
+                  </div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="cal-desc">Description (optional)</label>
+                <input type="text" id="cal-desc" class="form-input" placeholder="e.g. B&amp;K 4189 + Zoom F6" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Detection Settings Card -->
+          <div class="card">
+            <div class="card-header">
+              <h2>Shot Detection</h2>
+            </div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="threshold-db">Threshold (dB SPL)</label>
+                  <input type="number" id="threshold-db" class="form-input" value="120" step="1" />
+                  <span class="form-hint">Typical: 100-130</span>
+                </div>
+                <div class="form-group">
+                  <label for="refractory-ms">Refractory (ms)</label>
+                  <input type="number" id="refractory-ms" class="form-input" value="200" step="10" />
+                  <span class="form-hint">Min gap between shots</span>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="pre-ms">Pre-shot (ms)</label>
+                  <input type="number" id="pre-ms" class="form-input" value="50" step="5" />
+                </div>
+                <div class="form-group">
+                  <label for="post-ms">Post-shot (ms)</label>
+                  <input type="number" id="post-ms" class="form-input" value="200" step="10" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- STFT & Output Card -->
+          <div class="card">
+            <div class="card-header">
+              <h2>Analysis Options</h2>
+            </div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="nperseg">FFT Window Size</label>
+                  <select id="nperseg" class="form-select">
+                    <option value="512">512</option>
+                    <option value="1024">1024</option>
+                    <option value="2048" selected>2048</option>
+                    <option value="4096">4096</option>
+                    <option value="8192">8192</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="formats">Plot Format</label>
+                  <select id="formats" class="form-select">
+                    <option value="png">PNG</option>
+                    <option value="png,pdf">PNG + PDF</option>
+                    <option value="png,svg">PNG + SVG</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row checkbox-row">
+                <label class="form-checkbox">
+                  <input type="checkbox" id="compute-bands" checked />
+                  <span>1/3-Octave Band Analysis</span>
+                </label>
+                <label class="form-checkbox">
+                  <input type="checkbox" id="per-shot-plots" checked />
+                  <span>Per-Shot Summary Plots</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Run Button -->
+        <div class="run-section">
+          <button class="btn-run" id="btn-run" disabled>
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M6.3 2.84A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.27l9.344-5.891a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
+            <span>Run Analysis</span>
+          </button>
+        </div>
+
+        <!-- Progress Section -->
+        <div class="progress-section hidden" id="progress-section">
+          <div class="card">
+            <div class="card-header">
+              <h2>Analysis Progress</h2>
+              <span class="progress-pct" id="progress-pct">0%</span>
+            </div>
+            <div class="card-body">
+              <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+              </div>
+              <div class="log-container" id="log-container">
+                <pre class="log-output" id="log-output"></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ RESULTS VIEW ═══ -->
+      <section class="view" id="view-results">
+        <div class="view-header">
+          <h1>Analysis Results</h1>
+          <p class="view-subtitle" id="results-subtitle">No analysis loaded</p>
+        </div>
+
+        <div class="results-empty" id="results-empty">
+          <div class="empty-icon">
+            <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 8h32v32H8z" rx="4"/>
+              <path d="M16 28l4-8 4 6 4-4 6 10"/>
+            </svg>
+          </div>
+          <p>Run an analysis to view results here</p>
+        </div>
+
+        <div class="results-loaded hidden" id="results-loaded">
+          <!-- Metrics Cards Row -->
+          <div class="metrics-row" id="metrics-row"></div>
+
+          <!-- Tabs -->
+          <div class="results-tabs">
+            <button class="tab-btn active" data-tab="overview">Overview</button>
+            <button class="tab-btn" data-tab="spectrogram-z">Spectrogram (Z)</button>
+            <button class="tab-btn" data-tab="spectrogram-c">Spectrogram (C)</button>
+            <button class="tab-btn" data-tab="bands">1/3-Octave Bands</button>
+            <button class="tab-btn" data-tab="shots">Per-Shot Details</button>
+            <button class="tab-btn" data-tab="table">Metrics Table</button>
+          </div>
+
+          <!-- Tab Panels -->
+          <div class="tab-panel active" id="tab-overview">
+            <div class="plot-viewer" id="plot-waveform"></div>
+          </div>
+          <div class="tab-panel" id="tab-spectrogram-z">
+            <div class="plot-viewer" id="plot-spectrogram-z"></div>
+          </div>
+          <div class="tab-panel" id="tab-spectrogram-c">
+            <div class="plot-viewer" id="plot-spectrogram-c"></div>
+          </div>
+          <div class="tab-panel" id="tab-bands">
+            <div class="plot-viewer" id="plot-bands"></div>
+          </div>
+          <div class="tab-panel" id="tab-shots">
+            <!-- Shot navigator -->
+            <div class="shot-nav" id="shot-nav">
+              <button class="btn-icon shot-prev" id="shot-prev" title="Previous shot">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd"/></svg>
+              </button>
+              <div class="shot-selector" id="shot-selector"></div>
+              <button class="btn-icon shot-next" id="shot-next" title="Next shot">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>
+              </button>
+            </div>
+            <!-- Shot detail metrics -->
+            <div class="shot-metrics-row" id="shot-metrics-row"></div>
+            <!-- Shot band chart (built in-browser) -->
+            <div class="shot-chart-container">
+              <canvas id="shot-band-canvas" width="900" height="280"></canvas>
+            </div>
+            <!-- Shot summary image -->
+            <div class="plot-viewer" id="plot-shot-detail"></div>
+          </div>
+          <div class="tab-panel" id="tab-table">
+            <div class="table-container" id="metrics-table"></div>
+          </div>
+
+          <!-- Actions -->
+          <div class="results-actions">
+            <button class="btn-secondary" id="btn-copy-path">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z"/><path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.44A1.5 1.5 0 008.378 6H4.5z"/></svg>
+              <span>Copy Output Path</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ HISTORY VIEW ═══ -->
+      <section class="view" id="view-history">
+        <div class="view-header">
+          <h1>Analysis History</h1>
+          <p class="view-subtitle">Previously completed analyses</p>
+        </div>
+        <div class="history-list" id="history-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

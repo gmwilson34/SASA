@@ -1,0 +1,15 @@
+# Core dependencies
+numpy>=1.24
+scipy>=1.10
+soundfile>=0.12
+matplotlib>=3.7
+plotly>=5.15
+
+# Video file support (extracts audio from .mov, .mp4, etc.)
+imageio-ffmpeg>=0.5
+
+# Optional: Loudness analysis (ISO 532-1)
+# mosqito>=1.0
+
+# Optional: App packaging
+# pyinstaller>=6.0
