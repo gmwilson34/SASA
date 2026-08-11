@@ -20,6 +20,7 @@ for the codesign/notarytool commands required before distributing SASA.app.
 
 import os
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -39,24 +40,37 @@ ICON_ICO = os.path.join(PROJECT_ROOT, 'assets', 'sasa.ico')
 # resolves the Python sources via _find_source_dir(); both look in _MEIPASS and,
 # on macOS, in Contents/Resources. ui/server.js and ui/bridge are the Node
 # development server and are NOT needed by the frozen app.
+# The analysis modules are shipped as SOURCE next to the app because app.py
+# resolves and runs them from _find_source_dir() rather than importing them all
+# directly. That means PyInstaller's import analysis does NOT see them, so this
+# list is the only thing putting them in the bundle -- and a module missing from
+# it fails at runtime, not at build time.
+#
+# It is therefore derived from the filesystem rather than hand-maintained. The
+# previous hand-written list had gone stale: report.py, provenance.py and
+# ahaah.py were all absent, and app.py imports report, so the frozen app would
+# have raised ModuleNotFoundError on first use.
+_MODULE_DIR = Path(SPECPATH)
+_EXCLUDED_MODULES = {'sasa.spec'}  # nothing generated or build-only
+
+_ANALYSIS_MODULES = sorted(
+    p.name for p in _MODULE_DIR.glob('*.py')
+    if p.name not in _EXCLUDED_MODULES and not p.name.startswith('_')
+)
+
 datas = [
     ('ui/renderer', 'ui/renderer'),
     ('LICENSE', '.'),
-    # Bundle all analysis Python modules alongside the app
-    ('main.py', '.'),
-    ('calibration.py', '.'),
-    ('weighting.py', '.'),
-    ('shot_detect.py', '.'),
-    ('bands.py', '.'),
-    ('metrics.py', '.'),
-    ('plots.py', '.'),
-    ('STFT.py', '.'),
-    ('WavLoader.py', '.'),
-    ('WaveformPlot.py', '.'),
-    ('SignalGenerator.py', '.'),
-    ('ExtractAudio.py', '.'),
-    ('FileSelector.py', '.'),
 ]
+datas += [(name, '.') for name in _ANALYSIS_MODULES]
+
+# Fail the BUILD rather than the running app if something the entry point needs
+# is not being shipped.
+for _required in ('main.py', 'app.py', 'report.py', 'provenance.py', 'ahaah.py',
+                  'metrics.py', 'calibration.py', 'weighting.py', 'bands.py',
+                  'shot_detect.py', 'STFT.py', 'plots.py'):
+    if _required not in _ANALYSIS_MODULES:
+        raise SystemExit(f'sasa.spec: {_required} is missing from the bundle')
 
 # plots.py calls fig.write_html() with the default include_plotlyjs=True, which
 # inlines plotly/package_data/plotly.min.js. Without this data the interactive
