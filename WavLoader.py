@@ -53,6 +53,7 @@ def load_wav_chunk(
     *,
     dtype: str = "float32",
     mono: bool = True,
+    channel: int | None = None,
 ) -> tuple[np.ndarray, int]:
     """
     Load a chunk of WAV (for memory-efficient processing of long files).
@@ -62,15 +63,24 @@ def load_wav_chunk(
         start_frame: First frame index to read.
         n_frames: Number of frames to read.
         dtype: Sample dtype (e.g. 'float32').
-        mono: If True, average channels to mono.
+        mono: If True, average channels to mono. Ignored when channel is given.
+        channel: Zero-based channel index to extract. Averaging a multi-microphone
+                 measurement destroys it, so a single channel is selected rather
+                 than mixed whenever the caller names one.
 
     Returns:
         (samples_1d, sample_rate). samples_1d is shape (n_frames,) in range [-1, 1].
     """
     if not wav_path.exists():
         raise FileNotFoundError(f"WAV not found: {wav_path}")
-    total_frames, sr, _, _ = get_wav_info(wav_path)
-    stop_frame = min(start_frame + n_frames, total_frames)
+    total_frames, sr, _, n_channels = get_wav_info(wav_path)
+    if channel is not None and not (0 <= channel < n_channels):
+        raise ValueError(
+            f"channel {channel} is out of range for {wav_path.name}, "
+            f"which has {n_channels} channel(s) (0-{n_channels - 1})"
+        )
+    start_frame = max(0, int(start_frame))
+    stop_frame = min(start_frame + int(n_frames), total_frames)
     if stop_frame <= start_frame:
         return (np.array([], dtype=dtype), sr)
     data, sr = sf.read(
@@ -81,7 +91,9 @@ def load_wav_chunk(
         stop=stop_frame,
     )
     data = np.asarray(data)
-    if mono and data.ndim > 1:
+    if channel is not None:
+        data = data[:, channel]
+    elif mono and data.ndim > 1:
         data = data.mean(axis=1)
     elif data.ndim == 2 and data.shape[1] == 1:
         data = data.squeeze(axis=1)
@@ -93,6 +105,7 @@ def load_wav(
     *,
     dtype: str = "float32",
     mono: bool = False,
+    channel: int | None = None,
 ) -> WavData:
     """
     Read a WAV file and return samples + sample rate + time axis.
@@ -103,6 +116,10 @@ def load_wav(
 
     mono:
       - If True and audio is multichannel, average channels to mono.
+
+    channel:
+      - Zero-based channel index to extract. Takes precedence over mono, because
+        averaging microphones that are not co-located is not a measurement.
     """
     if not wav_path.exists():
         raise FileNotFoundError(f"WAV not found: {wav_path}")
@@ -111,6 +128,16 @@ def load_wav(
 
     # Ensure numpy array (soundfile already returns one, but be explicit)
     data = np.asarray(data)
+
+    if channel is not None:
+        if not (0 <= channel < data.shape[1]):
+            raise ValueError(
+                f"channel {channel} is out of range for {wav_path.name}, "
+                f"which has {data.shape[1]} channel(s) (0-{data.shape[1] - 1})"
+            )
+        picked = data[:, channel]
+        time_s = np.arange(picked.shape[0], dtype=np.float64) / float(sr)
+        return WavData(path=wav_path, sample_rate=sr, samples=picked, time_s=time_s)
 
     if mono:
         # Average channels -> shape (frames,)

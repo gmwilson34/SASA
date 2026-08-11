@@ -321,6 +321,50 @@ def test_summary_reports_interval_and_cyclic_rate():
     assert summary["cyclic_rate_rpm"] == pytest.approx(500.0, rel=0.03)
 
 
+def test_noise_only_recording_detects_nothing():
+    """
+    CRITICAL REGRESSION.
+
+    The default threshold is RELATIVE to the recording's own peak, so on a file
+    containing no gunfire it simply selects the loudest thing present. The peak of
+    n Gaussian samples sits about sqrt(2*ln(n)) sigma above the RMS - roughly
+    4.8 sigma, or 13 dB, for a second at 96 kHz. With the old 6 dB SNR gate that
+    passed, and a recording of pure noise produced one confident "shot" with a full
+    metrics record and measurement_valid: true.
+
+    Real muzzle blast clears its noise floor by 30-60 dB, so nothing legitimate is
+    lost by requiring substantially more than a noise peak can supply.
+    """
+    rng = np.random.default_rng(0)
+    noise = rng.normal(0.0, 1e-5, int(FS * 1.0))
+
+    report: list[DetectionReport] = []
+    shots = detect_shots(noise, FS, report=report)
+
+    assert shots == [], f"noise produced {len(shots)} spurious shot(s)"
+    assert report[0].n_detected == 0
+
+    # Two paths reach the same correct outcome: the SNR floor can lift the threshold
+    # above anything the noise reaches, or a candidate can clear the threshold and
+    # then be rejected for insufficient impulsiveness. Either way the report must
+    # SAY why nothing was found rather than presenting an empty result bare.
+    explanation = " ".join(report[0].warnings)
+    assert (
+        "No events found above the detection threshold" in explanation
+        or "no gunfire" in explanation
+    ), f"absence was not explained: {report[0].warnings}"
+
+
+def test_genuine_shots_clear_the_snr_gate_by_a_wide_margin():
+    """The gate must not cost real detections; blast SNR should be far above it."""
+    times = [0.30, 0.60, 0.90, 1.20, 1.50]
+    x = make_shot_train(FS, times, duration=2.0, amplitude=0.3, noise_rms=1e-4)
+
+    shots = detect_shots(x, FS)
+    assert len(shots) == len(times)
+    assert min(s.snr_dB for s in shots) > 30.0
+
+
 def test_summary_of_no_shots_is_empty_not_zero():
     """
     An empty result must not be reported as a measurement of zero - a 0.0 dB

@@ -404,7 +404,7 @@ def detect_shots(
     refractory_ms: float = DEFAULT_REFRACTORY_MS,
     envelope_window_ms: float = 1.0,
     envelope_hop_ms: float = 0.25,
-    min_snr_dB: float = 6.0,
+    min_snr_dB: float = 15.0,
     bandpass: bool = True,
     min_shots: int = 0,
     max_shots: int = 1000,
@@ -564,10 +564,28 @@ def detect_shots(
         accepted = accepted[:max_shots]
 
     # ---- Build events ----
+    #
+    # Every candidate must clear the SNR gate to become a shot. A RELATIVE threshold
+    # is defined against the recording's own peak, so on a recording that contains no
+    # gunfire at all it simply selects the loudest thing present - and a Gaussian
+    # noise peak sits roughly 4.8 sigma above the RMS, which is about 13 dB. Without a
+    # meaningful gate a shot-free recording therefore yields a confident "shot" with a
+    # full metrics record. Real muzzle blast clears its noise floor by 30-60 dB, so a
+    # 15 dB gate rejects noise while remaining far below any genuine shot.
     shots: List[ShotEvent] = []
-    for i, approx_idx in enumerate(accepted):
+    n_rejected_snr = 0
+    rejected_peak_dB: List[float] = []
+
+    for approx_idx in accepted:
         refined = refine_peak_location(x, approx_idx, sample_rate)
         peak_Pa = float(abs(x[refined]))
+        peak_dB = float(amplitude_to_dB_SPL(peak_Pa))
+
+        snr = peak_dB - noise_floor_dB
+        if snr < min_snr_dB:
+            n_rejected_snr += 1
+            rejected_peak_dB.append(peak_dB)
+            continue
 
         win_start = refined - pre_samples
         win_end = refined + post_samples
@@ -579,23 +597,30 @@ def detect_shots(
             seg = np.asarray(samples_FS)[win_start:win_end]
             clipped = detect_clipping(seg)[1] > 0
 
-        local_noise = noise_floor_dB
-        snr = float(amplitude_to_dB_SPL(peak_Pa)) - local_noise
-
         shot = ShotEvent(
             index=refined,
             time_s=refined / sample_rate,
             peak_Pa=peak_Pa,
-            peak_dB=float(amplitude_to_dB_SPL(peak_Pa)),
+            peak_dB=peak_dB,
             window_start=win_start,
             window_end=win_end,
-            shot_number=i + 1,
+            shot_number=len(shots) + 1,
             truncated=truncated,
             clipped=clipped,
             snr_dB=snr,
             arrivals=find_arrivals(x[win_start:win_end], sample_rate),
         )
         shots.append(shot)
+
+    if n_rejected_snr:
+        loudest = max(rejected_peak_dB) if rejected_peak_dB else float("-inf")
+        warnings.append(
+            f"{n_rejected_snr} candidate event(s) were rejected for insufficient "
+            f"impulsiveness: the loudest reached {loudest:.1f} dB, only "
+            f"{loudest - noise_floor_dB:.1f} dB above the noise floor "
+            f"({noise_floor_dB:.1f} dB), against a {min_snr_dB:.0f} dB requirement. "
+            f"This usually means the recording contains no gunfire."
+        )
 
     n_multi = sum(1 for s in shots if s.has_multiple_arrivals)
     if n_multi:
