@@ -21,8 +21,13 @@ env/
 *~
 .DS_Store
 
-# PyInstaller
+# PyInstaller / build outputs
 *.spec.bak
+SASA.exe
+SASA.app/
+*.dmg
+*.pkg
+*.msi
 
 # Analysis output (generated at runtime)
 analysis/
