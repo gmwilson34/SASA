@@ -152,6 +152,7 @@ body {
 
 .unit {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
   font-size: var(--text-xs);
   color: var(--text-3);
   white-space: nowrap;
@@ -280,7 +281,13 @@ hr.rule {
   margin-left: auto;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-3);
+  /* Must be allowed to wrap: at a narrow width (200 % zoom, or a small
+     window) an unwrapped row pushed the Help button past the viewport, where
+     body{overflow-x:hidden} then clipped it out of reach entirely. */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* Shell ---------------------------------------------------------------- */
@@ -455,6 +462,7 @@ hr.rule {
   border: 1px solid var(--accent-border);
   color: var(--accent);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   font-weight: var(--weight-bold);
   align-self: center;
@@ -525,6 +533,19 @@ hr.rule {
      horizontal scroll, so it is dropped rather than half-shown. */
   .sidebar-footer { display: none; }
   html { --gutter: var(--space-3); }
+
+  /* The header stops being a fixed-height single row and grows instead, so
+     every control in it stays on screen and reachable rather than being
+     clipped by the viewport's hidden horizontal overflow. */
+  .app-header {
+    height: auto;
+    min-height: var(--header-h);
+    flex-wrap: wrap;
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
+  }
+
+  .app-header-actions { width: 100%; margin-left: 0; }
 }
 
 
@@ -914,6 +935,7 @@ hr.rule {
   background: var(--bg-sunken);
   color: var(--text-2);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -1233,6 +1255,7 @@ hr.rule {
 
 .file-chip-meta {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   color: var(--text-3);
   overflow: hidden;
@@ -1298,6 +1321,7 @@ hr.rule {
   background: var(--bg-sunken);
   color: var(--text-2);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-2xs);
   letter-spacing: var(--tracking-wide);
   white-space: nowrap;
@@ -1395,6 +1419,7 @@ hr.rule {
 
 .metric-tile-unit {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   color: var(--text-3);
@@ -1514,6 +1539,7 @@ hr.rule {
 .data-table thead th .th-unit {
   display: block;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-2xs);
   font-weight: var(--weight-normal);
   letter-spacing: 0;
@@ -1855,6 +1881,7 @@ hr.rule {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
   color: var(--text-2);
@@ -1875,15 +1902,22 @@ hr.rule {
 
 .toast-region {
   position: fixed;
+  /* Pinned on BOTH edges rather than sized from 100vw: 100vw includes the
+     scrollbar gutter, so the old width overhung the viewport on the right and
+     the dismiss button was clipped. */
+  left: var(--space-5);
   right: var(--space-5);
   bottom: var(--space-5);
   z-index: 60;
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: var(--space-2);
-  width: min(24rem, calc(100vw - var(--space-8)));
+  width: auto;
   pointer-events: none;
 }
+
+.toast-region > * { width: 100%; max-width: 24rem; }
 
 .toast {
   pointer-events: auto;
@@ -2299,6 +2333,7 @@ hr.rule {
 
 .history-item-sub {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   color: var(--text-3);
   overflow: hidden;
@@ -2353,8 +2388,15 @@ hr.rule {
     --bg-inset: #FFFFFF;
     --plot-bg: #FFFFFF;
 
-    --border: #C8D1DE;
-    --border-subtle: #E1E7EF;
+    /* Shifted one step DARKER than on screen. On screen a rule sits against a
+       tinted canvas and a card shadow; on paper every fill is white and the
+       shadows are gone, so the screen values (#C8D1DE = 1.54:1 and
+       #E1E7EF = 1.24:1 on white) print as almost nothing and the table loses
+       its row separation. Reusing the next darker value already defined in the
+       light theme puts every printed rule at >= 1.54:1, with the structural
+       ones (card, table head, section rules) at 3.64:1. No new colour. */
+    --border: #7C8798;         /* was #C8D1DE — 3.64:1 on white */
+    --border-subtle: #C8D1DE;  /* was #E1E7EF — 1.54:1 on white */
     --border-input: #7C8798;
 
     --text: #0F141A;
@@ -2477,6 +2519,22 @@ hr.rule {
   .data-table tr { break-inside: avoid; page-break-inside: avoid; }
   .data-table tbody tr:nth-child(even) { background: var(--bg-surface); }
   .data-table tbody tr[data-rejected="true"] td { text-decoration: line-through; }
+
+  /* Zebra striping is gone on paper (every fill is white), so the row rule is
+     the only thing separating one measurement from the next. Print it at the
+     structural weight, not the hairline one. */
+  .data-table td,
+  .data-table th[scope="row"] { border-bottom: 1px solid var(--border); }
+
+  /* Series swatches are BACKGROUNDS, and browsers drop backgrounds when
+     "background graphics" is off — which is the default. Without this the
+     figure legend prints as a row of empty boxes and the reader cannot tell
+     which trace is which. */
+  .legend-swatch {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    border: 1px solid var(--text);
+  }
 
   .figure-canvas { overflow: visible; padding: 0; }
   .figure-canvas img { max-width: 100%; }

@@ -186,12 +186,28 @@ const HOME_DIR = os.homedir();
 
 /**
  * Strip machine-identifying absolute paths out of anything sent to the client.
- * Backend paths become "./…" and any other path under the user's home becomes
- * "~/…", so a Python traceback stays useful without disclosing the filesystem.
+ * The configured data roots become named placeholders, backend paths become
+ * "./…" and any other path under the user's home becomes "~/…", so a Python
+ * traceback stays useful without disclosing the filesystem.
+ *
+ * Longest prefix first: UPLOAD_DIR and ANALYSIS_DIR normally sit inside
+ * AUDIO_DIR, which normally sits inside PYTHON_DIR, and the most specific
+ * substitution has to win. Without this, pointing SASA_AUDIO_DIR outside the
+ * program directory puts full absolute paths back into every log line.
  */
+const REDACTIONS = [
+  [UPLOAD_DIR, '<uploads>'],
+  [ANALYSIS_DIR, '<analyses>'],
+  [AUDIO_DIR, '<audio>'],
+  [PYTHON_DIR, '.'],
+]
+  .filter(([dir]) => typeof dir === 'string' && dir.length > 1 && dir !== '/')
+  .sort((a, b) => b[0].length - a[0].length);
+
 function redact(text) {
   if (typeof text !== 'string' || text.length === 0) return text;
-  let out = text.split(PYTHON_DIR).join('.');
+  let out = text;
+  for (const [dir, label] of REDACTIONS) out = out.split(dir).join(label);
   if (HOME_DIR && HOME_DIR !== '/') out = out.split(HOME_DIR).join('~');
   return out;
 }
@@ -257,6 +273,23 @@ function resolveResultsDir(raw) {
   return dir;
 }
 
+/**
+ * Resolve a fixed, code-chosen file name inside an already-validated analysis
+ * directory, and prove it is still inside a root once symlinks are followed.
+ * Without this a symlink dropped into an analysis directory turns a plain read
+ * (analysis_metadata.json, metrics_summary.csv) into an arbitrary-file read.
+ */
+function resolveInside(dir, name) {
+  const resolved = resolveWithinRoots(path.join(dir, name), READ_ROOTS, { mustExist: true });
+  return resolved && isFile(resolved) ? resolved : null;
+}
+
+/** Same, for a subdirectory. */
+function resolveDirInside(dir, name) {
+  const resolved = resolveWithinRoots(path.join(dir, name), READ_ROOTS, { mustExist: true });
+  return resolved && isDirectory(resolved) ? resolved : null;
+}
+
 /** Resolve <dir>/[sub/]<file> and prove the result is still inside a root. */
 function resolveArtifact(dir, sub, file) {
   const safeFile = safeSegment(file);
@@ -279,6 +312,17 @@ app.disable('x-powered-by');
 
 const ALLOWED_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]', HOST, `[${HOST}]`]);
 
+/**
+ * The port a URL or Host header actually addresses. An omitted port is the
+ * scheme's default, NOT "any port": http://localhost is port 80, which is a
+ * different origin from this server and must not be trusted just because the
+ * hostname matches.
+ */
+function effectivePort(port, protocol) {
+  if (port !== '') return port;
+  return protocol === 'https:' ? '443' : '80';
+}
+
 /** Host header check — the real defence against DNS rebinding on loopback. */
 function isAllowedHost(hostHeader) {
   if (typeof hostHeader !== 'string' || hostHeader.length === 0 || hostHeader.length > 255) return false;
@@ -296,7 +340,8 @@ function isAllowedHost(hostHeader) {
       hostname = hostname.slice(0, colon);
     }
   }
-  if (port !== '' && port !== String(PORT)) return false;
+  // This server always speaks cleartext HTTP, so a Host without a port means 80.
+  if (effectivePort(port, 'http:') !== String(PORT)) return false;
   return ALLOWED_HOSTNAMES.has(hostname.toLowerCase());
 }
 
@@ -307,7 +352,9 @@ function isAllowedOrigin(origin) {
   let url;
   try { url = new URL(origin); } catch { return false; }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
-  if (url.port !== '' && url.port !== String(PORT)) return false;
+  // Port must match exactly. Anything else — including another local service on
+  // port 80 or 443 — is a different origin and gets no access to this API.
+  if (effectivePort(url.port, url.protocol) !== String(PORT)) return false;
   return ALLOWED_HOSTNAMES.has(url.hostname.toLowerCase());
 }
 
@@ -450,7 +497,9 @@ app.get('/api/analyses', (req, res) => {
       .filter(d => d.isDirectory())               // isDirectory() is false for symlinks
       .map(d => {
         const dir = path.join(ANALYSIS_DIR, d.name);
-        const meta = readJsonFile(path.join(dir, 'analysis_metadata.json'), MAX_METADATA_BYTES);
+        // Re-checked after symlink resolution, exactly like every other read.
+        const metaPath = resolveInside(dir, 'analysis_metadata.json');
+        const meta = metaPath ? readJsonFile(metaPath, MAX_METADATA_BYTES) : null;
         return { id: d.name, name: d.name, path: dir, meta };
       })
       .filter(d => d.meta)
@@ -479,7 +528,8 @@ app.get('/api/results', (req, res) => {
   if (!outputDir) return sendError(res, 404, 'unknown-analysis', 'That analysis could not be found.');
 
   try {
-    const metadata = readJsonFile(path.join(outputDir, 'analysis_metadata.json'), MAX_METADATA_BYTES);
+    const metadataPath = resolveInside(outputDir, 'analysis_metadata.json');
+    const metadata = metadataPath ? readJsonFile(metadataPath, MAX_METADATA_BYTES) : null;
     if (!metadata) {
       return sendError(res, 404, 'no-metadata', 'That directory does not contain a completed analysis.');
     }
@@ -495,10 +545,11 @@ app.get('/api/results', (req, res) => {
       images[key][ext.slice(1)] = entry.name;
     }
 
-    // Per-shot images
+    // Per-shot images. The subdirectory is re-checked after symlink resolution:
+    // a "shots" symlink must not turn this into a directory listing of anywhere.
     const shotImages = [];
-    const shotsDir = path.join(outputDir, 'shots');
-    if (isDirectory(shotsDir)) {
+    const shotsDir = resolveDirInside(outputDir, 'shots');
+    if (shotsDir) {
       for (const entry of fs.readdirSync(shotsDir, { withFileTypes: true })) {
         if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.png') {
           shotImages.push(entry.name);
@@ -510,8 +561,8 @@ app.get('/api/results', (req, res) => {
     // CSV, if it is small enough to hand over inline
     let csv = null;
     let csvTruncated = false;
-    const csvPath = path.join(outputDir, 'metrics_summary.csv');
-    if (isFile(csvPath)) {
+    const csvPath = resolveInside(outputDir, 'metrics_summary.csv');
+    if (csvPath) {
       if (fs.statSync(csvPath).size <= MAX_CSV_BYTES) {
         csv = fs.readFileSync(csvPath, 'utf-8');
       } else {
@@ -690,7 +741,16 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'run-analysis':
-        return void startAnalysis(ws, session, msg.config, requestId);
+        // A rejection here would otherwise be an unhandled rejection (fatal on
+        // modern Node) AND would leave the client waiting on a run that will
+        // never report. Every failure has to come back as a message.
+        return void startAnalysis(ws, session, msg.config, requestId).catch((err) => {
+          console.error(`  ! run-analysis failed unexpectedly: ${err && err.stack ? err.stack : err}`);
+          session.bridge = null;
+          session.requestId = null;
+          session.inputPath = null;
+          sendFailure(ws, requestId, 'internal-error', 'The analysis could not be started.');
+        });
       case 'cancel':
         return cancelAnalysis(ws, session, requestId);
       case 'ping':

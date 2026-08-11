@@ -1220,7 +1220,9 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-stop"/></svg>
                   Cancel
                 </button>
-                <span class="row-end unit" id="run-hint">Analysis runs locally; nothing leaves this machine.</span>
+                <!-- Prose, not a unit: .unit is nowrap and clipped this sentence at
+                     narrow widths / high zoom. .field-hint wraps. -->
+                <span class="row-end field-hint" id="run-hint">Analysis runs locally; nothing leaves this machine.</span>
               </div>
             </div>
           </div>

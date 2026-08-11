@@ -780,7 +780,18 @@ class PythonBridge extends EventEmitter {
 
         // 2 (no shots) and 3 (inadmissible) are verdicts about the recording,
         // not backend failures, so they carry their output directory along.
-        const known = signal ? null : EXIT_CODES[code];
+        //
+        // A verdict is only trustworthy if the backend actually got as far as
+        // analysing: main.py announces its output directory before it reads the
+        // file, so a run that announced nothing never measured anything. This
+        // matters because argparse ALSO exits 2 on a usage error — without this
+        // check, a malformed command line is reported to the operator as the
+        // measurement verdict "no shots were detected", which is a lie about a
+        // recording that was never opened.
+        const announced = outputDirs.length > 0;
+        const known = (signal || (!announced && (code === 2 || code === 3)))
+          ? null
+          : EXIT_CODES[code];
         const how = signal ? `terminated by ${signal}` : `exit code ${code}`;
         reject(new AnalysisError(
           known ? known.message : `Analysis failed (${how}).`,

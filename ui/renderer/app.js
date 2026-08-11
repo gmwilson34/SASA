@@ -575,7 +575,7 @@ const state = {
   /** Calibration is an explicit choice. There is deliberately no default. */
   calibration: {
     method: '',            // '' | tone | chain | profile | none
-    tone: { name: null, path: null, size: null, uploading: false },
+    tone: { name: null, path: null, size: null, uploading: false, error: null },
     derivedPaPerFS: null,  // filled from a completed tone run
     derivedResidual: null,
     profileId: '',
@@ -634,17 +634,33 @@ const state = {
 
 let dirty = false;
 let frame = null;
+let frameTimer = null;
 
-/** Mark the app dirty; render() runs once per frame however many times we ask. */
+/**
+ * Mark the app dirty; render() runs once however many times we ask within a
+ * frame.
+ *
+ * requestAnimationFrame alone is NOT enough: a browser stops servicing it in a
+ * background tab, and an operator watching a twenty-minute analysis will switch
+ * tabs. Without the timer fallback the interface silently freezes on whatever
+ * it last showed — which for a run in progress means it goes on claiming the
+ * analysis is running long after it has finished or failed. The two are raced
+ * and whichever fires first renders.
+ */
 function commit() {
   dirty = true;
-  if (frame !== null) return;
-  frame = requestAnimationFrame(() => {
-    frame = null;
+  if (frame !== null || frameTimer !== null) return;
+
+  const run = () => {
+    if (frame !== null) { cancelAnimationFrame(frame); frame = null; }
+    if (frameTimer !== null) { clearTimeout(frameTimer); frameTimer = null; }
     if (!dirty) return;
     dirty = false;
     try { render(); } catch (err) { console.error('render failed', err); }
-  });
+  };
+
+  frame = requestAnimationFrame(run);
+  frameTimer = setTimeout(run, 200);
 }
 
 /** The single place the DOM is derived from state. */
@@ -785,7 +801,13 @@ function closeDialog(dialog) {
   if (typeof dialog.close === 'function' && dialog.open) dialog.close();
   else dialog.removeAttribute('open');
   const opener = record && record.opener;
-  if (opener && document.contains(opener) && typeof opener.focus === 'function') opener.focus();
+  const usable = opener && opener !== document.body && document.contains(opener)
+    && typeof opener.focus === 'function';
+  // A dialog raised by an event rather than a click has no opener to go back
+  // to; dropping focus on <body> would strand a keyboard user at the top of the
+  // document, so the main region takes it instead.
+  if (usable) opener.focus();
+  else if ($('main')) $('main').focus({ preventScroll: true });
   dialogState.delete(dialog);
 }
 
@@ -1129,6 +1151,11 @@ function setFieldError(inputId, message) {
       const span = node.querySelector('span');
       setRaw(span || node, message);
       show(node, true);
+    } else {
+      // No .field wrapper to hang a message on. Marking the control without
+      // saying why is exactly the failure this function exists to prevent, so
+      // the reason goes somewhere the operator will see it.
+      toast({ title: 'Rejected', text: message, tone: 'danger' });
     }
   } else {
     state.fieldErrors.delete(inputId);
@@ -1270,16 +1297,16 @@ async function acceptRecording(file) {
 }
 
 async function acceptCalibratorTone(file) {
-  state.calibration.tone = { name: file.name, path: null, size: file.size, uploading: true };
+  state.calibration.tone = { name: file.name, path: null, size: file.size, uploading: true, error: null };
   commit();
   try {
     const result = await uploadFile(file);
     state.calibration.tone = {
       name: result.name || file.name, path: result.path,
-      size: result.size ?? file.size, uploading: false,
+      size: result.size ?? file.size, uploading: false, error: null,
     };
   } catch (err) {
-    state.calibration.tone = { name: null, path: null, size: null, uploading: false };
+    state.calibration.tone = { name: null, path: null, size: null, uploading: false, error: null };
     toast({ title: 'Calibrator upload failed', text: err.message, tone: 'danger' });
   }
   commit();
@@ -1454,8 +1481,13 @@ function renderCalibration() {
   show(toneChip, hasTone);
   show($('cal-tone-dropzone'), !hasTone);
   setText($('cal-tone-name'), state.calibration.tone.name);
-  setText($('cal-tone-meta'), state.calibration.tone.uploading
-    ? 'Uploading…' : fmtBytes(state.calibration.tone.size));
+  setText($('cal-tone-meta'), state.calibration.tone.error
+    ? state.calibration.tone.error
+    : (state.calibration.tone.uploading ? 'Uploading…' : fmtBytes(state.calibration.tone.size)));
+  if (state.calibration.tone.error && method === 'tone') {
+    setTone(pill, 'danger', 'i-error');
+    setRaw(text, 'Calibrator tone rejected');
+  }
 
   // Profile readout
   const profile = activeProfile();
@@ -1503,7 +1535,7 @@ function wireCalibration() {
 
   const clearTone = $('btn-cal-tone-clear');
   if (clearTone) clearTone.addEventListener('click', () => {
-    state.calibration.tone = { name: null, path: null, size: null, uploading: false };
+    state.calibration.tone = { name: null, path: null, size: null, uploading: false, error: null };
     const input = $('cal-tone-input');
     if (input) input.value = '';
     commit();
@@ -1726,11 +1758,13 @@ function runBlockers() {
   }
   if (state.input.uploading) blockers.push('The recording is still uploading.');
   else if (!state.input.path) blockers.push('Select a recording.');
+  else if (state.input.error) blockers.push(`Recording: ${state.input.error}`);
 
   const method = state.calibration.method;
   if (method === '') {
     blockers.push('Choose a calibration method — there is no default.');
   } else if (method === 'tone') {
+    if (state.calibration.tone.error) blockers.push(`Calibrator tone: ${state.calibration.tone.error}`);
     if (!state.calibration.tone.path) blockers.push('Add the calibrator tone recording.');
     const level = $('cal-tone-level');
     if (!level || level.value === '') blockers.push('State the calibrator level printed on its body.');
@@ -1800,7 +1834,7 @@ function renderBlockers() {
   setDisabled($('btn-cancel-run'), state.run.status === 'cancelling');
 
   setRaw($('run-hint'), busy
-    ? 'Cancelling stops the analysis and leaves no partial record.'
+    ? 'Cancelling stops the engine; whatever it had already written is partial and is not a result.'
     : 'Analysis runs locally; nothing leaves this machine.');
 }
 
@@ -2050,8 +2084,8 @@ async function offerReattach() {
     build: (body) => {
       addParagraph(body, state.run.error ? state.run.error.message : 'The connection dropped.');
       addParagraph(body,
-        'Nothing was written for this run. Reconnect and start it again, or dismiss this '
-        + 'and keep the settings for later.');
+        'Any output this run had already written is partial and must not be read as a result. '
+        + 'Reconnect and start it again, or dismiss this and keep the settings for later.');
     },
   });
   if (!again) return;
@@ -2099,6 +2133,15 @@ function classifyLogLine(line, stream) {
 /* ---- run lifecycle ------------------------------------------------------ */
 
 function startRun() {
+  // Re-entry guard. #btn-run is disabled while a run is in flight, but that is
+  // applied on the next animation frame; a second activation inside the same
+  // frame (or a programmatic call) must not throw away the requestId of a run
+  // that is still going, because every message about it would then be dropped
+  // as "not mine" and the interface would sit on "Starting…" for ever.
+  if (state.run.status === 'starting' || state.run.status === 'running' || state.run.status === 'cancelling') {
+    announce('An analysis is already running.');
+    return;
+  }
   const blockers = runBlockers();
   if (blockers.length > 0) {
     announce(`Cannot run: ${blockers[0]}`);
@@ -2213,7 +2256,7 @@ function handleServerMessage(message) {
       run.status = 'cancelled';
       run.finishedAt = Date.now();
       run.stage = 'Cancelled';
-      appendLog('The analysis was cancelled. Nothing was written.', 'warn');
+      appendLog('The analysis was cancelled. Anything the engine had already written is partial and must not be read as a result.', 'warn');
       commit();
       toast({ title: 'Analysis cancelled', tone: 'warn' });
       announce('Analysis cancelled');
@@ -2253,7 +2296,16 @@ function handleServerMessage(message) {
     }
 
     case 'error': {
-      if (!mine && message.requestId) break;
+      // An error carrying no requestId is a protocol-level complaint about a
+      // message, not a verdict on the running analysis. Reporting it as a run
+      // failure would tell the operator a healthy run had died while the engine
+      // carried on writing files behind the interface.
+      if (!message.requestId) {
+        appendLog(`Service error (${message.code || 'error'}): ${message.message || 'unspecified'}`, 'error');
+        toast({ title: 'The local service rejected a message', text: message.message || '', tone: 'warn' });
+        break;
+      }
+      if (!mine) break;
       const code = message.code || 'error';
       if (code === 'invalid-config') {
         applyServerFieldErrors(message.fields);
@@ -2273,6 +2325,23 @@ function handleServerMessage(message) {
         toast({ title: 'Not possible right now', text: message.message || code, tone: 'warn' });
         if (code === 'not-running' && run.status === 'cancelling') {
           run.status = 'idle';
+          commit();
+        }
+        // "busy" means this request was never accepted, so the run state that
+        // startRun() optimistically created describes nothing. Leaving it at
+        // "starting" would freeze the interface — the button stays disabled and
+        // no message will ever arrive under this requestId.
+        if (code === 'busy' && (run.status === 'starting' || run.status === 'running')) {
+          run.status = 'error';
+          run.finishedAt = Date.now();
+          run.error = {
+            code: 'busy',
+            message: message.message
+              || 'An analysis is already running on this connection. Wait for it to finish, or reconnect to stop it.',
+            stderr: null,
+            exitCode: null,
+          };
+          appendLog('The request was refused: an analysis is already running on this connection.', 'error');
           commit();
         }
         break;
@@ -2318,6 +2387,24 @@ function applyServerFieldErrors(fields) {
   let unmapped = 0;
   for (const entry of fields) {
     if (!entry || typeof entry.field !== 'string') continue;
+
+    /* The recording and the calibrator tone are not plain .field controls:
+       they have their own purpose-built error lines, driven from state. Routing
+       them through setFieldError would turn the control red and then let the
+       next render blank the message — colour with no explanation. */
+    if (entry.field === 'filePath') {
+      state.input.error = entry.message || 'The local service will not read that recording.';
+      appendLog(`Rejected: filePath — ${state.input.error}`, 'error');
+      commit();
+      continue;
+    }
+    if (entry.field === 'calibratorTone') {
+      state.calibration.tone.error = entry.message || 'The local service will not read that calibrator recording.';
+      appendLog(`Rejected: calibratorTone — ${state.calibration.tone.error}`, 'error');
+      commit();
+      continue;
+    }
+
     let target = CONFIG_TO_FIELD[entry.field];
     if (!target && entry.field.startsWith('metadata.')) {
       const key = entry.field.slice('metadata.'.length);
@@ -3138,7 +3225,13 @@ function selectShot(index, { focusStrip = false } = {}) {
   const shot = currentShot();
   if (shot) announce(`Shot ${shot.shot_number} of ${shots.length}`);
   if (focusStrip) {
-    const chip = qs(`.shot-chip[data-shot="${shot.shot_number}"]`, $('shot-strip'));
+    // shot_number comes out of a metadata file: escape it rather than letting
+    // an unexpected value throw a selector syntax error out of the renderer.
+    const strip = $('shot-strip');
+    const wanted = String(shot.shot_number);
+    const chip = strip
+      ? qsa('.shot-chip[data-shot]', strip).find(node => node.dataset.shot === wanted)
+      : null;
     if (chip) chip.focus();
   }
 }
@@ -3781,10 +3874,15 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-/** Every colour a chart uses, resolved from tokens.css for the CURRENT theme. */
+/**
+ * Every colour a chart uses, resolved from tokens.css for the CURRENT theme.
+ * There is deliberately no literal colour anywhere in this file: if a token
+ * does not resolve, the stylesheet has not loaded and the chart says so rather
+ * than inventing a value that would not follow the theme.
+ */
 function chartPalette() {
   return {
-    series: [1, 2, 3, 4, 5, 6].map(i => cssVar(`--series-${i}`) || '#888888'),
+    series: [1, 2, 3, 4, 5, 6].map(i => cssVar(`--series-${i}`)),
     text: cssVar('--text-2'),
     muted: cssVar('--text-3'),
     axis: cssVar('--border'),
@@ -3834,6 +3932,7 @@ function chartMessage(canvas, message) {
   if (!surface) return;
   const { ctx, width, height } = surface;
   const palette = chartPalette();
+  if (!palette.surface || !palette.muted) return;   // tokens unavailable
   ctx.fillStyle = palette.surface;
   ctx.fillRect(0, 0, width, height);
   ctx.fillStyle = palette.muted;
@@ -3864,8 +3963,14 @@ function drawBandedChart(canvas, spec) {
   const { ctx, width, height } = surface;
   const palette = chartPalette();
 
+  if (!palette.surface || !palette.axis) {
+    console.error('tokens.css did not resolve; the chart cannot be drawn in the current theme');
+    return;
+  }
+
   const frequencies = spec.frequencies || [];
-  const series = (spec.series || []).filter(s => Array.isArray(s.values) && s.values.length > 0);
+  const series = (spec.series || []).filter(s =>
+    Array.isArray(s.values) && s.values.length > 0 && Boolean(s.color));
   const values = series.flatMap(s => s.values).filter(isNum);
   if (frequencies.length === 0 || values.length === 0) {
     chartMessage(canvas, 'No band data for the included shots');
