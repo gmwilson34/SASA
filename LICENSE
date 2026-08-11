@@ -1,0 +1,31 @@
+SASA — Shot Acoustic Spectral Analysis
+PROPRIETARY SOFTWARE LICENSE
+
+Copyright (c) 2024-2026 Ridgeback Defense. All rights reserved.
+
+This software and its source code, documentation, and associated files
+(the "Software") are the confidential and proprietary property of
+Ridgeback Defense.
+
+No permission is granted to any person to use, copy, modify, merge,
+publish, distribute, sublicense, sell, or create derivative works of the
+Software, in whole or in part, in source or binary form, without the
+prior express written permission of Ridgeback Defense.
+
+Unauthorized copying, redistribution, reverse engineering, or disclosure
+of the Software by any means is strictly prohibited.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL RIDGEBACK DEFENSE BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+SASA reports acoustic measurements. It is not a certified sound level
+meter and its output must not be relied upon as the sole basis for
+hearing-conservation, occupational-exposure, or regulatory-compliance
+decisions.
+
+For licensing enquiries, contact Ridgeback Defense.

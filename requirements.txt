@@ -1,15 +1,31 @@
-# Core dependencies
+# SASA runtime dependencies.
+# Kept in sync with [project.dependencies] / [project.optional-dependencies]
+# in pyproject.toml. Prefer `pip install .` (or `pip install -e '.[all]'`);
+# this file exists for the build scripts and CI.
+#
+# Note: FileSelector.py uses tkinter, which ships with CPython and cannot be
+# pip-installed. On Linux install the distro package (e.g. python3-tk).
+
+# ── Core (always required) ──
 numpy>=1.24
-scipy>=1.10
+scipy>=1.10          # scipy.signal: hilbert, find_peaks, sosfilt, sosfiltfilt, resample_poly, bilinear_zpk
 soundfile>=0.12
 matplotlib>=3.7
-plotly>=5.15
+plotly>=5.15         # interactive *_full.html outputs
 
-# Video file support (extracts audio from .mov, .mp4, etc.)
-imageio-ffmpeg>=0.5
+# ── Video input — `pip install '.[video]'` ──
+# ExtractAudio.py needs BOTH: moviepy for the container/audio API and
+# imageio-ffmpeg for the bundled ffmpeg binary. Installing only one will fail.
+# moviepy>=2.0
+# imageio-ffmpeg>=0.5
 
-# Optional: Loudness analysis (ISO 532-1)
+# ── ISO 532-1 loudness — `pip install '.[loudness]'` ──
 # mosqito>=1.0
 
-# Optional: App packaging
+# ── Packaging — `pip install '.[build]'` ──
 # pyinstaller>=6.0
+# pillow>=10.0       # assets/generate_icon.py
+
+# ── Development — `pip install '.[dev]'` ──
+# pytest>=7.0
+# ruff>=0.1

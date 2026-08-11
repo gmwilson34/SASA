@@ -1,16 +1,91 @@
-name: Build SASA
+name: SASA CI & Build
 
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # ────────────────────────────────────────────────────────────
+  # Lint — single fast job, whole repo, ruff config lives in pyproject.toml
+  # ────────────────────────────────────────────────────────────
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Pinned: ruff's default rule set changes between minor releases, and an
+      # unpinned install would turn CI red on an unrelated upgrade.
+      - name: Install ruff
+        run: pip install 'ruff==0.16.2'
+
+      - name: ruff check
+        run: ruff check . --output-format=github
+
+  # ────────────────────────────────────────────────────────────
+  # Test — install the package, then run the suite
+  # ────────────────────────────────────────────────────────────
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1 python3-tk
+
+      - name: Install package + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Verify the package imports and the console script is wired
+        run: |
+          python -c "import main, calibration, weighting, bands, metrics, shot_detect, STFT; print('imports OK')"
+          sasa --help
+
+      # Unconditional: tests/ exists and is green (182 passing at time of
+      # writing), so a missing or empty suite is a failure, not a skip.
+      - name: Run tests
+        env:
+          MPLBACKEND: Agg
+        run: python -m pytest tests/ -q
+
+  # ────────────────────────────────────────────────────────────
+  # Binaries — only for tags and manual runs; unchanged behaviour
+  # ────────────────────────────────────────────────────────────
   build-macos:
+    name: Build macOS app
+    needs: [lint, test]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +99,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller pillow
+          pip install '.[video,build]'
 
       - name: Generate app icons
         run: python assets/generate_icon.py
@@ -41,6 +116,10 @@ jobs:
             zip -r ../SASA-macOS.zip SASA/
           fi
 
+      - name: Note signing status
+        run: |
+          echo "::warning title=Unsigned build::SASA-macOS.zip is NOT code-signed or notarized. Gatekeeper will block it on other Macs. See build_macos.sh for the codesign/notarytool commands."
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -54,6 +133,9 @@ jobs:
           files: SASA-macOS.zip
 
   build-windows:
+    name: Build Windows exe
+    needs: [lint, test]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +149,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller pillow
+          pip install ".[video,build]"
 
       - name: Generate app icons
         run: python assets/generate_icon.py

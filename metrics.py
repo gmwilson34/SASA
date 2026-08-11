@@ -411,16 +411,34 @@ def compute_a_duration(pressure_Pa: np.ndarray, sample_rate: int) -> Tuple[float
         return 0.0, 0.0, 0.0
     onset = int(cand[0])
 
-    # Walk back to the last zero crossing before the front
-    start = onset
-    while start > 0 and p[start - 1] * p[onset] > 0:
+    # The phase boundaries are found by anchoring on the PEAK of the excursion, not
+    # on its onset. The analytic-signal envelope leads the waveform, so the sample at
+    # the envelope onset is usually still pre-blast baseline; anchoring there makes
+    # the result depend on the sign of the last noise sample before the shock front,
+    # and a single negative noise sample then terminates the "positive phase"
+    # immediately. On a 3 ms Friedlander wave with 0.01 Pa of noise that returned an
+    # A-duration of 0.021 ms and a specific impulse of zero.
+    #
+    # From the peak, the surrounding zero crossings are unambiguous: noise near the
+    # baseline cannot truncate a phase that is entered from its own maximum.
+    search_stop = min(p.size, onset + max(4, int(0.005 * sample_rate)))
+    local = p[onset:search_stop]
+    if local.size == 0:
+        return 0.0, 0.0, 0.0
+
+    sign = 1.0 if abs(float(local.max())) >= abs(float(local.min())) else -1.0
+    signed = p * sign
+    peak_idx = onset + int(np.argmax(signed[onset:search_stop]))
+    if signed[peak_idx] <= EPS:
+        return 0.0, 0.0, 0.0
+
+    # Back to the zero crossing that opens the phase
+    start = peak_idx
+    while start > 0 and signed[start - 1] > 0:
         start -= 1
 
-    sign = 1.0 if p[onset] >= 0 else -1.0
-    signed = p * sign
-
-    # Advance to the first return to ambient
-    stop = onset
+    # Forward to the first genuine return to ambient
+    stop = peak_idx
     while stop < p.size - 1 and signed[stop] > 0:
         stop += 1
 

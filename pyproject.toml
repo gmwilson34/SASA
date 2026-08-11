@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "sasa"
@@ -35,15 +35,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Video input: ExtractAudio.py does `from moviepy import VideoFileClip` (moviepy 2.x
+# API) and `import imageio_ffmpeg` for the bundled ffmpeg binary. Both are required.
 video = [
     "moviepy>=2.0",
     "imageio-ffmpeg>=0.5",
 ]
+# ISO 532-1 loudness. Not imported by any module yet; sasa.spec picks it up
+# opportunistically as a PyInstaller hidden import if it happens to be installed.
 loudness = [
     "mosqito>=1.0",
 ]
+# Packaging: pyinstaller drives sasa.spec; pillow is imported by assets/generate_icon.py.
 build = [
     "pyinstaller>=6.0",
+    "pillow>=10.0",
 ]
 dev = [
     "pytest>=7.0",
@@ -54,17 +60,20 @@ all = [
 ]
 
 [project.scripts]
-sasa = "main:cli_main"
+# main.py defines main(); there is no cli_main.
+sasa = "main:main"
 
 [tool.setuptools]
 py-modules = [
     "main",
+    "app",
     "calibration",
     "weighting",
     "shot_detect",
     "bands",
     "metrics",
     "plots",
+    "provenance",
     "STFT",
     "WavLoader",
     "WaveformPlot",
@@ -73,6 +82,26 @@ py-modules = [
     "FileSelector",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::SyntaxWarning"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = [".venv", "ui/node_modules", "build", "dist"]
+
+[tool.ruff.lint]
+# Pinned explicitly so a ruff upgrade cannot silently turn CI red. Left as the
+# implicit default this repo was written against (pyflakes + the pycodestyle
+# error subset) plus warnings. Widening this (UP, I, B, SIM) is a deliberate
+# follow-up: `ruff check . --select ALL --statistics` currently reports ~310 hits.
+select = ["E4", "E7", "E9", "F", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# TODO(cleanup): real unused imports/locals in files owned by other work in
+# flight. Delete each entry once the corresponding line is removed.
+"STFT.py" = ["F401"]              # dataclasses.field
+"weighting.py" = ["F401"]         # scipy.signal.sosfilt_zi
+"assets/generate_icon.py" = ["F401", "F841"]

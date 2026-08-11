@@ -9,26 +9,39 @@ web UI and bridges to the analysis backend. No Node.js required.
 Usage:
     macOS:   pyinstaller sasa.spec
     Windows: pyinstaller sasa.spec
+
+Requires PyInstaller >= 6.0. The bytecode-encryption ("cipher"/block_cipher)
+scaffolding that used to live here was removed in PyInstaller 6 and has been
+dropped; a.zipfiles / a.zipped_data are likewise always empty since 6.0.
+
+NOTE ON SIGNING: nothing here signs or notarizes the output. See build_macos.sh
+for the codesign/notarytool commands required before distributing SASA.app.
 """
 
-import sys
 import os
+import sys
 
-block_cipher = None
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 IS_MACOS = sys.platform == 'darwin'
 IS_WINDOWS = sys.platform == 'win32'
 
 PROJECT_ROOT = os.path.abspath(SPECPATH)
 
-# Icon paths
+# Icon paths. NOTE: assets/ is *build-time only* — the icons are compiled into
+# the bundle by BUNDLE/EXE below and nothing under assets/ is read at runtime,
+# so the directory is deliberately not added to `datas`.
 ICON_ICNS = os.path.join(PROJECT_ROOT, 'assets', 'sasa.icns')
 ICON_ICO = os.path.join(PROJECT_ROOT, 'assets', 'sasa.ico')
 
-# Data files to bundle — UI static assets + all Python source modules
-# (Python sources are bundled as data so app.py can spawn `python main.py`)
+# ── Data files ───────────────────────────────────────────────────────────────
+# app.py serves the static UI from ui/renderer (see _find_renderer_dir()), and
+# resolves the Python sources via _find_source_dir(); both look in _MEIPASS and,
+# on macOS, in Contents/Resources. ui/server.js and ui/bridge are the Node
+# development server and are NOT needed by the frozen app.
 datas = [
     ('ui/renderer', 'ui/renderer'),
+    ('LICENSE', '.'),
     # Bundle all analysis Python modules alongside the app
     ('main.py', '.'),
     ('calibration.py', '.'),
@@ -45,31 +58,48 @@ datas = [
     ('FileSelector.py', '.'),
 ]
 
+# plots.py calls fig.write_html() with the default include_plotlyjs=True, which
+# inlines plotly/package_data/plotly.min.js. Without this data the interactive
+# *_full.html outputs are produced but render blank. pyinstaller-hooks-contrib
+# ships hook-plotly.py which does the same; collected explicitly so the build
+# does not silently depend on the hook being present.
+datas += collect_data_files('plotly', includes=['package_data/**/*.*'])
+
 # Bundle the ffmpeg binary from imageio-ffmpeg for video support
 try:
     import imageio_ffmpeg
     _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     if _ffmpeg_exe and os.path.isfile(_ffmpeg_exe):
-        # Bundle ffmpeg binary into a 'ffmpeg' directory
+        # app.py looks for this in _MEIPASS/imageio_ffmpeg_bin (and, on macOS,
+        # in Contents/Resources/imageio_ffmpeg_bin).
         datas.append((_ffmpeg_exe, 'imageio_ffmpeg_bin'))
 except ImportError:
-    pass
+    print('sasa.spec: WARNING - imageio-ffmpeg not installed; the bundled app '
+          'will not be able to read video files. Install with: pip install ".[video]"')
 
+# ── Hidden imports ───────────────────────────────────────────────────────────
 hiddenimports = [
     'numpy',
-    'numpy.core',
     'scipy',
     'scipy.signal',
+    'scipy.signal.windows',   # STFT.get_window fallback
     'scipy.fft',
-    'soundfile',
+    'scipy.special',
+    'soundfile',              # libsndfile itself is collected by hook-soundfile.py
     'matplotlib',
     'matplotlib.pyplot',
     'matplotlib.colors',
     'matplotlib.figure',
     'matplotlib.backends.backend_agg',
+    # plots.py calls matplotlib.use('Agg'), so PyInstaller's matplotlib hook
+    # auto-collects Agg and nothing else. `--formats pdf,svg` makes savefig()
+    # lazily import these two, which would then fail in the frozen app.
+    'matplotlib.backends.backend_pdf',
+    'matplotlib.backends.backend_svg',
     'plotly',
     'plotly.graph_objects',
     'plotly.io',
+    'narwhals',               # plotly >= 6 dataframe shim, imported lazily
     'imageio_ffmpeg',
     'tkinter',
     'tkinter.filedialog',
@@ -87,8 +117,21 @@ hiddenimports = [
     'subprocess',
 ]
 
+# moviepy is imported by ExtractAudio.py (`from moviepy import VideoFileClip`).
+# main.py wraps that import in try/except ImportError and silently sets
+# _VIDEO_SUPPORT = False, so a missing moviepy does not fail the build - it just
+# makes video input quietly unavailable in the shipped app. Collect it eagerly.
 try:
-    import mosqito
+    import moviepy  # noqa: F401
+    hiddenimports += collect_submodules('moviepy')
+except ImportError:
+    print('sasa.spec: WARNING - moviepy not installed; video input will be '
+          'DISABLED in the bundled app. Install with: pip install ".[video]"')
+
+# Optional ISO 532-1 loudness backend. Not imported by any module today; picked
+# up only so a future import does not require a spec change.
+try:
+    import mosqito  # noqa: F401
     hiddenimports.append('mosqito')
 except ImportError:
     pass
@@ -109,14 +152,16 @@ a = Analysis(
         'pytest',
         'sphinx',
         'docutils',
+        'PyQt5',
+        'PyQt6',
+        'PySide2',
+        'PySide6',
+        'wx',
     ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 if IS_MACOS:
     exe = EXE(
@@ -128,21 +173,23 @@ if IS_MACOS:
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
+        # UPX is not used on macOS: it corrupts arm64 Mach-O binaries and
+        # invalidates any code signature applied afterwards.
+        upx=False,
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
+        # Left None deliberately - signing is a separate, credentialed step.
         codesign_identity=None,
         entitlements_file=None,
     )
     coll = COLLECT(
         exe,
         a.binaries,
-        a.zipfiles,
         a.datas,
         strip=False,
-        upx=True,
+        upx=False,
         upx_exclude=[],
         name='SASA',
     )
@@ -173,7 +220,6 @@ else:
         pyz,
         a.scripts,
         a.binaries,
-        a.zipfiles,
         a.datas,
         [],
         name='SASA',

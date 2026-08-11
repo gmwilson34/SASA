@@ -101,7 +101,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/ridgeback-defense/SASA.git
+git clone https://github.com/gmwilson34/SASA.git
 cd SASA
 
 # Create a virtual environment
@@ -109,24 +109,38 @@ python3 -m venv .venv
 source .venv/bin/activate    # macOS/Linux
 # .venv\Scripts\activate     # Windows
 
-# Install dependencies
+# Install the package (also installs the `sasa` console script)
+pip install .
+# ...or just the runtime dependencies, without installing SASA itself:
 pip install -r requirements.txt
 
-# Optional: video file support
-pip install moviepy imageio-ffmpeg
+# Optional: video file support (needs BOTH packages)
+pip install '.[video]'          # == pip install moviepy imageio-ffmpeg
 
 # Optional: ISO 532-1 loudness
-pip install mosqito
+pip install '.[loudness]'       # == pip install mosqito
+
+# Development (pytest + ruff)
+pip install -e '.[dev]'
 ```
+
+Once installed, `sasa` on your PATH is equivalent to `python main.py`.
 
 ### Standalone App (macOS / Windows)
 
-Download the latest release from the [Releases](https://github.com/ridgeback-defense/SASA/releases) page:
+Download the latest release from the [Releases](https://github.com/gmwilson34/SASA/releases) page:
 
 | Platform | Download | Notes |
 |----------|----------|-------|
 | **macOS** | `SASA-macOS.zip` | Unzip → double-click `SASA.app` |
 | **Windows** | `SASA-Windows.zip` | Unzip → run `SASA.exe` |
+
+> **The released binaries are not code-signed or notarized.** macOS Gatekeeper
+> will refuse to open `SASA.app` on any machine other than the one that built
+> it ("SASA.app is damaged and can't be opened"). Until signing is set up, run
+> `xattr -dr com.apple.quarantine /Applications/SASA.app` after unzipping, or
+> run from source. Windows SmartScreen will likewise warn on the unsigned
+> `SASA.exe`. See `build_macos.sh` for the signing commands.
 
 Or build it yourself:
 
@@ -685,6 +699,7 @@ HTML files with pan, zoom, and hover tooltips:
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--dtype` | `float32` | Sample dtype when loading the WAV: `float32` or `float64` (full 32-bit precision) |
 | `--nperseg` | 2048 | STFT window size (samples) |
 | `--no-bands` | false | Skip 1/3-octave band analysis |
 | `--no-per-shot` | false | Skip per-shot summary plots |
@@ -693,9 +708,12 @@ HTML files with pan, zoom, and hover tooltips:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-o, --output` | `./analysis` | Output base directory |
-| `--config` | — | Load config from JSON file |
-| `--formats` | `png` | Plot formats: `png`, `pdf`, `svg` |
+| `-o, --output` | `<input dir>/analysis` | Output base directory. Defaults to an `analysis/` folder next to the input file, not the current directory. |
+| `--config` | — | Load config from JSON file (overrides all other options) |
+| `--formats` | `png` | Plot formats, comma-separated: `png`, `pdf`, `svg` |
+
+The positional `input` argument is optional — omit it to get a native file
+picker. `--config` is read instead of, not merged with, the other flags.
 
 ### Config File
 
@@ -718,7 +736,9 @@ Save and reuse analysis settings:
 
 ## Output Files
 
-After analysis, outputs are saved to a timestamped directory:
+After analysis, outputs are saved to a timestamped directory. Unless `--output`
+says otherwise, the `analysis/` base directory is created **next to the input
+file**, and each run gets its own `<input stem>_<YYYYmmdd_HHMMSS>/` subdirectory.
 
 ```
 analysis/
@@ -730,7 +750,6 @@ analysis/
     ├── spectrogram_c_full.png         # C-weighted spectrogram (dB SPL)
     ├── spectrogram_c_full.html        # Interactive C-weighted spectrogram
     ├── bands_full.png                 # 1/3-octave band time-frequency heatmap
-    ├── levels_full.png                # LAF/LAS/LZF/LZS time curves
     ├── shots/
     │   ├── shot_01_summary.png        # Multi-panel summary for shot 1
     │   ├── shot_02_summary.png        # Multi-panel summary for shot 2
@@ -873,4 +892,6 @@ SASA follows or references these international standards:
 
 ## License
 
-Copyright © 2024–2026 Ridgeback Defense. All rights reserved.
+Proprietary. Copyright © 2024–2026 Ridgeback Defense. All rights reserved.
+No use, copying, modification, or redistribution without prior written
+permission. See [LICENSE](LICENSE) for the full terms.
