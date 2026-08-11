@@ -5,34 +5,48 @@ calibration.py - Microphone/Recording Chain Calibration for Acoustic Measurement
 Converts digital full-scale (FS) waveform samples to physical pressure units (Pascals).
 Provides helper functions for SPL calculations using the standard reference pressure.
 
-Calibration Methods:
-  1) Direct: Pa_per_FS - multiply float waveform directly
-  2) Derived: sensitivity_mV_per_Pa + V_per_FS - compute Pa_per_FS from mic specs
+Calibration Methods (in descending order of traceability):
+  1) Calibrator tone: measure a recording of a 94 dB / 114 dB acoustic calibrator.
+     This is the only method that captures the WHOLE chain (mic + preamp + gain + ADC)
+     as it was actually configured, and it is what an accredited lab does.
+  2) Recording chain: mic sensitivity + preamp gain + ADC full-scale voltage.
+  3) Direct: Pa_per_FS, if the factor is already known.
+  4) Uncalibrated: results are RELATIVE (dB re FS) and are labelled as such everywhere.
 
 Reference: 20 µPa (threshold of human hearing) for dB SPL calculations.
 
 Usage:
-    from calibration import Calibration
+    from calibration import Calibration, assess_signal_quality
 
-    # Method 1: Direct calibration factor
-    cal = Calibration(Pa_per_FS=50.0)
+    # Method 1 (preferred): from a calibrator tone recording
+    cal = Calibration.from_calibrator_tone(tone_samples, sample_rate=48000,
+                                           calibrator_level_dB=114.0)
 
-    # Method 2: From microphone sensitivity specs
-    cal = Calibration.from_sensitivity(
-        sensitivity_mV_per_Pa=10.0,  # e.g., 10 mV/Pa (-40 dB re 1V/Pa)
-        V_per_FS=1.0                  # recorder full-scale voltage
+    # Method 2: from the recording chain
+    cal = Calibration.from_recording_chain(
+        sensitivity_mV_per_Pa=10.0,   # microphone datasheet
+        preamp_gain_dB=20.0,          # preamp / recorder input gain
+        adc_full_scale_V=1.0,         # what +/-1.0 FS means in volts
     )
 
-    # Convert samples to Pascals
-    pressure_Pa = cal.to_pascals(samples)
+    # Method 4: explicitly uncalibrated (relative units)
+    cal = Calibration.uncalibrated()
 
-    # Convert to dB SPL
-    spl_dB = cal.to_dB_SPL(pressure_rms)
+    pressure_Pa = cal.to_pascals(samples)
+    spl_dB = amplitude_to_dB_SPL(pressure_rms)
+
+    # Always check the recording before trusting the numbers
+    qa = assess_signal_quality(samples, sample_rate, cal)
+    if not qa.is_valid:
+        print(qa.summary())
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
+from typing import List, Optional
+
 import numpy as np
 
 # Standard reference pressure for dB SPL (threshold of hearing)
@@ -40,6 +54,35 @@ P_REF: float = 20e-6  # 20 µPa
 
 # Numerical floor to avoid log(0)
 EPS: float = 1e-30
+
+# Acoustic calibrator levels in common use (IEC 60942)
+CALIBRATOR_LEVELS_dB = (94.0, 114.0, 124.0)
+
+# A sample is treated as at-full-scale within this tolerance of 1.0.
+# 24-bit PCM quantises to ~1.2e-7, so 1e-4 is comfortably above quantisation
+# while still only catching genuinely pinned samples.
+CLIP_TOLERANCE: float = 1e-4
+
+# Consecutive at-full-scale samples that constitute a real clipping event
+# rather than a single sample that happened to land on the rail.
+CLIP_RUN_SAMPLES: int = 2
+
+
+def _validate_positive_finite(value: float, name: str) -> float:
+    """
+    Validate that a calibration quantity is a positive, finite real number.
+
+    NaN and infinity both pass a naive ``<= 0`` check and then silently poison
+    every downstream dB value, so they are rejected explicitly.
+    """
+    v = float(value)
+    if math.isnan(v):
+        raise ValueError(f"{name} must be a real number, got NaN")
+    if math.isinf(v):
+        raise ValueError(f"{name} must be finite, got {v}")
+    if v <= 0.0:
+        raise ValueError(f"{name} must be positive, got {v}")
+    return v
 
 
 @dataclass
@@ -50,14 +93,147 @@ class Calibration:
     Attributes:
         Pa_per_FS: Pascals per full-scale unit. Multiply float waveform [-1, 1] by this
                    to get pressure in Pascals.
-        description: Optional description of calibration source/method.
+        calibrated: True only when Pa_per_FS is traceable to a real measurement or
+                    a real recording chain. Uncalibrated results are relative (dB re FS)
+                    and must never be presented as dB SPL.
+        method: Machine-readable provenance: "calibrator_tone", "recording_chain",
+                "direct", "preset" or "uncalibrated".
+        description: Human-readable description of the calibration source.
+        reference_level_dB: For calibrator-tone calibration, the calibrator's stated level.
+        residual_dB: For calibrator-tone calibration, drift between pre- and post-test
+                     calibration, when both are supplied.
     """
     Pa_per_FS: float
+    calibrated: bool = True
+    method: str = "direct"
     description: str = ""
+    reference_level_dB: Optional[float] = None
+    residual_dB: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if self.Pa_per_FS <= 0:
-            raise ValueError(f"Pa_per_FS must be positive, got {self.Pa_per_FS}")
+        self.Pa_per_FS = _validate_positive_finite(self.Pa_per_FS, "Pa_per_FS")
+        if not self.description:
+            self.description = f"Direct: {self.Pa_per_FS:.6g} Pa/FS"
+
+    # ---- Constructors ----
+
+    @classmethod
+    def from_calibrator_tone(
+        cls,
+        tone_samples: np.ndarray,
+        sample_rate: int,
+        calibrator_level_dB: float = 114.0,
+        *,
+        tone_frequency_Hz: float = 1000.0,
+        description: str = "",
+        post_test_samples: Optional[np.ndarray] = None,
+    ) -> "Calibration":
+        """
+        Derive calibration from a recording of an acoustic calibrator (pistonphone).
+
+        This is the preferred method: it measures the entire acquisition chain exactly
+        as it was configured for the test, including any gain the operator forgot about.
+
+        The calibrator produces a known SPL at a known frequency. Measuring the digital
+        RMS of that tone gives the conversion factor directly:
+
+            Pa_per_FS = p_ref * 10^(L_cal/20) / rms_digital
+
+        Args:
+            tone_samples: Digital samples of the calibrator tone, float in [-1, 1].
+            sample_rate: Sample rate in Hz.
+            calibrator_level_dB: Calibrator's stated output level (typically 94 or 114 dB).
+            tone_frequency_Hz: Calibrator tone frequency, used to validate the recording.
+            description: Optional description string.
+            post_test_samples: Optional post-test calibrator recording. When supplied,
+                               the drift between pre- and post-test is recorded as
+                               residual_dB; a drift over 0.5 dB invalidates the test
+                               under most measurement protocols.
+
+        Returns:
+            Calibration instance with method="calibrator_tone".
+
+        Raises:
+            ValueError: If the tone is absent, clipped, or not at the expected frequency.
+        """
+        rms = _measure_tone_rms(tone_samples, sample_rate, tone_frequency_Hz)
+        level = float(calibrator_level_dB)
+        if math.isnan(level) or math.isinf(level):
+            raise ValueError(f"calibrator_level_dB must be finite, got {calibrator_level_dB}")
+
+        target_Pa = P_REF * (10.0 ** (level / 20.0))
+        Pa_per_FS = target_Pa / rms
+
+        residual = None
+        if post_test_samples is not None and len(post_test_samples) > 0:
+            rms_post = _measure_tone_rms(post_test_samples, sample_rate, tone_frequency_Hz)
+            residual = float(20.0 * np.log10(rms_post / rms))
+
+        if not description:
+            description = f"Calibrator tone: {level:.1f} dB @ {tone_frequency_Hz:.0f} Hz"
+            if residual is not None:
+                description += f" (post-test drift {residual:+.2f} dB)"
+
+        return cls(
+            Pa_per_FS=Pa_per_FS,
+            calibrated=True,
+            method="calibrator_tone",
+            description=description,
+            reference_level_dB=level,
+            residual_dB=residual,
+        )
+
+    @classmethod
+    def from_recording_chain(
+        cls,
+        sensitivity_mV_per_Pa: float,
+        adc_full_scale_V: float = 1.0,
+        preamp_gain_dB: float = 0.0,
+        description: str = "",
+    ) -> "Calibration":
+        """
+        Create calibration from the physical recording chain.
+
+        This models what a user can actually read off their equipment:
+          - the microphone datasheet gives sensitivity in mV/Pa (or dB re 1 V/Pa),
+          - the preamp/recorder front panel gives a gain in dB,
+          - the recorder specification gives the input voltage that corresponds to 0 dBFS.
+
+        Chain:
+            V_at_ADC = p_Pa * (S_mV/Pa / 1000) * 10^(gain_dB/20)
+            FS       = V_at_ADC / adc_full_scale_V
+        so
+            Pa_per_FS = adc_full_scale_V / (S_V/Pa * 10^(gain_dB/20))
+
+        Args:
+            sensitivity_mV_per_Pa: Microphone sensitivity in mV/Pa (e.g. 10 mV/Pa = -40 dB re 1V/Pa).
+            adc_full_scale_V: Input voltage corresponding to digital full scale (0 dBFS).
+            preamp_gain_dB: Preamp / recorder input gain applied between mic and ADC.
+            description: Optional description string.
+
+        Returns:
+            Calibration instance with method="recording_chain".
+        """
+        sens_mV = _validate_positive_finite(sensitivity_mV_per_Pa, "sensitivity_mV_per_Pa")
+        fs_V = _validate_positive_finite(adc_full_scale_V, "adc_full_scale_V")
+        gain = float(preamp_gain_dB)
+        if math.isnan(gain) or math.isinf(gain):
+            raise ValueError(f"preamp_gain_dB must be finite, got {preamp_gain_dB}")
+
+        sensitivity_V_per_Pa = (sens_mV / 1000.0) * (10.0 ** (gain / 20.0))
+        Pa_per_FS = fs_V / sensitivity_V_per_Pa
+
+        if not description:
+            description = (
+                f"Chain: {sens_mV:g} mV/Pa, {gain:+g} dB gain, {fs_V:g} V full scale"
+            )
+
+        return cls(
+            Pa_per_FS=Pa_per_FS,
+            calibrated=True,
+            method="recording_chain",
+            description=description,
+        )
 
     @classmethod
     def from_sensitivity(
@@ -67,46 +243,24 @@ class Calibration:
         description: str = "",
     ) -> "Calibration":
         """
-        Create calibration from microphone sensitivity and recorder specs.
+        Create calibration from microphone sensitivity and recorder full-scale voltage.
 
-        Args:
-            sensitivity_mV_per_Pa: Microphone sensitivity in mV/Pa.
-                                   Example: 10 mV/Pa = -40 dB re 1V/Pa
-            V_per_FS: Recorder full-scale voltage (what ±1.0 in float maps to).
-                      For many pro recorders this might be ~1-10V depending on gain.
-            description: Optional description string.
-
-        Returns:
-            Calibration instance with computed Pa_per_FS.
-
-        Example:
-            # Mic: 10 mV/Pa sensitivity, recorder: 1V = FS
-            # 1.0 FS = 1000 mV → 1000 mV / 10 mV/Pa = 100 Pa
-            cal = Calibration.from_sensitivity(10.0, 1.0)
-            # Pa_per_FS = 100.0
+        Retained for backward compatibility; equivalent to from_recording_chain() with
+        no preamp gain. Prefer from_recording_chain() or from_calibrator_tone().
         """
-        if sensitivity_mV_per_Pa <= 0:
-            raise ValueError(f"sensitivity_mV_per_Pa must be positive, got {sensitivity_mV_per_Pa}")
-        if V_per_FS <= 0:
-            raise ValueError(f"V_per_FS must be positive, got {V_per_FS}")
-
-        # Convert sensitivity to V/Pa
-        sensitivity_V_per_Pa = sensitivity_mV_per_Pa / 1000.0
-
-        # Pa_per_FS = V_per_FS / sensitivity_V_per_Pa
-        # Because: FS_value * V_per_FS = voltage, and voltage / sensitivity = pressure
-        Pa_per_FS = V_per_FS / sensitivity_V_per_Pa
-
-        if not description:
-            description = f"Derived: {sensitivity_mV_per_Pa} mV/Pa, {V_per_FS} V/FS"
-
-        return cls(Pa_per_FS=Pa_per_FS, description=description)
+        return cls.from_recording_chain(
+            sensitivity_mV_per_Pa=sensitivity_mV_per_Pa,
+            adc_full_scale_V=V_per_FS,
+            preamp_gain_dB=0.0,
+            description=description,
+        )
 
     @classmethod
     def from_dB_sensitivity(
         cls,
         sensitivity_dB_re_1V_per_Pa: float,
         V_per_FS: float,
+        preamp_gain_dB: float = 0.0,
         description: str = "",
     ) -> "Calibration":
         """
@@ -116,49 +270,514 @@ class Calibration:
             sensitivity_dB_re_1V_per_Pa: Sensitivity in dB re 1V/Pa.
                                          Typical values: -40 to -26 dB for measurement mics.
             V_per_FS: Recorder full-scale voltage.
+            preamp_gain_dB: Preamp / recorder input gain.
             description: Optional description string.
-
-        Returns:
-            Calibration instance.
-
-        Example:
-            # Mic: -40 dB re 1V/Pa (= 10 mV/Pa), recorder: 1V = FS
-            cal = Calibration.from_dB_sensitivity(-40.0, 1.0)
         """
-        # Convert dB to linear: sensitivity_V_per_Pa = 10^(dB/20)
-        sensitivity_V_per_Pa = 10.0 ** (sensitivity_dB_re_1V_per_Pa / 20.0)
-        sensitivity_mV_per_Pa = sensitivity_V_per_Pa * 1000.0
+        s = float(sensitivity_dB_re_1V_per_Pa)
+        if math.isnan(s) or math.isinf(s):
+            raise ValueError(f"sensitivity_dB_re_1V_per_Pa must be finite, got {s}")
+
+        sensitivity_mV_per_Pa = (10.0 ** (s / 20.0)) * 1000.0
 
         if not description:
-            description = f"Derived: {sensitivity_dB_re_1V_per_Pa} dB re 1V/Pa, {V_per_FS} V/FS"
+            description = (
+                f"Chain: {s:g} dB re 1V/Pa, {preamp_gain_dB:+g} dB gain, {V_per_FS:g} V full scale"
+            )
 
-        return cls.from_sensitivity(sensitivity_mV_per_Pa, V_per_FS, description)
+        return cls.from_recording_chain(
+            sensitivity_mV_per_Pa=sensitivity_mV_per_Pa,
+            adc_full_scale_V=V_per_FS,
+            preamp_gain_dB=preamp_gain_dB,
+            description=description,
+        )
+
+    @classmethod
+    def preset(cls, Pa_per_FS: float, name: str, provenance: str) -> "Calibration":
+        """
+        Create a named, dated calibration preset.
+
+        A preset is a real calibration that was measured at some point for a specific
+        rig. It is only valid for that rig, so its provenance travels with it into
+        every report.
+
+        Args:
+            Pa_per_FS: The measured conversion factor.
+            name: Short preset name shown in the UI.
+            provenance: Where this number came from (source recording, date, hardware).
+        """
+        return cls(
+            Pa_per_FS=Pa_per_FS,
+            calibrated=True,
+            method="preset",
+            description=f"Preset '{name}': {provenance}",
+        )
 
     @classmethod
     def uncalibrated(cls) -> "Calibration":
         """
         Return a unit calibration (Pa_per_FS=1.0) for uncalibrated analysis.
 
-        Note: Results will be in "relative dB" not true dB SPL.
+        Results are RELATIVE (dB re FS), not dB SPL. The calibrated flag is False so
+        that every consumer can label output correctly rather than inferring it from
+        a description string.
         """
-        return cls(Pa_per_FS=1.0, description="UNCALIBRATED (relative units)")
+        return cls(
+            Pa_per_FS=1.0,
+            calibrated=False,
+            method="uncalibrated",
+            description="UNCALIBRATED - relative units (dB re FS)",
+        )
+
+    # ---- Use ----
 
     def to_pascals(self, samples: np.ndarray) -> np.ndarray:
         """
         Convert digital samples (float, nominally [-1, 1]) to pressure in Pascals.
 
-        Args:
-            samples: Audio samples as float array.
-
-        Returns:
-            Pressure waveform in Pascals.
+        For an uncalibrated instance this is a pass-through and the result is in
+        full-scale units, not Pascals.
         """
         return np.asarray(samples, dtype=np.float64) * self.Pa_per_FS
 
     def is_calibrated(self) -> bool:
-        """Check if this is a real calibration (not the unit placeholder)."""
-        return "UNCALIBRATED" not in self.description
+        """Whether results from this calibration are true dB SPL rather than relative."""
+        return self.calibrated
 
+    @property
+    def level_unit(self) -> str:
+        """Unit string for levels derived from this calibration."""
+        return "dB SPL" if self.calibrated else "dB re FS"
+
+    @property
+    def full_scale_dB(self) -> float:
+        """
+        Level corresponding to a full-scale sample.
+
+        This is the ceiling of the instrument: no measurement from this recording can
+        legitimately exceed it, and a detection threshold above it can never trigger.
+        """
+        return float(20.0 * np.log10(self.Pa_per_FS / P_REF))
+
+    def to_dict(self) -> dict:
+        """Serialise for the analysis provenance record."""
+        return {
+            "Pa_per_FS": self.Pa_per_FS,
+            "calibrated": self.calibrated,
+            "method": self.method,
+            "description": self.description,
+            "level_unit": self.level_unit,
+            "full_scale_dB": round(self.full_scale_dB, 2),
+            "reference_level_dB": self.reference_level_dB,
+            "residual_dB": self.residual_dB,
+        }
+
+
+def _measure_tone_rms(
+    samples: np.ndarray,
+    sample_rate: int,
+    expected_frequency_Hz: float,
+    *,
+    tolerance_ratio: float = 0.05,
+) -> float:
+    """
+    Measure the RMS of a steady calibrator tone, validating that it really is one.
+
+    The middle 60% of the recording is used so that switch-on transients and the
+    operator removing the calibrator do not bias the result.
+
+    Raises:
+        ValueError: If the recording is too short, clipped, silent, or the dominant
+                    frequency is not the expected calibrator frequency.
+    """
+    x = np.asarray(samples, dtype=np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    n = len(x)
+    if n < sample_rate // 10:
+        raise ValueError(
+            f"Calibrator recording is too short ({n} samples); need at least 100 ms"
+        )
+
+    # Use the steady middle portion
+    lo, hi = int(n * 0.2), int(n * 0.8)
+    seg = x[lo:hi]
+
+    peak = float(np.max(np.abs(seg)))
+    if peak >= 1.0 - CLIP_TOLERANCE:
+        raise ValueError(
+            "Calibrator tone is clipped; reduce input gain and re-record the calibration"
+        )
+    if peak < 1e-6:
+        raise ValueError("No calibrator tone found (recording is silent)")
+
+    # Validate the dominant frequency really is the calibrator
+    window = np.hanning(len(seg))
+    spectrum = np.abs(np.fft.rfft(seg * window))
+    freqs = np.fft.rfftfreq(len(seg), d=1.0 / sample_rate)
+    dominant = float(freqs[int(np.argmax(spectrum))])
+    if abs(dominant - expected_frequency_Hz) > tolerance_ratio * expected_frequency_Hz:
+        raise ValueError(
+            f"Dominant frequency is {dominant:.1f} Hz, expected {expected_frequency_Hz:.0f} Hz "
+            f"(+/-{tolerance_ratio*100:.0f}%). This does not look like a calibrator tone."
+        )
+
+    rms = float(np.sqrt(np.mean(seg ** 2)))
+    if rms < EPS:
+        raise ValueError("Calibrator tone RMS is zero")
+    return rms
+
+
+# ---- Recording quality assessment ----
+
+@dataclass
+class SignalQuality:
+    """
+    Measurement-validity assessment of a recording.
+
+    A gunshot recording that is clipped, DC-offset, or barely above the noise floor
+    produces numbers that look precise and are wrong. This captures the checks that
+    decide whether the measurement is admissible at all.
+    """
+    n_samples: int
+    sample_rate: int
+    duration_s: float
+
+    peak_FS: float                # peak absolute sample, in full-scale units
+    headroom_dB: float            # dB between peak and full scale
+    clipped_samples: int
+    clipped_runs: int
+    clipping_ratio: float         # fraction of samples at full scale
+
+    dc_offset_FS: float
+    dc_offset_dB: float           # DC relative to signal RMS
+
+    noise_floor_dB: float         # estimated from the quietest 5% of the recording
+    peak_level_dB: float
+    snr_dB: float
+
+    lf_energy_fraction: float     # fraction of energy below 20 Hz (wind/handling)
+
+    nyquist_Hz: float
+    sample_rate_adequate: bool
+
+    warnings: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+    @property
+    def is_valid(self) -> bool:
+        """False when a hard validity check failed and results must not be trusted."""
+        return not self.errors
+
+    @property
+    def is_clipped(self) -> bool:
+        return self.clipped_runs > 0
+
+    def summary(self) -> str:
+        """Human-readable QA summary."""
+        lines = [
+            f"  Peak:          {self.peak_level_dB:.1f} dB  ({self.headroom_dB:.1f} dB headroom)",
+            f"  Noise floor:   {self.noise_floor_dB:.1f} dB  (SNR {self.snr_dB:.1f} dB)",
+            f"  DC offset:     {self.dc_offset_FS:+.2e} FS  ({self.dc_offset_dB:.1f} dB re signal)",
+            f"  Sub-20 Hz:     {self.lf_energy_fraction*100:.1f}% of total energy",
+            f"  Sample rate:   {self.sample_rate} Hz (Nyquist {self.nyquist_Hz:.0f} Hz)",
+        ]
+        if self.clipped_runs:
+            lines.append(
+                f"  CLIPPING:      {self.clipped_samples} samples in {self.clipped_runs} runs "
+                f"({self.clipping_ratio*100:.4f}%)"
+            )
+        for e in self.errors:
+            lines.append(f"  ERROR:   {e}")
+        for w in self.warnings:
+            lines.append(f"  WARNING: {w}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        return {
+            "peak_FS": round(self.peak_FS, 6),
+            "peak_level_dB": round(self.peak_level_dB, 2),
+            "headroom_dB": round(self.headroom_dB, 2),
+            "clipped_samples": self.clipped_samples,
+            "clipped_runs": self.clipped_runs,
+            "clipping_ratio": self.clipping_ratio,
+            "is_clipped": self.is_clipped,
+            "dc_offset_FS": self.dc_offset_FS,
+            "dc_offset_dB": round(self.dc_offset_dB, 2),
+            "noise_floor_dB": round(self.noise_floor_dB, 2),
+            "snr_dB": round(self.snr_dB, 2),
+            "lf_energy_fraction": round(self.lf_energy_fraction, 4),
+            "sample_rate": self.sample_rate,
+            "sample_rate_adequate": self.sample_rate_adequate,
+            "is_valid": self.is_valid,
+            "warnings": list(self.warnings),
+            "errors": list(self.errors),
+        }
+
+
+def detect_clipping(
+    samples_FS: np.ndarray,
+    *,
+    tolerance: float = CLIP_TOLERANCE,
+    min_run: int = CLIP_RUN_SAMPLES,
+) -> tuple[int, int]:
+    """
+    Detect digital clipping in a full-scale waveform.
+
+    Clipping is identified as runs of consecutive samples pinned at full scale. A
+    single sample touching the rail is legitimate; two or more in a row is the
+    flat-topping signature of a saturated converter.
+
+    Args:
+        samples_FS: Samples in full-scale units (NOT Pascals), nominally [-1, 1].
+        tolerance: How close to 1.0 counts as full scale.
+        min_run: Minimum consecutive at-rail samples to count as a clipping event.
+
+    Returns:
+        (clipped_sample_count, clipped_run_count)
+    """
+    x = np.abs(np.asarray(samples_FS, dtype=np.float64))
+    if x.size == 0:
+        return 0, 0
+
+    at_rail = x >= (1.0 - tolerance)
+    if not np.any(at_rail):
+        return 0, 0
+
+    # Find run boundaries
+    padded = np.concatenate(([False], at_rail, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    starts, ends = edges[0::2], edges[1::2]
+    lengths = ends - starts
+
+    qualifying = lengths >= min_run
+    return int(lengths[qualifying].sum()), int(qualifying.sum())
+
+
+def assess_signal_quality(
+    samples_FS: np.ndarray,
+    sample_rate: int,
+    calibration: Calibration,
+    *,
+    min_snr_dB: float = 20.0,
+    min_headroom_dB: float = 1.0,
+    min_sample_rate: int = 48000,
+) -> SignalQuality:
+    """
+    Assess whether a recording can support a defensible acoustic measurement.
+
+    Args:
+        samples_FS: Digital samples in full-scale units, nominally [-1, 1].
+        sample_rate: Sample rate in Hz.
+        calibration: Calibration used to express levels.
+        min_snr_dB: Below this peak-to-noise-floor ratio the measurement is flagged.
+        min_headroom_dB: Below this headroom the recording is flagged as at risk.
+        min_sample_rate: Rate below which muzzle-blast rise time cannot be resolved.
+
+    Returns:
+        SignalQuality with populated warnings and errors.
+    """
+    x = np.asarray(samples_FS, dtype=np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+
+    n = len(x)
+    warnings: List[str] = []
+    errors: List[str] = []
+
+    if n == 0:
+        return SignalQuality(
+            n_samples=0, sample_rate=sample_rate, duration_s=0.0,
+            peak_FS=0.0, headroom_dB=0.0, clipped_samples=0, clipped_runs=0,
+            clipping_ratio=0.0, dc_offset_FS=0.0, dc_offset_dB=0.0,
+            noise_floor_dB=0.0, peak_level_dB=0.0, snr_dB=0.0,
+            lf_energy_fraction=0.0, nyquist_Hz=sample_rate / 2.0,
+            sample_rate_adequate=False,
+            errors=["Recording is empty"],
+        )
+
+    peak_FS = float(np.max(np.abs(x)))
+    headroom_dB = float(-20.0 * np.log10(max(peak_FS, EPS)))
+
+    clipped_samples, clipped_runs = detect_clipping(x)
+    clipping_ratio = clipped_samples / n
+
+    # DC offset
+    dc = float(np.mean(x))
+    rms = float(np.sqrt(np.mean(x ** 2)))
+    dc_offset_dB = float(20.0 * np.log10(max(abs(dc), EPS) / max(rms, EPS)))
+
+    # Level estimates, expressed through the calibration
+    pressure = x * calibration.Pa_per_FS
+    peak_level_dB = float(amplitude_to_dB_SPL(np.max(np.abs(pressure))))
+
+    # Noise floor from the quietest 5% of short frames
+    frame = max(1, sample_rate // 100)  # 10 ms
+    n_frames = n // frame
+    if n_frames >= 20:
+        frames = pressure[: n_frames * frame].reshape(n_frames, frame)
+        frame_ms = np.mean(frames ** 2, axis=1)
+        quiet = np.percentile(frame_ms, 5.0)
+        noise_floor_dB = float(power_to_dB_SPL(max(quiet, EPS)))
+    else:
+        noise_floor_dB = float(power_to_dB_SPL(max(float(np.mean(pressure ** 2)), EPS)))
+    snr_dB = peak_level_dB - noise_floor_dB
+
+    # Sub-20 Hz energy fraction (wind, handling, mic-mount rumble)
+    lf_fraction = _low_frequency_energy_fraction(x, sample_rate, cutoff_Hz=20.0)
+
+    nyquist = sample_rate / 2.0
+    sample_rate_adequate = sample_rate >= min_sample_rate
+
+    # ---- Validity rules ----
+    if clipped_runs > 0:
+        errors.append(
+            f"Recording is CLIPPED ({clipped_samples} samples in {clipped_runs} runs). "
+            f"Peak levels are understated and rise time, crest factor and kurtosis are invalid. "
+            f"Re-record with lower input gain."
+        )
+    elif headroom_dB < min_headroom_dB:
+        warnings.append(
+            f"Only {headroom_dB:.1f} dB of headroom; the recording is close to clipping."
+        )
+
+    if not calibration.calibrated:
+        warnings.append(
+            "No calibration supplied. All levels are RELATIVE (dB re FS), not dB SPL."
+        )
+
+    if snr_dB < min_snr_dB:
+        warnings.append(
+            f"Peak is only {snr_dB:.1f} dB above the noise floor "
+            f"(want >= {min_snr_dB:.0f} dB); energy metrics will be noise-biased."
+        )
+
+    if abs(dc) > 1e-3:
+        warnings.append(
+            f"DC offset of {dc:+.2e} FS detected; it inflates Z-weighted levels and "
+            f"corrupts rise-time detection. A high-pass will be applied."
+        )
+
+    if lf_fraction > 0.5:
+        warnings.append(
+            f"{lf_fraction*100:.0f}% of signal energy is below 20 Hz, which usually means "
+            f"wind or handling noise rather than blast. Use a windscreen."
+        )
+
+    if not sample_rate_adequate:
+        warnings.append(
+            f"Sample rate {sample_rate} Hz cannot resolve muzzle-blast rise time "
+            f"(one sample = {1e6/sample_rate:.1f} us vs typical 1-50 us rise). "
+            f"Use >= {min_sample_rate} Hz."
+        )
+
+    return SignalQuality(
+        n_samples=n,
+        sample_rate=sample_rate,
+        duration_s=n / sample_rate,
+        peak_FS=peak_FS,
+        headroom_dB=headroom_dB,
+        clipped_samples=clipped_samples,
+        clipped_runs=clipped_runs,
+        clipping_ratio=clipping_ratio,
+        dc_offset_FS=dc,
+        dc_offset_dB=dc_offset_dB,
+        noise_floor_dB=noise_floor_dB,
+        peak_level_dB=peak_level_dB,
+        snr_dB=snr_dB,
+        lf_energy_fraction=lf_fraction,
+        nyquist_Hz=nyquist,
+        sample_rate_adequate=sample_rate_adequate,
+        warnings=warnings,
+        errors=errors,
+    )
+
+
+def _low_frequency_energy_fraction(
+    x: np.ndarray,
+    sample_rate: int,
+    cutoff_Hz: float = 20.0,
+) -> float:
+    """Fraction of total signal energy below cutoff_Hz, via Parseval on the FFT."""
+    n = len(x)
+    if n < 16:
+        return 0.0
+    # Decimate long signals; sub-20 Hz content survives heavy decimation.
+    step = max(1, n // 1_000_000)
+    seg = x[::step]
+    eff_rate = sample_rate / step
+    if eff_rate <= 2 * cutoff_Hz:
+        return 0.0
+
+    seg = seg - np.mean(seg)
+    spectrum = np.abs(np.fft.rfft(seg * np.hanning(len(seg)))) ** 2
+    freqs = np.fft.rfftfreq(len(seg), d=1.0 / eff_rate)
+    total = float(np.sum(spectrum))
+    if total < EPS:
+        return 0.0
+    return float(np.sum(spectrum[freqs < cutoff_Hz]) / total)
+
+
+def remove_dc_offset(
+    x: np.ndarray,
+    sample_rate: int,
+    cutoff_Hz: float = 10.0,
+) -> np.ndarray:
+    """
+    Remove DC and infrasonic content ahead of level computation.
+
+    Z-weighting is a bare pass-through, so any DC offset or sub-audio rumble is
+    integrated straight into Z-weighted levels and shifts the |p| baseline that
+    rise-time and B-duration detection depend on.
+
+    A 2nd-order zero-phase Butterworth high-pass is used so the shock front is not
+    delayed or asymmetrically distorted.
+
+    The signal is extended with silence before filtering rather than using
+    sosfiltfilt's default odd reflection. A shot window that begins at or near its
+    peak presents a step at the array edge, and reflecting it fabricates a large
+    transient: on a synthetic Friedlander blast the default padding cost 3.4 dB of
+    peak and left a tail 60 orders of magnitude above the true one. Silence is also
+    the physically correct extension, since pressure was ambient before the blast.
+
+    Args:
+        x: Input signal.
+        sample_rate: Sample rate in Hz.
+        cutoff_Hz: High-pass corner. 10 Hz sits below the 20 Hz measurement band.
+
+    Returns:
+        High-passed signal.
+    """
+    from scipy.signal import butter, sosfiltfilt
+
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return x
+    if x.size < 32 or cutoff_Hz <= 0:
+        return x - np.mean(x)
+
+    nyq = sample_rate / 2.0
+    wn = cutoff_Hz / nyq
+    if not (0 < wn < 1):
+        return x - np.mean(x)
+
+    # Remove DC exactly first: the zero extension below cannot represent a genuine
+    # offset, so subtracting the mean up front keeps both cases correct.
+    x = x - np.mean(x)
+
+    sos = butter(2, wn, btype="highpass", output="sos")
+
+    # Lead-in long enough for the filter to settle: five time constants of the corner.
+    pad = int(np.ceil(5.0 * sample_rate / (2.0 * np.pi * cutoff_Hz)))
+    pad = max(pad, 3 * (2 * sos.shape[0] + 1))
+    if pad >= 10 * x.size:
+        pad = max(1, x.size)
+
+    padded = np.concatenate([np.zeros(pad), x, np.zeros(pad)])
+    filtered = np.asarray(sosfiltfilt(sos, padded, padtype=None))
+    return filtered[pad:pad + x.size]
+
+
+# ---- Level conversion helpers ----
 
 def amplitude_to_dB_SPL(amplitude_Pa: np.ndarray | float, eps: float = EPS) -> np.ndarray | float:
     """
@@ -173,7 +792,7 @@ def amplitude_to_dB_SPL(amplitude_Pa: np.ndarray | float, eps: float = EPS) -> n
 
     Note:
         For true SPL measurements, use RMS pressure over an appropriate
-        time window (e.g., Fast = 125ms, Slow = 1s).
+        time window (e.g. Fast = 125ms, Slow = 1s).
     """
     amp = np.asarray(amplitude_Pa, dtype=np.float64)
     return 20.0 * np.log10(np.maximum(np.abs(amp), eps) / P_REF)
@@ -237,6 +856,21 @@ def compute_peak(samples: np.ndarray, axis: int | None = None) -> np.ndarray | f
     return np.max(np.abs(x), axis=axis)
 
 
+def energy_average_dB(levels_dB: np.ndarray | List[float]) -> float:
+    """
+    Energy-average a set of levels, per ISO convention.
+
+        L_avg = 10 * log10( mean( 10^(L_i / 10) ) )
+
+    Arithmetic averaging of decibels understates the true energy mean and is not
+    a valid summary of sound levels.
+    """
+    arr = np.asarray(levels_dB, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    return float(10.0 * np.log10(np.mean(10.0 ** (arr / 10.0))))
+
+
 # ---- CLI for testing ----
 
 def main() -> int:
@@ -247,34 +881,37 @@ def main() -> int:
     parser.add_argument("--Pa-per-FS", type=float, default=None, help="Direct Pa/FS calibration")
     parser.add_argument("--sensitivity-mV", type=float, default=None, help="Mic sensitivity in mV/Pa")
     parser.add_argument("--sensitivity-dB", type=float, default=None, help="Mic sensitivity in dB re 1V/Pa")
-    parser.add_argument("--V-per-FS", type=float, default=1.0, help="Recorder V/FS (default: 1.0)")
+    parser.add_argument("--preamp-gain-dB", type=float, default=0.0, help="Preamp gain in dB")
+    parser.add_argument("--V-per-FS", type=float, default=1.0, help="ADC full-scale voltage (default: 1.0)")
+    parser.add_argument("--tone", type=str, default=None, help="Calibrator tone WAV file")
+    parser.add_argument("--tone-level-dB", type=float, default=114.0, help="Calibrator level (default: 114)")
     args = parser.parse_args()
 
-    if args.Pa_per_FS is not None:
+    if args.tone is not None:
+        import soundfile as sf
+        data, sr = sf.read(args.tone, dtype="float64")
+        cal = Calibration.from_calibrator_tone(data, sr, args.tone_level_dB)
+    elif args.Pa_per_FS is not None:
         cal = Calibration(Pa_per_FS=args.Pa_per_FS)
     elif args.sensitivity_mV is not None:
-        cal = Calibration.from_sensitivity(args.sensitivity_mV, args.V_per_FS)
+        cal = Calibration.from_recording_chain(args.sensitivity_mV, args.V_per_FS, args.preamp_gain_dB)
     elif args.sensitivity_dB is not None:
-        cal = Calibration.from_dB_sensitivity(args.sensitivity_dB, args.V_per_FS)
+        cal = Calibration.from_dB_sensitivity(args.sensitivity_dB, args.V_per_FS, args.preamp_gain_dB)
     else:
         cal = Calibration.uncalibrated()
 
-    print(f"Calibration: {cal}")
-    print(f"Pa per FS: {cal.Pa_per_FS:.6g}")
-    print(f"Is calibrated: {cal.is_calibrated()}")
+    print(f"Method:        {cal.method}")
+    print(f"Description:   {cal.description}")
+    print(f"Pa per FS:     {cal.Pa_per_FS:.6g}")
+    print(f"Calibrated:    {cal.is_calibrated()}")
+    print(f"Level unit:    {cal.level_unit}")
+    print(f"Full scale:    {cal.full_scale_dB:.1f} {cal.level_unit}")
 
-    # Example: 1.0 FS = ?
-    test_val = np.array([1.0])
-    Pa = cal.to_pascals(test_val)
-    dB = amplitude_to_dB_SPL(float(Pa[0]))
-    print(f"\nExample: {test_val[0]} FS → {Pa[0]:.3g} Pa → {dB:.1f} dB SPL")
-
-    # Reference levels
     print("\nReference levels:")
     print(f"  P_REF = {P_REF:.2e} Pa (0 dB SPL)")
-    print(f"  1 Pa = {amplitude_to_dB_SPL(1.0):.1f} dB SPL")
-    print(f"  20 Pa = {amplitude_to_dB_SPL(20.0):.1f} dB SPL (approx. 120 dB SPL)")
-    print(f"  200 Pa = {amplitude_to_dB_SPL(200.0):.1f} dB SPL (approx. 140 dB SPL)")
+    print(f"  1 Pa   = {amplitude_to_dB_SPL(1.0):.1f} dB SPL")
+    print(f"  20 Pa  = {amplitude_to_dB_SPL(20.0):.1f} dB SPL")
+    print(f"  200 Pa = {amplitude_to_dB_SPL(200.0):.1f} dB SPL")
 
     return 0
 
