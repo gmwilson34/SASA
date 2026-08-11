@@ -86,6 +86,15 @@ py-modules = [
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["error::SyntaxWarning"]
+markers = [
+    # The AHAAH reference-case gate (docs/AHAAH-SPEC.md section 11.5). It fails
+    # because the public ARL release does not contain enough to reproduce the
+    # model. That failure is ACTED ON, not just recorded: ahaah.VALIDATION_STATUS
+    # is "not_validated" and ahaah.compute_ahaah() emits no number at all, so
+    # nothing in SASA can present an ARU. Deselect with -m "not validation" if you
+    # need a green board; never by loosening the tolerances. See docs/AHAAH.md.
+    "validation: reference-case validation of ahaah.py against the ARL 160F case",
+]
 
 [tool.ruff]
 line-length = 120

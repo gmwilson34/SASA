@@ -1,0 +1,99 @@
+1         Alphar
+0         Alphai
+2         Betar 2, 1, 0
+0         Betai
+1.29e-1   Rdf
+2.56e-5   Ldf
+2.215     L1
+6.962e-1  L2
+0.44      S1
+4.3       S2
+1.4e-2    Lh
+5.1e-6    Cb
+91.85     Rh
+0.35e-6   Cm
+4.6e-3    Lds
+1.147e+3  Rds
+0.395e-6  Cds
+2.2e-2    Ldm
+2.31e-6   Cdc
+60.6      Rdc
+20        Nt
+8.391e+5  Rmi
+4.33E-10  Cmi
+2.44      Li
+0.475e+5  Ris
+4.57e-10  Cis
+2.44      Ls
+6.25      Lv
+52.4      Lo
+2.06e+5   Ral
+2.64e+6   Rc
+1.8e+5    Ro
+4.9e-10   Cal
+1.38e-8   Crw
+2.1e-2    Astapes
+30        Lgap
+0.01      Eo
+0.20      Eb
+6         Ramp
+1e9       So    dyne/cm^3 BM stiffness per unit area at base
+5.8e-3    Mo    g/cm^3  BM + vertically moving fluid mass per unit area at base
+91.2      Rvo   dyne-sec/cm^3 BM viscous-resistance per unit area at base
+0.008     Bo    cm, Width of BM at base
+1.25e-2   Ao    cm^2 effective scala cross-section area = Sv*St/(Sv+St)
+20000     Fo    Hz, Max resonant freq at base of BM
+0.03      Delo  loss constant at base of BM fwhm/charfreq
+0.666     D1    cm S(x)=So exp(-x/D1) stiffness dec char length D1:=1/(2/Dc-1/D2)
+1         D2    cm M(x)=Mo exp( x/D2) mass inc char length  (D2:=D4/2)
+1         D3    cm R(x)=Rvo exp(x/D3) resistance inc char length (D3:=D4/2)
+2         D4    cm B(x)=Bo exp( x/D4) BM width inc char length
+2         D5    cm A(x)=Ao exp(-x/D5) Scale area dec char length (D5:=D4)
+0.8       Dc    cm F(x)=Fo exp(-x/Dc) char length for resonant freq
+2.0  1.23 Nw
+0.5 0.316 Ca Cochlear Amplifier Gain
+2.0       Bcoef
+3.5       XbApex physical length of cochlea from base to apex
+0.425     XbmFrom
+3.175     XbmTo
+23        XbmNo
+1         SweightBase stress weight at base of cochlea X=0
+1.0 0.2   SweightApex stress weight at apex of cochlea X=Xbapex
+0         DamageThreshold
+9.0E-3 -50E-3  sec MemDelay for evoked response
+11.7e-3   sec MemTimeConst
+12 1 6    MemMagK
+12 1 12   MemMagR
+2.5       AdaptFactor
+0.0724 .025 0.15 CochlearGainFactor  (0.15 for WKBOrig) (0.025 for WKBTaper)
+0.75 0.9  WkbScalaBMwidthDecay cm^-1 decay length based on tapering factors
+2        CochlearModelType 3=WKBNoTaper 2=WKBTaper 1=WKBOrig  0=DifEqn
+0        MakeXfrFile    1=Yes 0=No
+1        PrintHazTable  1=Yes 0=No
+0        SaveBMD        1=Yes 0=No
+0        SaveSTD        1=Yes 0=No
+0        MultiGraph     1=Yes 0=No
+0        Earplug        1=Yes 0=No
+0        HeadPhone      1=Yes  0=No
+1        HornExtEar     1=Horn 0=Three-cylinders
+1        Tm3Piston      1=Two  0=Three piston eardrum
+0        TerminateCochlea 1=infinite termination 0=finite termination
+9e-6      Ccush cm^5/dyne      Acoustic area=Pi*Sqr(3.5cm)
+540       Rcush dyne-sec/cm^5
+1.5e-5    Cskin cm^5/dyne       ( leak path length = 1 cm )
+250       Rskin dyne-sec/cm^5  0.1   0.2   0.5    1.0    2.0    5.0    10     20(leak diameter mm)
+2e-3 2e-3 2e-1 Lleak g/cm^4     2.0E1 5.0E0 8.0E-1 2.0E-1 5.0E-2 8.0E-3 2.0e-3 5.0e-4
+3 3 7.3e1   Rleak dyne-sec/cm^5 7.3E5 4.6E4 1.2E3  7.3E1  4.6E0  1.2E-1 7.3e-2 4.6e-3
+40e-3     Lcup g/cm^4     60 gram mass
+7e-5      Ccup cm^5/dyne  7e-5:100cm^3 volume Vcup/RhoC2
+2.0       Rmat
+56e-6     Lmat
+7e-6      Cmat
+
+
+
+
+
+
+
+
