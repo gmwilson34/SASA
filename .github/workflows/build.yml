@@ -60,13 +60,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           # The hosted runner image carries third-party apt repositories (azure-cli,
-          # google-chrome) that SASA does not need. When one of them is briefly
-          # unavailable, `apt-get update` exits 100 and fails the build for a reason
-          # unrelated to this project -- which is exactly what happened on
-          # ubuntu/py3.12 while the other two Ubuntu jobs passed. Drop them first so
-          # the update only consults the Ubuntu archives the packages come from.
-          sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
-          sudo apt-get update -o Acquire::Retries=3
+          # chrome) that SASA does not need. When one is briefly unavailable,
+          # `apt-get update` exits 100 and fails the build for a reason unrelated to
+          # this project -- which is what happened on ubuntu/py3.12 while the other
+          # two Ubuntu jobs passed.
+          #
+          # Do NOT try to delete the offending lists: on Noble the main Ubuntu
+          # archives themselves live in /etc/apt/sources.list.d/ubuntu.sources, so a
+          # wildcard removal takes out the repositories libsndfile1 comes from.
+          #
+          # A refresh failure is tolerated; the install immediately after is not, so
+          # a genuinely missing package still fails the job.
+          sudo apt-get update -o Acquire::Retries=3 || echo "apt-get update reported an error; continuing to install"
           sudo apt-get install -y --no-install-recommends libsndfile1 python3-tk
 
       - name: Install package + dev extras
