@@ -1,0 +1,240 @@
+/* ============================================================================
+   SASA Design System — "Ridgeback Instrument"
+   Ridgeback Defense
+
+   The visual language of a measurement instrument, not a console game. Every
+   colour pair below has been checked numerically against WCAG 2.1:
+
+     - all body/label/unit text        >= 4.5:1 on every surface it sits on
+     - input borders and focus rings   >= 3.0:1 (non-text UI boundaries)
+     - the primary button's label      >= 4.5:1 on its own fill
+
+   Colour carries MEANING here. The accent is used for interactive affordances
+   only, and the four semantic hues are reserved for measurement validity
+   (pass / caution / invalid / informational). Nothing is tinted for decoration,
+   because on an instrument a coloured element has to mean something.
+   ============================================================================ */
+
+:root {
+  color-scheme: light dark;
+
+  /* ---- Type ---------------------------------------------------------- */
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+               "Inter", "Helvetica Neue", Arial, sans-serif;
+  /* Measured values are set in a monospace face with TABULAR figures so digits
+     align in columns and a changing reading does not make the layout jitter. */
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+               "Roboto Mono", Menlo, Consolas, monospace;
+
+  --text-2xs: 0.6875rem;  /* 11px — dense table annotations */
+  --text-xs:  0.75rem;    /* 12px — units, captions */
+  --text-sm:  0.8125rem;  /* 13px — secondary UI */
+  --text-base:0.9375rem;  /* 15px — body (was 13px, too small to read as pro) */
+  --text-md:  1.0625rem;  /* 17px — card titles */
+  --text-lg:  1.375rem;   /* 22px — view headings */
+  --text-xl:  1.75rem;    /* 28px — page title */
+  --text-metric: 2rem;    /* 32px — headline measured value */
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.08em;
+
+  /* ---- Space (4px base) ---------------------------------------------- */
+  --space-1: 0.25rem;   --space-2: 0.5rem;   --space-3: 0.75rem;
+  --space-4: 1rem;      --space-5: 1.25rem;  --space-6: 1.5rem;
+  --space-8: 2rem;      --space-10: 2.5rem;  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* ---- Radius --------------------------------------------------------- */
+  /* Restrained. Heavily rounded corners read as consumer software; instrument
+     panels are square-ish. */
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* ---- Motion --------------------------------------------------------- */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --duration-fast: 110ms;
+  --duration: 180ms;
+
+  --sidebar-width: 240px;
+  --content-max: 1440px;
+}
+
+/* ============================================================================
+   LIGHT THEME (default)
+   Chosen as the default because measurement output is printed and shared, and
+   a report should look the same on screen as on paper.
+   ============================================================================ */
+:root,
+:root[data-theme="light"] {
+  --bg-canvas:   #F4F6F9;
+  --bg-surface:  #FFFFFF;
+  --bg-sunken:   #EAEEF3;
+  --bg-raised:   #FFFFFF;
+  --bg-inset:    #F7F9FB;
+
+  --border:        #C8D1DE;   /* card / divider — decorative */
+  --border-subtle: #E1E7EF;
+  --border-input:  #7C8798;   /* 3.64:1 on surface — a real UI boundary */
+
+  --text:    #0F141A;         /* 18.50:1 */
+  --text-2:  #48566A;         /*  7.46:1 */
+  --text-3:  #556274;         /*  6.20:1 — units, captions, table headers */
+  --text-on-accent: #FFFFFF;  /*  8.22:1 on accent */
+
+  --accent:        #14508C;   /*  8.22:1 */
+  --accent-hover:  #0E3E6F;
+  --accent-active: #0A3159;
+  --accent-wash:   #E8F0F9;
+  --accent-border: #A9C4E2;
+
+  --ok:      #1B6E3C;  --ok-wash:     #E4F3EA;  --ok-border:     #A5D6BA;
+  --warn:    #8A5A00;  --warn-wash:   #FBF0DC;  --warn-border:   #E4C489;
+  --danger:  #A32020;  --danger-wash: #FBE9E9;  --danger-border: #E8AFAF;
+  --info:    #0B5F73;  --info-wash:   #E2F1F5;  --info-border:   #9CCBD7;
+
+  --shadow-sm: 0 1px 2px rgba(15, 20, 26, 0.06);
+  --shadow:    0 1px 3px rgba(15, 20, 26, 0.09), 0 4px 12px rgba(15, 20, 26, 0.05);
+  --shadow-lg: 0 4px 12px rgba(15, 20, 26, 0.10), 0 16px 40px rgba(15, 20, 26, 0.09);
+  --shadow-inset: inset 0 1px 2px rgba(15, 20, 26, 0.05);
+
+  --plot-bg: #FFFFFF;
+  --scrim: rgba(15, 20, 26, 0.42);
+}
+
+/* ============================================================================
+   DARK THEME
+   For range work and low-light rooms. Not black — a dark blue-grey, so the
+   spectrograms and waveforms sit on a neutral field rather than a void.
+   ============================================================================ */
+:root[data-theme="dark"] {
+  --bg-canvas:   #0E1318;
+  --bg-surface:  #161C24;
+  --bg-sunken:   #0A0E13;
+  --bg-raised:   #1D242E;
+  --bg-inset:    #131920;
+
+  --border:        #2F3A47;
+  --border-subtle: #222B36;
+  --border-input:  #5A6878;   /* 3.01:1 on surface */
+
+  --text:    #E7ECF3;         /* 14.43:1 */
+  --text-2:  #AAB6C6;         /*  8.33:1 */
+  --text-3:  #8B99AB;         /*  5.91:1 */
+  --text-on-accent: #08111C;  /*  7.41:1 on accent */
+
+  --accent:        #5AA6F5;   /*  6.70:1 */
+  --accent-hover:  #7CBAFF;
+  --accent-active: #93C7FF;
+  --accent-wash:   #15263A;
+  --accent-border: #2C4B6E;
+
+  --ok:      #4ADE80;  --ok-wash:     #10241A;  --ok-border:     #1F4D33;
+  --warn:    #FBBF24;  --warn-wash:   #241C08;  --warn-border:   #55400F;
+  --danger:  #F87171;  --danger-wash: #2A1414;  --danger-border: #5C2626;
+  --info:    #38BDF8;  --info-wash:   #0C2029;  --info-border:   #1C4557;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow:    0 1px 3px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.55), 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-inset: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+
+  --plot-bg: #0F1419;
+  --scrim: rgba(3, 6, 10, 0.62);
+}
+
+/* Follow the OS when the user has not chosen explicitly. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-canvas:   #0E1318;
+    --bg-surface:  #161C24;
+    --bg-sunken:   #0A0E13;
+    --bg-raised:   #1D242E;
+    --bg-inset:    #131920;
+
+    --border:        #2F3A47;
+    --border-subtle: #222B36;
+    --border-input:  #5A6878;
+
+    --text:    #E7ECF3;
+    --text-2:  #AAB6C6;
+    --text-3:  #8B99AB;
+    --text-on-accent: #08111C;
+
+    --accent:        #5AA6F5;
+    --accent-hover:  #7CBAFF;
+    --accent-active: #93C7FF;
+    --accent-wash:   #15263A;
+    --accent-border: #2C4B6E;
+
+    --ok:      #4ADE80;  --ok-wash:     #10241A;  --ok-border:     #1F4D33;
+    --warn:    #FBBF24;  --warn-wash:   #241C08;  --warn-border:   #55400F;
+    --danger:  #F87171;  --danger-wash: #2A1414;  --danger-border: #5C2626;
+    --info:    #38BDF8;  --info-wash:   #0C2029;  --info-border:   #1C4557;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow:    0 1px 3px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.55), 0 16px 40px rgba(0, 0, 0, 0.45);
+    --shadow-inset: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+
+    --plot-bg: #0F1419;
+    --scrim: rgba(3, 6, 10, 0.62);
+  }
+}
+
+/* ============================================================================
+   Data-display colours
+
+   Series colours are ordered for categorical distinctness and are
+   deuteranopia-safe: the sequence never relies on a red/green distinction to
+   separate adjacent series.
+   ============================================================================ */
+:root {
+  --series-1: #14508C;  /* Z-weighted */
+  --series-2: #B45309;  /* A-weighted */
+  --series-3: #6D28D9;  /* C-weighted */
+  --series-4: #0F766E;  /* band / aggregate */
+  --series-5: #9D174D;  /* reference (unsuppressed) */
+  --series-6: #4D7C0F;  /* test (suppressed) */
+  --shot-marker: #A32020;
+}
+
+:root[data-theme="dark"] {
+  --series-1: #60A5FA;
+  --series-2: #FB923C;
+  --series-3: #A78BFA;
+  --series-4: #2DD4BF;
+  --series-5: #F472B6;
+  --series-6: #A3E635;
+  --shot-marker: #F87171;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --series-1: #60A5FA;  --series-2: #FB923C;  --series-3: #A78BFA;
+    --series-4: #2DD4BF;  --series-5: #F472B6;  --series-6: #A3E635;
+    --shot-marker: #F87171;
+  }
+}
+
+/* ============================================================================
+   Reduced motion — respected globally rather than per-component.
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
