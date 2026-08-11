@@ -14,7 +14,7 @@ import math
 import numpy as np
 import pytest
 
-from calibration import P_REF, energy_average_dB
+from calibration import energy_average_dB
 from conftest import make_decaying_sinusoid, make_friedlander, make_sine
 from metrics import (
     AggregateMetrics,

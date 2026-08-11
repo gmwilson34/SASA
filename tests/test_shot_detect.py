@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from calibration import P_REF, amplitude_to_dB_SPL
+from calibration import amplitude_to_dB_SPL
 from shot_detect import (
     DEFAULT_REFRACTORY_MS,
     DetectionReport,

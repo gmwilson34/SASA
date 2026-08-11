@@ -42,9 +42,6 @@ ui/node_modules/
 Thumbs.db
 Desktop.ini
 
-# Claude
-.claude/
-
 # Test artifacts
 test_waveform.png
 test_levels.png

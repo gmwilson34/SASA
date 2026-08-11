@@ -1365,7 +1365,7 @@ def _section_insertion_loss(metadata: Dict[str, Any], validity: ValidityReport) 
 def _section_hazard(metadata: Dict[str, Any], validity: ValidityReport) -> str:
     hazard = _dig(metadata, "aggregate", "hazard", default=None)
     if not isinstance(hazard, dict) or not hazard:
-        return f"""
+        return """
 <section>
   <h2>Hearing hazard</h2>
   <div class="note">No hearing-hazard assessment was computed for this measurement.</div>
@@ -1373,7 +1373,7 @@ def _section_hazard(metadata: Dict[str, Any], validity: ValidityReport) -> str:
 """
 
     if not validity.calibrated:
-        return f"""
+        return """
 <section>
   <h2>Hearing hazard</h2>
   <div class="note danger"><strong>No hazard assessment can be made.</strong>
