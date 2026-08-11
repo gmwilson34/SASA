@@ -1,332 +1,2276 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SASA — Shot Acoustic Spectral Analysis</title>
+
+  <!-- tokens.css MUST load first: styles.css consumes its custom properties. -->
+  <link rel="stylesheet" href="tokens.css" />
   <link rel="stylesheet" href="styles.css" />
+
+  <!--
+    Theme bootstrap. Inlined so the stored theme is applied before first paint;
+    without it a dark-theme user sees a white flash on every launch.
+    Storage key: "sasa.theme"  ->  "light" | "dark" | "system"
+    "system" (or absent) leaves data-theme off, which lets the
+    prefers-color-scheme block in tokens.css decide.
+  -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('sasa.theme');
+        if (t === 'light' || t === 'dark') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (e) { /* storage unavailable — fall back to system */ }
+    })();
+  </script>
 </head>
+
 <body>
 
-  <div class="app">
-    <!-- Sidebar -->
-    <nav class="sidebar">
-      <div class="sidebar-brand">
-        <div class="brand-icon">
-          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="14" width="3" height="8" rx="1" fill="currentColor" opacity="0.4"/>
-            <rect x="6" y="10" width="3" height="16" rx="1" fill="currentColor" opacity="0.55"/>
-            <rect x="10" y="6" width="3" height="24" rx="1" fill="currentColor" opacity="0.7"/>
-            <rect x="14" y="2" width="3" height="28" rx="1" fill="currentColor" opacity="0.85"/>
-            <rect x="18" y="4" width="3" height="24" rx="1" fill="currentColor" opacity="0.9"/>
-            <rect x="22" y="8" width="3" height="16" rx="1" fill="currentColor" opacity="0.7"/>
-            <rect x="26" y="12" width="3" height="8" rx="1" fill="currentColor" opacity="0.5"/>
-          </svg>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<!-- ===========================================================================
+     ICON SPRITE
+     Every icon in the app is a <symbol> here, so the renderer makes no
+     external requests. Use as: <svg class="icon" aria-hidden="true"><use href="#i-name"/></svg>
+     =========================================================================== -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Brand: the SASA waveform mark, carried over unchanged. -->
+    <symbol id="i-brand" viewBox="0 0 32 32">
+      <rect x="2"  y="14" width="3" height="8"  rx="1" fill="currentColor" opacity="0.4"/>
+      <rect x="6"  y="10" width="3" height="16" rx="1" fill="currentColor" opacity="0.55"/>
+      <rect x="10" y="6"  width="3" height="24" rx="1" fill="currentColor" opacity="0.7"/>
+      <rect x="14" y="2"  width="3" height="28" rx="1" fill="currentColor" opacity="0.85"/>
+      <rect x="18" y="4"  width="3" height="24" rx="1" fill="currentColor" opacity="0.9"/>
+      <rect x="22" y="8"  width="3" height="16" rx="1" fill="currentColor" opacity="0.7"/>
+      <rect x="26" y="12" width="3" height="8"  rx="1" fill="currentColor" opacity="0.5"/>
+    </symbol>
+
+    <!-- Navigation -->
+    <symbol id="i-analyze" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.2"/>
+      <path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/>
+    </symbol>
+    <symbol id="i-results" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.5 20h17"/><path d="M7 20v-6M12 20V7M17 20v-9"/>
+    </symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9h13"/><path d="M13.5 5.5 17 9l-3.5 3.5"/>
+      <path d="M20 15H7"/><path d="M10.5 11.5 7 15l3.5 3.5"/>
+    </symbol>
+    <symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M12 6.8v5.4l3.4 2"/>
+    </symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 7h9M18.5 7H20M4 17h5.5M15 17h5"/>
+      <circle cx="15.5" cy="7" r="2.4"/><circle cx="12.2" cy="17" r="2.4"/>
+    </symbol>
+
+    <!-- Semantic status -->
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.5 12.5 9.5 17.5 19.5 6.5"/>
+    </symbol>
+    <symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M7.6 12.4 10.6 15.4 16.6 8.9"/>
+    </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.6 2.3 20.4h19.4z"/><path d="M12 9.4v4.6"/><path d="M12 17.3h.01"/>
+    </symbol>
+    <symbol id="i-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>
+    </symbol>
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M12 11.2v5"/><path d="M12 7.6h.01"/>
+    </symbol>
+    <symbol id="i-question" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/>
+      <path d="M9.6 9.4a2.5 2.5 0 1 1 3.3 2.9c-.6.2-.9.7-.9 1.3v.6"/><path d="M12 17.2h.01"/>
+    </symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M5.6 5.6 18.4 18.4"/>
+    </symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3 19 6v5.6c0 4.6-3 8-7 9.4-4-1.4-7-4.8-7-9.4V6z"/><path d="M12 9v4"/><path d="M12 16.2h.01"/>
+    </symbol>
+
+    <!-- Direction -->
+    <symbol id="i-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14.5 5.5 8 12l6.5 6.5"/>
+    </symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9.5 5.5 16 12l-6.5 6.5"/>
+    </symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 4.5v15"/><path d="m6 13.5 6 6 6-6"/>
+    </symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 19.5v-15"/><path d="m6 10.5 6-6 6 6"/>
+    </symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <path d="M5 12h14"/>
+    </symbol>
+
+    <!-- Actions and objects -->
+    <symbol id="i-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 16V4.5"/><path d="m7 9.5 5-5 5 5"/>
+      <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>
+    </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/>
+      <path d="M13.5 3v5.5H19"/><path d="M8.5 15h1l1-2.5 1.5 5 1.2-3 .8 1.5h1.5"/>
+    </symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2l1.8 2.5h9A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>
+    </symbol>
+    <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <path d="M6 6l12 12M18 6 6 18"/>
+    </symbol>
+    <symbol id="i-play" viewBox="0 0 24 24">
+      <path d="M7 4.8v14.4L19 12z" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24">
+      <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5"/>
+      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2.5"/>
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 4v11"/><path d="m7 10.5 5 5 5-5"/><path d="M4.5 19.5h15"/>
+    </symbol>
+    <symbol id="i-print" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 9.5V4h10v5.5"/>
+      <path d="M7 17.5H5.5A1.5 1.5 0 0 1 4 16v-4.5A1.5 1.5 0 0 1 5.5 10h13a1.5 1.5 0 0 1 1.5 1.5V16a1.5 1.5 0 0 1-1.5 1.5H17"/>
+      <rect x="7" y="14" width="10" height="6" rx="1"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+      <circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.8 4.8"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4.5V10h-5.5"/>
+    </symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4.5V10h5.5"/>
+    </symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.5 7h15"/><path d="M10 7V5h4v2"/>
+      <path d="m6.5 7 .8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4L17.5 7"/>
+    </symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="2.5" width="6" height="12" rx="3"/>
+      <path d="M6 11.5a6 6 0 0 0 12 0"/><path d="M12 17.5V21"/>
+    </symbol>
+    <symbol id="i-clipboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 4.5H7.5A1.5 1.5 0 0 0 6 6v13.5A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H15"/>
+      <rect x="9" y="2.8" width="6" height="3.4" rx="1"/><path d="M9 11h6M9 14.5h6"/>
+    </symbol>
+    <symbol id="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 12h2.6l2-6.5L9.7 19l3-9.5 2.2 5.2H22"/>
+    </symbol>
+    <symbol id="i-bands" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2.5 20h19"/><path d="M5 20v-4M9 20v-8M13 20V5.5M17 20v-9.5M21 20v-5.5"/>
+    </symbol>
+    <symbol id="i-spectrogram" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="1.5"/>
+      <path d="M3 9h18M3 14h18M9 4v16M15 4v16"/>
+    </symbol>
+    <symbol id="i-table" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4.5" width="18" height="15" rx="1.5"/>
+      <path d="M3 9.5h18M3 14.5h18M10 9.5V19.5"/>
+    </symbol>
+    <symbol id="i-target" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/>
+    </symbol>
+
+    <!-- Theme -->
+    <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+      <circle cx="12" cy="12" r="4.2"/>
+      <path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6"/>
+    </symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.9 8.9 0 1 0 11.1 11.1z"/>
+    </symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/>
+    </symbol>
+  </defs>
+</svg>
+
+
+<!-- ===========================================================================
+     APP HEADER
+     =========================================================================== -->
+<header class="app-header">
+  <button type="button" class="brand" id="btn-brand-home" data-view="analyze">
+    <span class="brand-mark"><svg aria-hidden="true"><use href="#i-brand"/></svg></span>
+    <span class="brand-text">
+      <span class="brand-name">SASA</span>
+      <span class="brand-sub">Shot Acoustic Spectral Analysis · Ridgeback Defense</span>
+    </span>
+  </button>
+
+  <div class="app-header-actions">
+    <fieldset class="segmented" id="theme-switch">
+      <legend class="sr-only">Colour theme</legend>
+      <label class="segmented-option">
+        <input type="radio" name="theme" id="theme-light" value="light" />
+        <span><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg>Light</span>
+      </label>
+      <label class="segmented-option">
+        <input type="radio" name="theme" id="theme-dark" value="dark" />
+        <span><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg>Dark</span>
+      </label>
+      <label class="segmented-option">
+        <input type="radio" name="theme" id="theme-system" value="system" checked />
+        <span><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg>System</span>
+      </label>
+    </fieldset>
+
+    <button type="button" class="btn-icon" id="btn-print" aria-label="Print the current view">
+      <svg class="icon" aria-hidden="true"><use href="#i-print"/></svg>
+    </button>
+    <button type="button" class="btn-icon" id="btn-help" aria-label="About SASA and measurement method">
+      <svg class="icon" aria-hidden="true"><use href="#i-question"/></svg>
+    </button>
+  </div>
+</header>
+
+
+<div class="app-shell">
+
+  <!-- =========================================================================
+       SIDEBAR
+       ========================================================================= -->
+  <nav class="sidebar" aria-label="Primary">
+    <div>
+      <p class="sidebar-group-label" id="nav-group-measure">Measurement</p>
+      <ul class="sidebar-nav" aria-labelledby="nav-group-measure">
+        <li>
+          <button type="button" class="nav-item" data-view="analyze" aria-current="page">
+            <svg class="icon" aria-hidden="true"><use href="#i-analyze"/></svg>
+            <span>Analyze</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="nav-item" data-view="results" disabled>
+            <svg class="icon" aria-hidden="true"><use href="#i-results"/></svg>
+            <span>Results</span>
+            <span class="nav-badge num" id="nav-badge-shots" hidden>0</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="nav-item" data-view="compare">
+            <svg class="icon" aria-hidden="true"><use href="#i-compare"/></svg>
+            <span>Compare</span>
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <div>
+      <p class="sidebar-group-label" id="nav-group-records">Records</p>
+      <ul class="sidebar-nav" aria-labelledby="nav-group-records">
+        <li>
+          <button type="button" class="nav-item" data-view="history">
+            <svg class="icon" aria-hidden="true"><use href="#i-history"/></svg>
+            <span>History</span>
+            <span class="nav-badge num" id="nav-badge-history" hidden>0</span>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="nav-item" data-view="settings">
+            <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>
+            <span>Settings</span>
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <div class="sidebar-footer">
+      <span>Ridgeback Defense</span>
+      <span>SASA <span class="num" id="app-version">—</span></span>
+    </div>
+  </nav>
+
+
+  <!-- =========================================================================
+       MAIN
+       ========================================================================= -->
+  <main class="content" id="main" tabindex="-1">
+
+    <!-- Polite announcements that have no visible home of their own. -->
+    <p class="sr-only" id="live-announcer" role="status" aria-live="polite"></p>
+
+
+    <!-- =====================================================================
+         1. ANALYZE
+         ===================================================================== -->
+    <section class="view" id="view-analyze" data-view="analyze" aria-labelledby="analyze-title">
+
+      <div class="view-header">
+        <div class="view-header-text">
+          <h1 class="view-title" id="analyze-title">New analysis</h1>
+          <p class="view-subtitle">
+            Configure the measurement, then run it. Every field below is recorded in the
+            analysis metadata so the result can be defended later.
+          </p>
         </div>
-        <div class="brand-text">
-          <span class="brand-name">SASA</span>
-          <span class="brand-sub">Shot Acoustic Spectral Analysis</span>
+        <div class="view-actions">
+          <button type="button" class="btn btn-ghost" id="btn-load-defaults">
+            <svg class="icon" aria-hidden="true"><use href="#i-restore"/></svg>
+            Restore defaults
+          </button>
         </div>
       </div>
 
-      <div class="sidebar-nav">
-        <button class="nav-item active" data-view="analyze">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd"/></svg>
-          <span>New Analysis</span>
-        </button>
-        <button class="nav-item" data-view="results">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 2A1.5 1.5 0 0014 3.5v13a1.5 1.5 0 001.5 1.5h1a1.5 1.5 0 001.5-1.5v-13A1.5 1.5 0 0016.5 2h-1zM9.5 6A1.5 1.5 0 008 7.5v9A1.5 1.5 0 009.5 18h1a1.5 1.5 0 001.5-1.5v-9A1.5 1.5 0 0010.5 6h-1zM3.5 10A1.5 1.5 0 002 11.5v5A1.5 1.5 0 003.5 18h1A1.5 1.5 0 006 16.5v-5A1.5 1.5 0 004.5 10h-1z"/></svg>
-          <span>Results</span>
-        </button>
-        <button class="nav-item" data-view="history">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-13a.75.75 0 00-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 000-1.5h-3.25V5z" clip-rule="evenodd"/></svg>
-          <span>History</span>
-        </button>
-      </div>
+      <div class="flow">
 
-      <div class="sidebar-footer">
-        <span class="version-tag">v1.0</span>
-        <span class="footer-brand">Ridgeback Defense</span>
-      </div>
-    </nav>
+        <!-- ---- STEP 1 — RECORDING ------------------------------------- -->
+        <section class="flow-step" id="step-recording" aria-labelledby="step-recording-title">
+          <div class="flow-step-head">
+            <span class="flow-step-num" aria-hidden="true">1</span>
+            <h2 class="flow-step-title" id="step-recording-title">Recording</h2>
+            <p class="flow-step-note text-2">The shot recording to be analysed.</p>
+          </div>
 
-    <!-- Content Area -->
-    <main class="content">
-
-      <!-- ═══ ANALYZE VIEW ═══ -->
-      <section class="view active" id="view-analyze">
-        <div class="view-header">
-          <h1>New Analysis</h1>
-          <p class="view-subtitle">Configure and run acoustic analysis on a firearm recording</p>
-        </div>
-
-        <div class="analyze-grid">
-          <!-- File Selection Card -->
-          <div class="card file-card">
+          <div class="card">
             <div class="card-header">
-              <h2>Input File</h2>
-            </div>
-            <div class="card-body">
-              <div class="file-drop" id="file-drop">
-                <input type="file" id="file-input" accept=".wav,.flac,.aiff,.aif,.mp4,.mkv,.mov,.avi,.mts,.mxf" />
-                <div class="file-drop-icon">
-                  <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M24 32V16m0 0l-6 6m6-6l6 6"/>
-                    <path d="M8 32v4a4 4 0 004 4h24a4 4 0 004-4v-4"/>
-                  </svg>
-                </div>
-                <p class="file-drop-text">Drop a file here or click to browse</p>
-                <p class="file-drop-hint">WAV, FLAC, MP4, MOV, MKV, AVI</p>
+              <div>
+                <h3 class="card-title">Input file</h3>
+                <p class="card-subtitle">WAV, FLAC, AIFF or a video container with an audio track</p>
               </div>
-              <div class="file-selected hidden" id="file-selected">
-                <div class="file-info">
-                  <svg viewBox="0 0 20 20" fill="currentColor" class="file-icon"><path d="M3 3.5A1.5 1.5 0 014.5 2h6.879a1.5 1.5 0 011.06.44l4.122 4.12A1.5 1.5 0 0117 7.622V16.5a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 013 16.5v-13z"/></svg>
-                  <div>
-                    <p class="file-name" id="file-name"></p>
-                    <p class="file-path" id="file-path"></p>
-                  </div>
+              <div class="card-header-actions">
+                <span class="pill" id="input-format-pill" hidden data-tone="info">
+                  <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+                  <span id="input-format-text">—</span>
+                </span>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <div class="dropzone" id="file-dropzone">
+                <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></span>
+                <p class="dropzone-text">Drop a recording here, or choose a file</p>
+                <p class="dropzone-hint">.wav .flac .aiff .mp4 .mov .mkv .avi .mts .mxf</p>
+                <input type="file" id="file-input"
+                       accept=".wav,.flac,.aiff,.aif,.mp4,.mkv,.mov,.avi,.mts,.mxf"
+                       aria-label="Choose a recording to analyse" />
+              </div>
+
+              <div class="file-chip" id="file-chip" hidden>
+                <svg class="icon icon-lg icon-file" aria-hidden="true"><use href="#i-file"/></svg>
+                <div class="file-chip-body">
+                  <p class="file-chip-name" id="file-chip-name">—</p>
+                  <p class="file-chip-meta" id="file-chip-meta">—</p>
                 </div>
-                <button class="btn-icon" id="file-clear" title="Clear selection">
-                  <svg viewBox="0 0 20 20" fill="currentColor"><path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"/></svg>
+                <button type="button" class="btn-icon btn-icon-danger" id="btn-file-clear"
+                        aria-label="Remove the selected recording">
+                  <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
                 </button>
               </div>
-              <div class="path-input-section">
-                <div class="path-divider"><span>or enter file path</span></div>
-                <div class="path-row">
-                  <input type="text" id="file-path-input" class="form-input" placeholder="/path/to/recording.wav" />
-                  <button class="btn-secondary btn-sm" id="btn-set-path">Set</button>
+
+              <p class="divider-or"><span>or give a path on this machine</span></p>
+
+              <div class="field">
+                <label class="field-label" for="file-path-input">File path</label>
+                <div class="input-attached">
+                  <input type="text" class="input input-mono" id="file-path-input"
+                         placeholder="/Volumes/Range/2026-08-11/test-04.wav"
+                         aria-describedby="file-path-hint file-path-error" />
+                  <button type="button" class="btn btn-secondary" id="btn-file-path-set">Use path</button>
                 </div>
+                <p class="field-hint" id="file-path-hint">
+                  Useful for files too large to copy, or on a network volume.
+                </p>
+                <p class="field-error" id="file-path-error" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-error"/></svg>
+                  <span id="file-path-error-text">That path could not be read.</span>
+                </p>
               </div>
             </div>
           </div>
+        </section>
 
-          <!-- Calibration Card -->
+
+        <!-- ---- STEP 2 — CALIBRATION ----------------------------------- -->
+        <section class="flow-step" id="step-calibration" aria-labelledby="step-calibration-title">
+          <div class="flow-step-head">
+            <span class="flow-step-num" aria-hidden="true">2</span>
+            <h2 class="flow-step-title" id="step-calibration-title">Calibration</h2>
+            <p class="flow-step-note text-2">Decides whether the output is a sound pressure level at all.</p>
+          </div>
+
           <div class="card">
             <div class="card-header">
-              <h2>Calibration</h2>
-              <span class="card-badge">IEC 61672-1</span>
-            </div>
-            <div class="card-body">
-              <div class="form-group">
-                <label for="cal-mode">Calibration Method</label>
-                <select id="cal-mode" class="form-select">
-                  <option value="default">Default (143.96 Pa/FS)</option>
-                  <option value="direct">Direct Pa/FS</option>
-                  <option value="sensitivity">Microphone Sensitivity</option>
-                </select>
+              <div>
+                <h3 class="card-title">How was the level scale established?</h3>
+                <p class="card-subtitle">There is no default. Choose one method deliberately.</p>
               </div>
-              <div class="cal-fields hidden" id="cal-direct">
-                <div class="form-group">
-                  <label for="pa-per-fs">Pa per Full Scale</label>
-                  <input type="number" id="pa-per-fs" class="form-input" value="143.96" step="0.01" />
+              <div class="card-header-actions">
+                <span class="pill pill-lg" id="cal-status-pill" data-tone="warn">
+                  <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+                  <span id="cal-status-text">Not set</span>
+                </span>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <div class="banner" data-tone="info">
+                <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></span>
+                <div class="banner-body">
+                  <p class="banner-text">
+                    SASA converts digital full scale to pascals using a single factor,
+                    <span class="num">Pa/FS</span>. Every level it reports — peak, exposure,
+                    band and hazard — depends on that one number. It is recorded in the
+                    analysis metadata alongside the method used to obtain it.
+                  </p>
                 </div>
               </div>
-              <div class="cal-fields hidden" id="cal-sensitivity">
-                <div class="form-row">
-                  <div class="form-group">
-                    <label for="sensitivity-mv">Sensitivity (mV/Pa)</label>
-                    <input type="number" id="sensitivity-mv" class="form-input" placeholder="e.g. 10" step="0.1" />
+
+              <hr class="rule" />
+
+              <fieldset class="fieldset" id="cal-method-group">
+                <legend class="fieldset-legend">Calibration method</legend>
+
+                <div class="radio-cards">
+                  <label class="radio-card">
+                    <input type="radio" name="cal-method" id="cal-method-tone" value="tone" />
+                    <span class="radio-card-body">
+                      <span class="radio-card-title">
+                        <svg class="icon" aria-hidden="true"><use href="#i-mic"/></svg>
+                        Calibrator tone recording
+                      </span>
+                      <span class="radio-card-desc">
+                        Upload a pistonphone or acoustic-calibrator recording made through
+                        the same chain. SASA derives Pa/FS from it and reports the residual.
+                      </span>
+                      <span class="radio-card-tag">Preferred</span>
+                    </span>
+                  </label>
+
+                  <label class="radio-card">
+                    <input type="radio" name="cal-method" id="cal-method-chain" value="chain" />
+                    <span class="radio-card-body">
+                      <span class="radio-card-title">
+                        <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>
+                        Recording chain
+                      </span>
+                      <span class="radio-card-desc">
+                        Compute Pa/FS from microphone sensitivity, preamplifier gain and
+                        the converter's full-scale voltage.
+                      </span>
+                    </span>
+                  </label>
+
+                  <label class="radio-card">
+                    <input type="radio" name="cal-method" id="cal-method-profile" value="profile" />
+                    <span class="radio-card-body">
+                      <span class="radio-card-title">
+                        <svg class="icon" aria-hidden="true"><use href="#i-clipboard"/></svg>
+                        Saved profile
+                      </span>
+                      <span class="radio-card-desc">
+                        Reuse a stored, named calibration for a chain you have already verified.
+                      </span>
+                    </span>
+                  </label>
+
+                  <label class="radio-card">
+                    <input type="radio" name="cal-method" id="cal-method-none" value="none" />
+                    <span class="radio-card-body">
+                      <span class="radio-card-title">
+                        <svg class="icon" aria-hidden="true"><use href="#i-ban"/></svg>
+                        Uncalibrated (relative dB)
+                      </span>
+                      <span class="radio-card-desc">
+                        Levels are reported as <strong>dB re FS</strong>, not dB SPL.
+                        Comparisons within one recording remain valid; absolute levels and
+                        hazard figures do not.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <!-- Method: calibrator tone -->
+              <div class="method-panel" id="cal-panel-tone" hidden>
+                <h4 class="method-panel-title">Calibrator tone recording</h4>
+
+                <div class="dropzone dropzone-sm" id="cal-tone-dropzone">
+                  <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></span>
+                  <p class="dropzone-text">Drop the calibrator recording, or choose a file</p>
+                  <p class="dropzone-hint">A few seconds of steady tone is enough</p>
+                  <input type="file" id="cal-tone-input" accept=".wav,.flac,.aiff,.aif"
+                         aria-label="Choose a calibrator tone recording" />
+                </div>
+
+                <div class="file-chip" id="cal-tone-chip" hidden>
+                  <svg class="icon icon-lg icon-file" aria-hidden="true"><use href="#i-file"/></svg>
+                  <div class="file-chip-body">
+                    <p class="file-chip-name" id="cal-tone-name">—</p>
+                    <p class="file-chip-meta" id="cal-tone-meta">—</p>
                   </div>
-                  <div class="form-group">
-                    <label for="v-per-fs">V per Full Scale</label>
-                    <input type="number" id="v-per-fs" class="form-input" placeholder="e.g. 1.0" step="0.1" />
+                  <button type="button" class="btn-icon btn-icon-danger" id="btn-cal-tone-clear"
+                          aria-label="Remove the calibrator recording">
+                    <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+                  </button>
+                </div>
+
+                <div class="field-grid mt-4">
+                  <div class="field" id="field-cal-tone-level">
+                    <label class="field-label" for="cal-tone-level">
+                      Calibrator level <span class="field-req">Required</span>
+                    </label>
+                    <select class="select" id="cal-tone-level" aria-describedby="cal-tone-level-hint">
+                      <option value="" selected>Choose a level…</option>
+                      <option value="94">94 dB SPL (1 Pa)</option>
+                      <option value="114">114 dB SPL (10 Pa)</option>
+                      <option value="124">124 dB SPL (31.7 Pa)</option>
+                    </select>
+                    <p class="field-hint" id="cal-tone-level-hint">Printed on the calibrator body.</p>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="cal-tone-freq">Calibrator frequency</label>
+                    <div class="input-group">
+                      <input type="number" class="input" id="cal-tone-freq" value="1000"
+                             min="31.5" max="10000" step="0.1" aria-describedby="cal-tone-freq-hint" />
+                      <span class="input-suffix">Hz</span>
+                    </div>
+                    <p class="field-hint" id="cal-tone-freq-hint">Usually 1 000 Hz or 250 Hz.</p>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="cal-tone-result">Derived scale factor</label>
+                    <div class="input-group">
+                      <input type="text" class="input input-computed" id="cal-tone-result"
+                             readonly value="—" aria-describedby="cal-tone-result-hint" />
+                      <span class="input-suffix">Pa/FS</span>
+                    </div>
+                    <p class="field-hint" id="cal-tone-result-hint">
+                      Computed by SASA from the tone. Residual: <span class="num" id="cal-tone-residual">—</span> dB
+                    </p>
                   </div>
                 </div>
               </div>
-              <div class="form-group">
-                <label for="cal-desc">Description (optional)</label>
-                <input type="text" id="cal-desc" class="form-input" placeholder="e.g. B&amp;K 4189 + Zoom F6" />
+
+              <!-- Method: recording chain -->
+              <div class="method-panel" id="cal-panel-chain" hidden>
+                <h4 class="method-panel-title">Recording chain</h4>
+
+                <div class="field-grid-3">
+                  <div class="field" id="field-cal-sensitivity">
+                    <label class="field-label" for="cal-sensitivity">
+                      Microphone sensitivity <span class="field-req">Required</span>
+                    </label>
+                    <div class="input-group">
+                      <input type="number" class="input" id="cal-sensitivity" placeholder="e.g. 12.5"
+                             min="0.001" step="0.001" aria-describedby="cal-sensitivity-hint cal-sensitivity-error" />
+                      <span class="input-suffix">mV/Pa</span>
+                    </div>
+                    <p class="field-hint" id="cal-sensitivity-hint">
+                      From the calibration chart. Range 0.1–100 for measurement microphones.
+                    </p>
+                    <p class="field-error" id="cal-sensitivity-error" hidden>
+                      <svg class="icon" aria-hidden="true"><use href="#i-error"/></svg>
+                      <span>Enter the sensitivity from the microphone's calibration chart.</span>
+                    </p>
+                  </div>
+
+                  <div class="field" id="field-cal-gain">
+                    <label class="field-label" for="cal-gain">
+                      Preamplifier gain <span class="field-req">Required</span>
+                    </label>
+                    <div class="input-group">
+                      <input type="number" class="input" id="cal-gain" placeholder="e.g. 0"
+                             min="-20" max="80" step="0.1" aria-describedby="cal-gain-hint" />
+                      <span class="input-suffix">dB</span>
+                    </div>
+                    <p class="field-hint" id="cal-gain-hint">Range −20 to +80 dB. Enter 0 if unity.</p>
+                  </div>
+
+                  <div class="field" id="field-cal-fsv">
+                    <label class="field-label" for="cal-fsv">
+                      ADC full scale <span class="field-req">Required</span>
+                    </label>
+                    <div class="input-group">
+                      <input type="number" class="input" id="cal-fsv" placeholder="e.g. 3.16"
+                             min="0.01" step="0.01" aria-describedby="cal-fsv-hint" />
+                      <span class="input-suffix">V</span>
+                    </div>
+                    <p class="field-hint" id="cal-fsv-hint">
+                      Peak volts producing digital full scale. Typically 1–12 V.
+                    </p>
+                  </div>
+
+                  <div class="field field-span-all">
+                    <label class="field-label" for="cal-chain-result">Resulting scale factor</label>
+                    <div class="input-group">
+                      <input type="text" class="input input-computed" id="cal-chain-result"
+                             readonly value="—" aria-describedby="cal-chain-result-hint" />
+                      <span class="input-suffix">Pa/FS</span>
+                    </div>
+                    <p class="field-hint" id="cal-chain-result-hint">
+                      Full scale corresponds to <span class="num" id="cal-chain-fsdb">—</span> dB SPL.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Method: saved profile -->
+              <div class="method-panel" id="cal-panel-profile" hidden>
+                <h4 class="method-panel-title">Saved profile</h4>
+
+                <div class="field">
+                  <label class="field-label" for="cal-profile-select">
+                    Profile <span class="field-req">Required</span>
+                  </label>
+                  <div class="input-attached">
+                    <select class="select" id="cal-profile-select" aria-describedby="cal-profile-hint">
+                      <option value="" selected>Choose a saved profile…</option>
+                    </select>
+                    <button type="button" class="btn btn-secondary" id="btn-manage-profiles">Manage…</button>
+                  </div>
+                  <p class="field-hint" id="cal-profile-hint">
+                    Profiles are stored locally with the date they were verified.
+                  </p>
+                </div>
+
+                <dl class="kv-list mt-4" id="cal-profile-summary">
+                  <dt>Scale factor</dt><dd id="cal-profile-pafs">—</dd>
+                  <dt>Method</dt><dd id="cal-profile-method">—</dd>
+                  <dt>Verified</dt><dd id="cal-profile-date">—</dd>
+                </dl>
+              </div>
+
+              <!-- Method: uncalibrated -->
+              <div class="method-panel" id="cal-panel-none" hidden>
+                <h4 class="method-panel-title">Uncalibrated</h4>
+
+                <div class="banner" data-tone="warn">
+                  <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg></span>
+                  <div class="banner-body">
+                    <p class="banner-title">Output will be dB re FS, not dB SPL</p>
+                    <p class="banner-text">
+                      Levels are referenced to digital full scale. They are <strong>not</strong>
+                      sound pressure levels, cannot be compared against another recording or
+                      another chain, and no hearing-hazard figure will be produced. Insertion
+                      loss measured between two recordings made on the same unchanged chain
+                      remains valid, because the unknown factor cancels.
+                    </p>
+                  </div>
+                </div>
+
+                <label class="check mt-4">
+                  <input type="checkbox" id="cal-uncal-ack" />
+                  <span class="check-text">
+                    <span>I understand these results are relative levels, not sound pressure levels.</span>
+                    <span class="field-hint">This acknowledgement is written into the analysis metadata.</span>
+                  </span>
+                </label>
+              </div>
+
+              <hr class="rule" />
+
+              <div class="field">
+                <label class="field-label" for="cal-description">
+                  Calibration description <span class="field-opt">Optional</span>
+                </label>
+                <input type="text" class="input" id="cal-description"
+                       placeholder="e.g. GRAS 46BE + Zoom F6, verified 2026-08-10"
+                       aria-describedby="cal-description-hint" />
+                <p class="field-hint" id="cal-description-hint">
+                  Free text stored verbatim in <span class="num">calibration.description</span>.
+                </p>
+              </div>
+            </div>
+
+            <div class="card-footer">
+              <span id="cal-footer-summary">Level unit: <span class="num" id="cal-level-unit">—</span></span>
+              <div class="card-footer-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-cal-save-profile" disabled>
+                  Save as profile
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+
+        <!-- ---- STEP 3 — TEST RECORD ----------------------------------- -->
+        <section class="flow-step" id="step-metadata" aria-labelledby="step-metadata-title">
+          <div class="flow-step-head">
+            <span class="flow-step-num" aria-hidden="true">3</span>
+            <h2 class="flow-step-title" id="step-metadata-title">Test record</h2>
+            <p class="flow-step-note text-2">What was measured, with what, where and in what conditions.</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3 class="card-title">Test metadata</h3>
+                <p class="card-subtitle">
+                  Fields marked <span class="field-req">Required</span> are the minimum for a
+                  defensible measurement record.
+                </p>
+              </div>
+              <div class="card-header-actions">
+                <span class="card-badge">MIL-STD-1474E · ISO 17201</span>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <form id="metadata-form" novalidate>
+
+                <!-- Session -->
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">
+                    <svg class="icon" aria-hidden="true"><use href="#i-clipboard"/></svg>Session
+                  </legend>
+                  <div class="field-grid">
+                    <div class="field" id="field-md-operator">
+                      <label class="field-label" for="md-operator">Operator <span class="field-req">Required</span></label>
+                      <input type="text" class="input" id="md-operator" name="operator"
+                             autocomplete="name" placeholder="Name of the person running the test"
+                             aria-describedby="md-operator-error" />
+                      <p class="field-error" id="md-operator-error" hidden>
+                        <svg class="icon" aria-hidden="true"><use href="#i-error"/></svg>
+                        <span>An operator must be named for the record to be attributable.</span>
+                      </p>
+                    </div>
+
+                    <div class="field" id="field-md-date">
+                      <label class="field-label" for="md-date">Test date <span class="field-req">Required</span></label>
+                      <input type="date" class="input" id="md-date" name="date" />
+                    </div>
+
+                    <div class="field">
+                      <label class="field-label" for="md-location">Location <span class="field-opt">Recommended</span></label>
+                      <input type="text" class="input" id="md-location" name="location"
+                             placeholder="Range, bay, or coordinates" aria-describedby="md-location-hint" />
+                      <p class="field-hint" id="md-location-hint">Outdoor free-field sites give the most defensible result.</p>
+                    </div>
+
+                    <div class="field" id="field-md-configuration">
+                      <span class="field-label">
+                        <label for="md-configuration">Configuration</label>
+                        <span class="field-req">Required</span>
+                        <span class="tip-wrap">
+                          <button type="button" class="info-dot" aria-describedby="tip-configuration"
+                                  aria-label="What configuration means">
+                            <svg class="icon" aria-hidden="true"><use href="#i-question"/></svg>
+                          </button>
+                          <span class="tip" id="tip-configuration" role="tooltip">
+                            The Compare view pairs one unsuppressed reference against one
+                            suppressed test to compute insertion loss. This field is what
+                            makes the pairing possible.
+                          </span>
+                        </span>
+                      </span>
+                      <select class="select" id="md-configuration" name="configuration">
+                        <option value="" selected>Choose…</option>
+                        <option value="unsuppressed">Unsuppressed — reference</option>
+                        <option value="suppressed">Suppressed — test</option>
+                      </select>
+                    </div>
+                  </div>
+                </fieldset>
+
+                <!-- Weapon and ammunition -->
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">
+                    <svg class="icon" aria-hidden="true"><use href="#i-target"/></svg>Weapon and ammunition
+                  </legend>
+                  <div class="field-grid">
+                    <div class="field" id="field-md-weapon">
+                      <label class="field-label" for="md-weapon">Weapon <span class="field-req">Required</span></label>
+                      <input type="text" class="input" id="md-weapon" name="weapon"
+                             placeholder="Make, model, calibre" />
+                    </div>
+
+                    <div class="field">
+                      <label class="field-label" for="md-barrel">Barrel length <span class="field-opt">Recommended</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-barrel" name="barrel_length_in"
+                               placeholder="e.g. 16" min="1" max="60" step="0.1"
+                               aria-describedby="md-barrel-hint" />
+                        <span class="input-suffix">in</span>
+                      </div>
+                      <p class="field-hint" id="md-barrel-hint">Range 1–60 in.</p>
+                    </div>
+
+                    <div class="field" id="field-md-ammunition">
+                      <label class="field-label" for="md-ammunition">Ammunition <span class="field-req">Required</span></label>
+                      <input type="text" class="input" id="md-ammunition" name="ammunition"
+                             placeholder="Manufacturer, load, bullet weight" aria-describedby="md-ammunition-hint" />
+                      <p class="field-hint" id="md-ammunition-hint">
+                        Note whether the load is subsonic — it determines whether a ballistic
+                        crack is present.
+                      </p>
+                    </div>
+
+                    <div class="field" id="field-md-suppressor">
+                      <label class="field-label" for="md-suppressor">
+                        Suppressor <span class="field-opt" id="md-suppressor-req">Required when suppressed</span>
+                      </label>
+                      <input type="text" class="input" id="md-suppressor" name="suppressor"
+                             placeholder="Make, model, serial" />
+                    </div>
+                  </div>
+                </fieldset>
+
+                <!-- Microphone and geometry -->
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">
+                    <svg class="icon" aria-hidden="true"><use href="#i-mic"/></svg>Microphone and geometry
+                  </legend>
+                  <div class="field-grid-3">
+                    <div class="field" id="field-md-mic-model">
+                      <label class="field-label" for="md-mic-model">Microphone <span class="field-req">Required</span></label>
+                      <input type="text" class="input" id="md-mic-model" name="mic_model"
+                             placeholder="e.g. GRAS 46BE" aria-describedby="md-mic-model-hint" />
+                      <p class="field-hint" id="md-mic-model-hint">Must be a pressure microphone rated above the expected peak.</p>
+                    </div>
+
+                    <div class="field">
+                      <label class="field-label" for="md-mic-serial">Serial number <span class="field-opt">Recommended</span></label>
+                      <input type="text" class="input input-mono" id="md-mic-serial" name="mic_serial" />
+                    </div>
+
+                    <div class="field" id="field-md-distance">
+                      <label class="field-label" for="md-distance">Distance <span class="field-req">Required</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-distance" name="mic_distance_m"
+                               placeholder="e.g. 1.0" min="0.1" max="100" step="0.01"
+                               aria-describedby="md-distance-hint" />
+                        <span class="input-suffix">m</span>
+                      </div>
+                      <p class="field-hint" id="md-distance-hint">From the muzzle. 1 m is the usual reference.</p>
+                    </div>
+
+                    <div class="field" id="field-md-angle">
+                      <label class="field-label" for="md-angle">Angle <span class="field-req">Required</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-angle" name="mic_angle_deg"
+                               placeholder="e.g. 90" min="0" max="360" step="1"
+                               aria-describedby="md-angle-hint" />
+                        <span class="input-suffix">deg</span>
+                      </div>
+                      <p class="field-hint" id="md-angle-hint">0° is downrange; 90° is left of the muzzle.</p>
+                    </div>
+
+                    <div class="field" id="field-md-height">
+                      <label class="field-label" for="md-height">Height <span class="field-req">Required</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-height" name="mic_height_m"
+                               placeholder="e.g. 1.6" min="0" max="10" step="0.01"
+                               aria-describedby="md-height-hint" />
+                        <span class="input-suffix">m</span>
+                      </div>
+                      <p class="field-hint" id="md-height-hint">Above ground, matched to the muzzle where possible.</p>
+                    </div>
+                  </div>
+                </fieldset>
+
+                <!-- Environment -->
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">
+                    <svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg>Environment
+                  </legend>
+                  <div class="field-grid-3">
+                    <div class="field" id="field-md-temp">
+                      <label class="field-label" for="md-temp">Temperature <span class="field-req">Required</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-temp" name="temperature_C"
+                               placeholder="e.g. 21" min="-40" max="60" step="0.1"
+                               aria-describedby="md-temp-hint" />
+                        <span class="input-suffix">°C</span>
+                      </div>
+                      <p class="field-hint" id="md-temp-hint">Range −40 to 60 °C.</p>
+                    </div>
+
+                    <div class="field" id="field-md-humidity">
+                      <label class="field-label" for="md-humidity">Relative humidity <span class="field-req">Required</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-humidity" name="humidity_pct"
+                               placeholder="e.g. 45" min="0" max="100" step="1"
+                               aria-describedby="md-humidity-hint" />
+                        <span class="input-suffix">%</span>
+                      </div>
+                      <p class="field-hint" id="md-humidity-hint">Range 0–100 %.</p>
+                    </div>
+
+                    <div class="field" id="field-md-pressure">
+                      <label class="field-label" for="md-pressure">Static pressure <span class="field-req">Required</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-pressure" name="pressure_kPa"
+                               placeholder="e.g. 101.3" min="50" max="110" step="0.1"
+                               aria-describedby="md-pressure-hint" />
+                        <span class="input-suffix">kPa</span>
+                      </div>
+                      <p class="field-hint" id="md-pressure-hint">Range 50–110 kPa. Affects the reference impedance.</p>
+                    </div>
+
+                    <div class="field">
+                      <label class="field-label" for="md-wind">Wind speed <span class="field-opt">Recommended</span></label>
+                      <div class="input-group">
+                        <input type="number" class="input" id="md-wind" name="wind_mps"
+                               placeholder="e.g. 1.5" min="0" max="40" step="0.1"
+                               aria-describedby="md-wind-hint" />
+                        <span class="input-suffix">m/s</span>
+                      </div>
+                      <p class="field-hint" id="md-wind-hint">Above about 5 m/s a windscreen is mandatory.</p>
+                    </div>
+
+                    <div class="field field-span-all">
+                      <label class="field-label" for="md-notes">Notes <span class="field-opt">Optional</span></label>
+                      <textarea class="textarea" id="md-notes" name="notes" rows="3"
+                                placeholder="Anything that would change how another engineer reads this result."></textarea>
+                    </div>
+                  </div>
+                </fieldset>
+
+              </form>
+            </div>
+
+            <div class="card-footer">
+              <span id="metadata-completeness">
+                <span class="num" id="metadata-missing-count">0</span> required field(s) still empty
+              </span>
+            </div>
+          </div>
+        </section>
+
+
+        <!-- ---- STEP 4 — DETECTION AND ANALYSIS ------------------------ -->
+        <section class="flow-step" id="step-settings" aria-labelledby="step-settings-title">
+          <div class="flow-step-head">
+            <span class="flow-step-num" aria-hidden="true">4</span>
+            <h2 class="flow-step-title" id="step-settings-title">Detection and analysis</h2>
+            <p class="flow-step-note text-2">Defaults are sensible; change them only with reason.</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3 class="card-title">Shot detection</h3>
+                <p class="card-subtitle">How individual shots are found in the recording</p>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <fieldset class="fieldset" id="threshold-mode-group">
+                <legend class="fieldset-legend">Threshold mode</legend>
+                <div class="row">
+                  <label class="radio">
+                    <input type="radio" name="threshold-mode" id="threshold-mode-relative"
+                           value="relative" checked />
+                    <span class="check-text">
+                      <span>Relative — dB below the recording's peak</span>
+                      <span class="field-hint">Default. Works whether or not the recording is calibrated.</span>
+                    </span>
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="threshold-mode" id="threshold-mode-absolute" value="absolute" />
+                    <span class="check-text">
+                      <span>Absolute — a fixed level</span>
+                      <span class="field-hint">Only meaningful on a calibrated recording.</span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <div class="field-grid-3 mt-5">
+                <div class="field" id="field-threshold">
+                  <label class="field-label" for="threshold-value">Threshold</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="threshold-value" value="20"
+                           min="1" max="90" step="1" aria-describedby="threshold-hint" />
+                    <span class="input-suffix" id="threshold-unit">dB below peak</span>
+                  </div>
+                  <p class="field-hint" id="threshold-hint">Range 1–90 dB below peak. Typical 15–25.</p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="refractory-ms">Refractory period</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="refractory-ms" value="200"
+                           min="10" max="5000" step="10" aria-describedby="refractory-hint" />
+                    <span class="input-suffix">ms</span>
+                  </div>
+                  <p class="field-hint" id="refractory-hint">Minimum gap between shots. Range 10–5 000 ms.</p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="min-snr">Minimum shot SNR</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="min-snr" value="20"
+                           min="0" max="80" step="1" aria-describedby="min-snr-hint" />
+                    <span class="input-suffix">dB</span>
+                  </div>
+                  <p class="field-hint" id="min-snr-hint">Shots below this are kept but flagged. Range 0–80 dB.</p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="pre-ms">Pre-trigger window</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="pre-ms" value="20"
+                           min="1" max="500" step="1" aria-describedby="pre-ms-hint" />
+                    <span class="input-suffix">ms</span>
+                  </div>
+                  <p class="field-hint" id="pre-ms-hint">Captured before the arrival. Range 1–500 ms.</p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="post-ms">Post-trigger window</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="post-ms" value="500"
+                           min="50" max="5000" step="10" aria-describedby="post-ms-hint" />
+                    <span class="input-suffix">ms</span>
+                  </div>
+                  <p class="field-hint" id="post-ms-hint">
+                    Must outlast the decay or B-duration will be truncated. Range 50–5 000 ms.
+                  </p>
+                </div>
               </div>
             </div>
           </div>
 
-          <!-- Detection Settings Card -->
           <div class="card">
             <div class="card-header">
-              <h2>Shot Detection</h2>
-            </div>
-            <div class="card-body">
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="threshold-db">Threshold (dB SPL)</label>
-                  <input type="number" id="threshold-db" class="form-input" value="120" step="1" />
-                  <span class="form-hint">Typical: 100-130</span>
-                </div>
-                <div class="form-group">
-                  <label for="refractory-ms">Refractory (ms)</label>
-                  <input type="number" id="refractory-ms" class="form-input" value="200" step="10" />
-                  <span class="form-hint">Min gap between shots</span>
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="pre-ms">Pre-shot (ms)</label>
-                  <input type="number" id="pre-ms" class="form-input" value="50" step="5" />
-                </div>
-                <div class="form-group">
-                  <label for="post-ms">Post-shot (ms)</label>
-                  <input type="number" id="post-ms" class="form-input" value="200" step="10" />
-                </div>
+              <div>
+                <h3 class="card-title">Analysis and output</h3>
+                <p class="card-subtitle">Spectral resolution, band analysis and artefacts</p>
               </div>
             </div>
-          </div>
 
-          <!-- STFT & Output Card -->
-          <div class="card">
-            <div class="card-header">
-              <h2>Analysis Options</h2>
-            </div>
             <div class="card-body">
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="nperseg">FFT Window Size</label>
-                  <select id="nperseg" class="form-select">
-                    <option value="512">512</option>
-                    <option value="1024">1024</option>
-                    <option value="2048" selected>2048</option>
-                    <option value="4096">4096</option>
-                    <option value="8192">8192</option>
+              <div class="field-grid-3">
+                <div class="field">
+                  <label class="field-label" for="stft-nperseg">STFT window length</label>
+                  <div class="input-group">
+                    <select class="select" id="stft-nperseg" aria-describedby="stft-nperseg-hint">
+                      <option value="512">512</option>
+                      <option value="1024">1024</option>
+                      <option value="2048" selected>2048</option>
+                      <option value="4096">4096</option>
+                      <option value="8192">8192</option>
+                    </select>
+                    <span class="input-suffix">samples</span>
+                  </div>
+                  <p class="field-hint" id="stft-nperseg-hint">
+                    Resolution: <span class="num" id="stft-resolution">—</span> Hz per bin
+                  </p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="stft-overlap">STFT overlap</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="stft-overlap" value="75"
+                           min="0" max="95" step="5" aria-describedby="stft-overlap-hint" />
+                    <span class="input-suffix">%</span>
+                  </div>
+                  <p class="field-hint" id="stft-overlap-hint">Range 0–95 %. 75 % is a good default.</p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="stft-window">Window function</label>
+                  <select class="select" id="stft-window">
+                    <option value="hann" selected>Hann</option>
+                    <option value="blackmanharris">Blackman–Harris</option>
+                    <option value="flattop">Flat top</option>
                   </select>
                 </div>
-                <div class="form-group">
-                  <label for="formats">Plot Format</label>
-                  <select id="formats" class="form-select">
-                    <option value="png">PNG</option>
+
+                <div class="field">
+                  <label class="field-label" for="band-low">Band range — lowest centre</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="band-low" value="25"
+                           min="10" max="1000" step="1" aria-describedby="band-low-hint" />
+                    <span class="input-suffix">Hz</span>
+                  </div>
+                  <p class="field-hint" id="band-low-hint">1/3-octave nominal centre. Range 10–1 000 Hz.</p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="band-high">Band range — highest centre</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="band-high" value="20000"
+                           min="1000" max="40000" step="100" aria-describedby="band-high-hint" />
+                    <span class="input-suffix">Hz</span>
+                  </div>
+                  <p class="field-hint" id="band-high-hint">
+                    Capped at the Nyquist frequency of the recording.
+                  </p>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="plot-format">Plot format</label>
+                  <select class="select" id="plot-format">
+                    <option value="png" selected>PNG</option>
                     <option value="png,pdf">PNG + PDF</option>
                     <option value="png,svg">PNG + SVG</option>
                   </select>
                 </div>
               </div>
-              <div class="form-row checkbox-row">
-                <label class="form-checkbox">
-                  <input type="checkbox" id="compute-bands" checked />
-                  <span>1/3-Octave Band Analysis</span>
-                </label>
-                <label class="form-checkbox">
-                  <input type="checkbox" id="per-shot-plots" checked />
-                  <span>Per-Shot Summary Plots</span>
-                </label>
+
+              <hr class="rule" />
+
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">Weightings and artefacts</legend>
+                <div class="field-grid">
+                  <label class="check">
+                    <input type="checkbox" id="opt-weight-a" checked />
+                    <span class="check-text">
+                      <span>A-weighted metrics</span>
+                      <span class="field-hint">L<sub>AE</sub>, L<sub>AFmax</sub>, hazard dose</span>
+                    </span>
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="opt-weight-c" checked />
+                    <span class="check-text">
+                      <span>C-weighted metrics</span>
+                      <span class="field-hint">L<sub>CE</sub>, C-weighted peak</span>
+                    </span>
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="opt-bands" checked />
+                    <span class="check-text">
+                      <span>1/3-octave band exposure</span>
+                      <span class="field-hint">Required for the per-band insertion-loss chart</span>
+                    </span>
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="opt-per-shot-plots" checked />
+                    <span class="check-text">
+                      <span>Per-shot summary plots</span>
+                      <span class="field-hint">One figure per detected shot</span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <hr class="rule" />
+
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">
+                  <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Hearing hazard
+                </legend>
+                <div class="field-grid-3">
+                  <div class="field">
+                    <label class="field-label" for="hazard-criterion">Exposure criterion</label>
+                    <div class="input-group">
+                      <select class="select" id="hazard-criterion">
+                        <option value="85" selected>85 — NIOSH / EU</option>
+                        <option value="87">87 — EU exposure limit</option>
+                        <option value="90">90 — OSHA</option>
+                      </select>
+                      <span class="input-suffix">dB L<sub>Aeq,8h</sub></span>
+                    </div>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="hazard-rounds">Rounds per working day</label>
+                    <div class="input-group">
+                      <input type="number" class="input" id="hazard-rounds" value="100"
+                             min="1" max="100000" step="1" aria-describedby="hazard-rounds-hint" />
+                      <span class="input-suffix">rounds</span>
+                    </div>
+                    <p class="field-hint" id="hazard-rounds-hint">Used for the dose calculation only.</p>
+                  </div>
+                </div>
+              </fieldset>
+            </div>
+          </div>
+        </section>
+
+
+        <!-- ---- STEP 5 — RUN ------------------------------------------- -->
+        <section class="flow-step" id="step-run" aria-labelledby="step-run-title">
+          <div class="flow-step-head">
+            <span class="flow-step-num" aria-hidden="true">5</span>
+            <h2 class="flow-step-title" id="step-run-title">Run</h2>
+          </div>
+
+          <div class="card">
+            <div class="card-body">
+              <!-- Explicit, live-announced reasons the run cannot start. -->
+              <div class="banner" data-tone="warn" id="run-blockers" role="status" aria-live="polite">
+                <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg></span>
+                <div class="banner-body">
+                  <p class="banner-title">Not ready to run</p>
+                  <ul class="stack-2" id="run-blockers-list">
+                    <li class="banner-text">Select a recording.</li>
+                    <li class="banner-text">Choose a calibration method.</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="row mt-5">
+                <button type="button" class="btn btn-primary btn-lg" id="btn-run"
+                        disabled aria-describedby="run-blockers">
+                  <svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>
+                  Run analysis
+                </button>
+                <button type="button" class="btn btn-danger" id="btn-cancel-run" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-stop"/></svg>
+                  Cancel
+                </button>
+                <span class="row-end unit" id="run-hint">Analysis runs locally; nothing leaves this machine.</span>
               </div>
             </div>
           </div>
-        </div>
 
-        <!-- Run Button -->
-        <div class="run-section">
-          <button class="btn-run" id="btn-run" disabled>
-            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M6.3 2.84A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.27l9.344-5.891a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
-            <span>Run Analysis</span>
-          </button>
-        </div>
-
-        <!-- Progress Section -->
-        <div class="progress-section hidden" id="progress-section">
-          <div class="card">
+          <!-- Progress -->
+          <div class="card" id="run-progress-card" hidden>
             <div class="card-header">
-              <h2>Analysis Progress</h2>
-              <span class="progress-pct" id="progress-pct">0%</span>
+              <h3 class="card-title">Analysis in progress</h3>
+              <div class="card-header-actions">
+                <span class="pill" id="run-state-pill" data-tone="info">
+                  <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+                  <span id="run-state-text">Running</span>
+                </span>
+              </div>
             </div>
             <div class="card-body">
-              <div class="progress-bar">
-                <div class="progress-fill" id="progress-fill"></div>
+              <div class="progress" id="run-progress" data-state="indeterminate"
+                   role="group" aria-labelledby="run-progress-stage">
+                <div class="progress-head">
+                  <span class="progress-stage" id="run-progress-stage">Starting…</span>
+                  <span class="progress-pct num" id="run-progress-pct">0%</span>
+                </div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="run-progress-fill" role="progressbar"
+                       aria-labelledby="run-progress-stage" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
               </div>
-              <div class="log-container" id="log-container">
-                <pre class="log-output" id="log-output"></pre>
-              </div>
+
+              <h4 class="subsection-title mt-5">Analysis log</h4>
+              <div class="log" id="run-log" role="log" aria-label="Analysis log" tabindex="0"></div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <!-- ═══ RESULTS VIEW ═══ -->
-      <section class="view" id="view-results">
-        <div class="view-header">
-          <h1>Analysis Results</h1>
+      </div>
+    </section>
+
+
+    <!-- =====================================================================
+         2. RESULTS
+         ===================================================================== -->
+    <section class="view" id="view-results" data-view="results" aria-labelledby="results-title" hidden>
+
+      <div class="view-header">
+        <div class="view-header-text">
+          <h1 class="view-title" id="results-title">Results</h1>
           <p class="view-subtitle" id="results-subtitle">No analysis loaded</p>
         </div>
+        <div class="view-actions">
+          <button type="button" class="btn btn-secondary" id="btn-results-print">
+            <svg class="icon" aria-hidden="true"><use href="#i-print"/></svg>Print report
+          </button>
+          <button type="button" class="btn btn-secondary" id="btn-results-csv">
+            <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export CSV
+          </button>
+          <button type="button" class="btn btn-secondary" id="btn-results-folder">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>Open output folder
+          </button>
+          <button type="button" class="btn-icon" id="btn-results-copy-path"
+                  aria-label="Copy the output directory path">
+            <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>
+          </button>
+        </div>
+      </div>
 
-        <div class="results-empty" id="results-empty">
-          <div class="empty-icon">
-            <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M8 8h32v32H8z" rx="4"/>
-              <path d="M16 28l4-8 4 6 4-4 6 10"/>
-            </svg>
+      <!-- Empty -->
+      <div class="empty-state" id="results-empty">
+        <span class="empty-state-icon"><svg class="icon" aria-hidden="true"><use href="#i-results"/></svg></span>
+        <h2 class="empty-state-title">No measurement loaded</h2>
+        <p class="empty-state-text">
+          Run an analysis, or open a previous one from History.
+        </p>
+        <div class="empty-state-actions">
+          <button type="button" class="btn btn-primary" data-view="analyze">Start an analysis</button>
+          <button type="button" class="btn btn-secondary" data-view="history">Browse history</button>
+        </div>
+      </div>
+
+      <!-- Loading -->
+      <div class="stack" id="results-skeleton" hidden aria-hidden="true">
+        <div class="skeleton skeleton-line skeleton-line-lg"></div>
+        <div class="skeleton skeleton-line skeleton-line-sm"></div>
+        <div class="metric-grid">
+          <div class="skeleton skeleton-tile"></div>
+          <div class="skeleton skeleton-tile"></div>
+          <div class="skeleton skeleton-tile"></div>
+          <div class="skeleton skeleton-tile"></div>
+        </div>
+        <div class="skeleton skeleton-plot"></div>
+      </div>
+
+      <!-- Loaded -->
+      <div class="stack-6" id="results-loaded" hidden>
+
+        <!-- Measurement validity. Always first: an inadmissible measurement
+             must not be read as a result. -->
+        <div class="banner validity-banner" id="validity-banner" data-tone="info"
+             role="region" aria-labelledby="validity-title">
+          <div class="validity-head">
+            <span class="banner-icon"><svg class="icon" aria-hidden="true" id="validity-icon"><use href="#i-info"/></svg></span>
+            <div class="banner-body">
+              <p class="banner-title" id="validity-title">
+                <span id="validity-headline">Measurement validity</span>
+                <span class="pill pill-lg" id="validity-pill" data-tone="info">
+                  <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+                  <span id="validity-verdict">Unknown</span>
+                </span>
+              </p>
+              <p class="banner-text" id="validity-text">
+                Load a measurement to see whether it is admissible.
+              </p>
+              <div class="banner-actions" id="validity-actions" hidden>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-validity-details">
+                  Warnings and errors
+                </button>
+              </div>
+            </div>
           </div>
-          <p>Run an analysis to view results here</p>
+
+          <!-- Individual checks. Populated from quality{} and calibration{}. -->
+          <div class="check-grid" id="validity-checks"></div>
         </div>
 
-        <div class="results-loaded hidden" id="results-loaded">
-          <!-- Metrics Cards Row -->
-          <div class="metrics-row" id="metrics-row"></div>
+        <!-- Headline metrics -->
+        <section aria-labelledby="headline-metrics-title">
+          <h2 class="subsection-title" id="headline-metrics-title">Headline metrics — aggregate of valid shots</h2>
+          <div class="metric-grid" id="results-metrics"></div>
+        </section>
 
-          <!-- Tabs -->
-          <div class="results-tabs">
-            <button class="tab-btn active" data-tab="overview">Overview</button>
-            <button class="tab-btn" data-tab="spectrogram-z">Spectrogram (Z)</button>
-            <button class="tab-btn" data-tab="spectrogram-c">Spectrogram (C)</button>
-            <button class="tab-btn" data-tab="bands">1/3-Octave Bands</button>
-            <button class="tab-btn" data-tab="shots">Per-Shot Details</button>
-            <button class="tab-btn" data-tab="table">Metrics Table</button>
-          </div>
-
-          <!-- Tab Panels -->
-          <div class="tab-panel active" id="tab-overview">
-            <div class="plot-viewer" id="plot-waveform"></div>
-          </div>
-          <div class="tab-panel" id="tab-spectrogram-z">
-            <div class="plot-viewer" id="plot-spectrogram-z"></div>
-          </div>
-          <div class="tab-panel" id="tab-spectrogram-c">
-            <div class="plot-viewer" id="plot-spectrogram-c"></div>
-          </div>
-          <div class="tab-panel" id="tab-bands">
-            <div class="plot-viewer" id="plot-bands"></div>
-          </div>
-          <div class="tab-panel" id="tab-shots">
-            <!-- Shot navigator -->
-            <div class="shot-nav" id="shot-nav">
-              <button class="btn-icon shot-prev" id="shot-prev" title="Previous shot">
-                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd"/></svg>
-              </button>
-              <div class="shot-selector" id="shot-selector"></div>
-              <button class="btn-icon shot-next" id="shot-next" title="Next shot">
-                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>
-              </button>
-            </div>
-            <!-- Shot detail metrics -->
-            <div class="shot-metrics-row" id="shot-metrics-row"></div>
-            <!-- Shot band chart (built in-browser) -->
-            <div class="shot-chart-container">
-              <canvas id="shot-band-canvas" width="900" height="280"></canvas>
-            </div>
-            <!-- Shot summary image -->
-            <div class="plot-viewer" id="plot-shot-detail"></div>
-          </div>
-          <div class="tab-panel" id="tab-table">
-            <div class="table-container" id="metrics-table"></div>
-          </div>
-
-          <!-- Actions -->
-          <div class="results-actions">
-            <button class="btn-secondary" id="btn-copy-path">
-              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z"/><path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.44A1.5 1.5 0 008.378 6H4.5z"/></svg>
-              <span>Copy Output Path</span>
+        <!-- Tabs -->
+        <div>
+          <div class="tabs" role="tablist" aria-label="Result sections" id="results-tablist">
+            <button type="button" class="tab" role="tab" id="tab-overview"
+                    aria-controls="panel-overview" aria-selected="true" tabindex="0">
+              <svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg>Overview
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-spectrogram"
+                    aria-controls="panel-spectrogram" aria-selected="false" tabindex="-1">
+              <svg class="icon" aria-hidden="true"><use href="#i-spectrogram"/></svg>Spectrogram
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-bands"
+                    aria-controls="panel-bands" aria-selected="false" tabindex="-1">
+              <svg class="icon" aria-hidden="true"><use href="#i-bands"/></svg>1/3-octave bands
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-shots"
+                    aria-controls="panel-shots" aria-selected="false" tabindex="-1">
+              <svg class="icon" aria-hidden="true"><use href="#i-target"/></svg>Per-shot
+              <span class="tab-count" id="tab-shots-count">0</span>
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-table"
+                    aria-controls="panel-table" aria-selected="false" tabindex="-1">
+              <svg class="icon" aria-hidden="true"><use href="#i-table"/></svg>Metrics table
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-hazard"
+                    aria-controls="panel-hazard" aria-selected="false" tabindex="-1">
+              <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Hazard
             </button>
           </div>
-        </div>
-      </section>
 
-      <!-- ═══ HISTORY VIEW ═══ -->
-      <section class="view" id="view-history">
-        <div class="view-header">
-          <h1>Analysis History</h1>
-          <p class="view-subtitle">Previously completed analyses</p>
+          <!-- Overview -->
+          <div class="tabpanel" role="tabpanel" id="panel-overview"
+               aria-labelledby="tab-overview" tabindex="0" data-print-title="Overview">
+            <div class="stack">
+              <figure class="figure">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">Waveform and detected shots</span>
+                  <div class="row-end row">
+                    <button type="button" class="btn btn-ghost btn-sm" id="btn-overview-open">
+                      <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>Open full size
+                    </button>
+                  </div>
+                </figcaption>
+                <div class="figure-canvas">
+                  <img id="img-waveform" alt="Waveform of the recording with each detected shot marked." />
+                </div>
+                <div class="figure-legend">
+                  <span class="legend-item"><span class="legend-swatch" data-series="1"></span>Signal</span>
+                  <span class="legend-item"><span class="legend-swatch" data-series="4"></span>Detection threshold</span>
+                  <span class="legend-item"><span class="legend-swatch" data-series="5"></span>Detected shot</span>
+                </div>
+                <p class="figure-caption" id="caption-waveform">—</p>
+              </figure>
+
+              <div class="card-grid">
+                <div class="card">
+                  <div class="card-header"><h3 class="card-title">Source</h3></div>
+                  <div class="card-body">
+                    <dl class="kv-list" id="source-list">
+                      <dt>File</dt><dd id="src-file">—</dd>
+                      <dt>Sample rate</dt><dd id="src-samplerate">—</dd>
+                      <dt>Channels</dt><dd id="src-channels">—</dd>
+                      <dt>Format</dt><dd id="src-subtype">—</dd>
+                      <dt>Duration</dt><dd id="src-duration">—</dd>
+                    </dl>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="card-header">
+                    <h3 class="card-title">Calibration</h3>
+                    <div class="card-header-actions">
+                      <span class="pill" id="cal-result-pill" data-tone="info">
+                        <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+                        <span id="cal-result-text">—</span>
+                      </span>
+                    </div>
+                  </div>
+                  <div class="card-body">
+                    <dl class="kv-list" id="calibration-list">
+                      <dt>Level unit</dt><dd id="cal-out-unit">—</dd>
+                      <dt>Pa per FS</dt><dd id="cal-out-pafs">—</dd>
+                      <dt>Method</dt><dd id="cal-out-method">—</dd>
+                      <dt>Full scale</dt><dd id="cal-out-fullscale">—</dd>
+                      <dt>Residual</dt><dd id="cal-out-residual">—</dd>
+                    </dl>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="card-header"><h3 class="card-title">Provenance</h3></div>
+                  <div class="card-body">
+                    <dl class="kv-list" id="provenance-list">
+                      <dt>Software</dt><dd id="prov-software">—</dd>
+                      <dt>Commit</dt><dd id="prov-commit">—</dd>
+                      <dt>Run at</dt><dd id="prov-timestamp">—</dd>
+                      <dt>Input SHA-256</dt><dd id="prov-sha256">—</dd>
+                      <dt>Elapsed</dt><dd id="prov-elapsed">—</dd>
+                    </dl>
+                  </div>
+                  <div class="card-footer">
+                    <span>Schema <span class="num" id="prov-schema">—</span></span>
+                    <div class="card-footer-actions">
+                      <button type="button" class="btn btn-ghost btn-sm" id="btn-copy-sha">
+                        <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy hash
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="card-header"><h3 class="card-title">Test record</h3></div>
+                  <div class="card-body">
+                    <dl class="kv-list" id="test-metadata-list"></dl>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Spectrogram -->
+          <div class="tabpanel" role="tabpanel" id="panel-spectrogram"
+               aria-labelledby="tab-spectrogram" tabindex="0" data-print-title="Spectrogram" hidden>
+            <figure class="figure">
+              <figcaption class="figure-toolbar">
+                <label class="field-label" for="spectrogram-weighting">Weighting</label>
+                <select class="select" id="spectrogram-weighting">
+                  <option value="Z" selected>Z — unweighted</option>
+                  <option value="A">A-weighted</option>
+                  <option value="C">C-weighted</option>
+                </select>
+                <label class="field-label" for="spectrogram-shot">Shot</label>
+                <select class="select" id="spectrogram-shot">
+                  <option value="all" selected>Whole recording</option>
+                </select>
+              </figcaption>
+              <div class="figure-canvas">
+                <img id="img-spectrogram" alt="Spectrogram of the recording." />
+              </div>
+              <p class="figure-caption" id="caption-spectrogram">—</p>
+            </figure>
+          </div>
+
+          <!-- Bands -->
+          <div class="tabpanel" role="tabpanel" id="panel-bands"
+               aria-labelledby="tab-bands" tabindex="0" data-print-title="1/3-octave bands" hidden>
+            <div class="stack">
+              <figure class="figure">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">Mean band exposure</span>
+                </figcaption>
+                <div class="figure-canvas">
+                  <img id="img-bands" alt="Mean one-third-octave band exposure level against frequency." />
+                </div>
+                <div class="figure-legend">
+                  <span class="legend-item"><span class="legend-swatch" data-series="4"></span>Mean band exposure</span>
+                  <span class="legend-item"><span class="legend-swatch" data-series="2"></span>A-weighted</span>
+                </div>
+                <p class="figure-caption" id="caption-bands">—</p>
+              </figure>
+
+              <div class="table-scroll" tabindex="0" role="region" aria-label="Band exposure table, scrollable">
+                <table class="data-table" id="bands-table">
+                  <caption>Mean band exposure across all valid shots.</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Band centre<span class="th-unit">Hz</span></th>
+                      <th scope="col" class="col-num">Mean exposure<span class="th-unit">dB</span></th>
+                      <th scope="col" class="col-num">Std dev<span class="th-unit">dB</span></th>
+                      <th scope="col" class="col-num">Min<span class="th-unit">dB</span></th>
+                      <th scope="col" class="col-num">Max<span class="th-unit">dB</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="bands-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Per-shot -->
+          <div class="tabpanel" role="tabpanel" id="panel-shots"
+               aria-labelledby="tab-shots" tabindex="0" data-print-title="Per-shot detail" hidden>
+            <div class="stack">
+
+              <div class="shot-nav">
+                <button type="button" class="btn-icon" id="btn-shot-prev" aria-label="Previous shot">
+                  <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg>
+                </button>
+                <span class="shot-position" id="shot-position" aria-live="polite">— / —</span>
+                <button type="button" class="btn-icon" id="btn-shot-next" aria-label="Next shot">
+                  <svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+                </button>
+
+                <label class="sr-only" for="shot-select">Jump to shot</label>
+                <select class="select" id="shot-select"></select>
+
+                <span class="pill" id="shot-flag-pill" data-tone="ok">
+                  <svg class="icon" aria-hidden="true"><use href="#i-check-circle"/></svg>
+                  <span id="shot-flag-text">Valid</span>
+                </span>
+
+                <div class="shot-nav-actions">
+                  <button type="button" class="btn btn-danger btn-sm" id="btn-shot-reject">
+                    <svg class="icon" aria-hidden="true"><use href="#i-ban"/></svg>
+                    Reject this shot
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-shot-restore" hidden>
+                    <svg class="icon" aria-hidden="true"><use href="#i-restore"/></svg>
+                    Restore
+                  </button>
+                </div>
+              </div>
+
+              <div class="shot-strip" id="shot-strip" role="group" aria-label="All detected shots"></div>
+
+              <p class="prose" id="aggregate-status" role="status" aria-live="polite">
+                Aggregates include all <span class="num" id="aggregate-included">0</span> valid shots.
+              </p>
+
+              <div class="metric-grid" id="shot-metrics"></div>
+
+              <figure class="figure">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">Band exposure for this shot</span>
+                  <span class="row-end unit">1/3-octave, dB</span>
+                </figcaption>
+                <div class="figure-canvas">
+                  <canvas id="shot-band-canvas" width="900" height="280"
+                          role="img" aria-label="Band exposure for the selected shot."></canvas>
+                </div>
+                <div class="figure-legend">
+                  <span class="legend-item"><span class="legend-swatch" data-series="4"></span>This shot</span>
+                  <span class="legend-item"><span class="legend-swatch" data-series="3"></span>Aggregate mean</span>
+                </div>
+              </figure>
+
+              <figure class="figure">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">Shot summary plot</span>
+                </figcaption>
+                <div class="figure-canvas">
+                  <img id="img-shot-detail" alt="Summary plot for the selected shot." />
+                </div>
+                <p class="figure-caption" id="caption-shot-detail">—</p>
+              </figure>
+            </div>
+          </div>
+
+          <!-- Metrics table -->
+          <div class="tabpanel" role="tabpanel" id="panel-table"
+               aria-labelledby="tab-table" tabindex="0" data-print-title="Per-shot metrics" hidden>
+
+            <div class="table-toolbar">
+              <div class="field">
+                <label class="sr-only" for="metrics-filter">Filter shots</label>
+                <div class="input-group">
+                  <span class="input-prefix"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg></span>
+                  <input type="search" class="input" id="metrics-filter" placeholder="Filter shots…" />
+                </div>
+              </div>
+              <label class="check">
+                <input type="checkbox" id="metrics-show-rejected" checked />
+                <span>Show rejected shots</span>
+              </label>
+              <div class="row-end row">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-metrics-csv">
+                  <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Download CSV
+                </button>
+              </div>
+            </div>
+
+            <div class="table-scroll" tabindex="0" role="region" aria-label="Per-shot metrics table, scrollable">
+              <table class="data-table" id="metrics-table">
+                <caption>
+                  One row per detected shot. Rejected shots are struck through and excluded
+                  from every aggregate.
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Shot</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" class="col-num">Time<span class="th-unit">s</span></th>
+                    <th scope="col" class="col-num">L<sub>peak</sub> Z<span class="th-unit">dB</span></th>
+                    <th scope="col" class="col-num">L<sub>peak</sub> A<span class="th-unit">dB</span></th>
+                    <th scope="col" class="col-num">L<sub>peak</sub> C<span class="th-unit">dB</span></th>
+                    <th scope="col" class="col-num">L<sub>AE</sub><span class="th-unit">dB</span></th>
+                    <th scope="col" class="col-num">L<sub>ZE</sub><span class="th-unit">dB</span></th>
+                    <th scope="col" class="col-num">A-duration<span class="th-unit">ms</span></th>
+                    <th scope="col" class="col-num">B-duration<span class="th-unit">ms</span></th>
+                    <th scope="col" class="col-num">Rise time<span class="th-unit">µs</span></th>
+                    <th scope="col" class="col-num">Impulse<span class="th-unit">Pa·s</span></th>
+                    <th scope="col" class="col-num">Crest<span class="th-unit">dB</span></th>
+                    <th scope="col" class="col-num">Centroid<span class="th-unit">Hz</span></th>
+                    <th scope="col" class="col-num">SNR<span class="th-unit">dB</span></th>
+                    <th scope="col"><span class="sr-only">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody id="metrics-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Hazard -->
+          <div class="tabpanel" role="tabpanel" id="panel-hazard"
+               aria-labelledby="tab-hazard" tabindex="0" data-print-title="Hearing hazard" hidden>
+            <div class="stack">
+              <div class="banner" data-tone="info" id="hazard-banner">
+                <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span>
+                <div class="banner-body">
+                  <p class="banner-title" id="hazard-headline">Hearing hazard assessment</p>
+                  <p class="banner-text" id="hazard-text">—</p>
+                </div>
+              </div>
+
+              <div class="metric-grid" id="hazard-metrics"></div>
+
+              <div class="panel">
+                <h3 class="subsection-title">Method and assumptions</h3>
+                <dl class="kv-list" id="hazard-method-list">
+                  <dt>Method</dt><dd id="hazard-method">—</dd>
+                  <dt>Criterion</dt><dd id="hazard-criterion-out">—</dd>
+                  <dt>Rounds assumed</dt><dd id="hazard-rounds-out">—</dd>
+                  <dt>Mean L<sub>AE</sub></dt><dd id="hazard-lae-mean">—</dd>
+                </dl>
+                <p class="prose mt-3">
+                  Dose is computed from the A-weighted sound exposure of the valid shots only,
+                  with no allowance for hearing protection. It is an occupational-exposure
+                  estimate, not a clinical judgement.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="history-list" id="history-list"></div>
-      </section>
-    </main>
+      </div>
+    </section>
+
+
+    <!-- =====================================================================
+         3. COMPARE
+         ===================================================================== -->
+    <section class="view" id="view-compare" data-view="compare" aria-labelledby="compare-title" hidden>
+
+      <div class="view-header">
+        <div class="view-header-text">
+          <h1 class="view-title" id="compare-title">Insertion loss</h1>
+          <p class="view-subtitle">
+            An unsuppressed reference against a suppressed test, measured on the same chain.
+          </p>
+        </div>
+        <div class="view-actions">
+          <button type="button" class="btn btn-secondary" id="btn-compare-print">
+            <svg class="icon" aria-hidden="true"><use href="#i-print"/></svg>Print report
+          </button>
+          <button type="button" class="btn btn-secondary" id="btn-compare-csv">
+            <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export CSV
+          </button>
+        </div>
+      </div>
+
+      <!-- Selection -->
+      <div class="compare-grid">
+        <div class="card compare-slot" data-role="reference">
+          <div class="card-header">
+            <div>
+              <span class="compare-slot-role">
+                <svg class="icon" aria-hidden="true"><use href="#i-minus"/></svg>Reference
+              </span>
+              <h2 class="card-title">Unsuppressed</h2>
+            </div>
+            <div class="card-header-actions">
+              <span class="pill" id="compare-ref-pill" data-tone="info" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+                <span id="compare-ref-pill-text">—</span>
+              </span>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="field">
+              <label class="field-label" for="compare-ref-select">Analysis</label>
+              <select class="select" id="compare-ref-select" aria-describedby="compare-ref-hint">
+                <option value="" selected>Choose an unsuppressed analysis…</option>
+              </select>
+              <p class="field-hint" id="compare-ref-hint">
+                Only analyses whose configuration is <em>unsuppressed</em> are listed.
+              </p>
+            </div>
+            <dl class="kv-list mt-4" id="compare-ref-summary"></dl>
+          </div>
+          <div class="card-footer">
+            <div class="card-footer-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-compare-ref-open">
+                Open in Results
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card compare-slot" data-role="test">
+          <div class="card-header">
+            <div>
+              <span class="compare-slot-role">
+                <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"/></svg>Test
+              </span>
+              <h2 class="card-title">Suppressed</h2>
+            </div>
+            <div class="card-header-actions">
+              <span class="pill" id="compare-test-pill" data-tone="info" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+                <span id="compare-test-pill-text">—</span>
+              </span>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="field">
+              <label class="field-label" for="compare-test-select">Analysis</label>
+              <select class="select" id="compare-test-select" aria-describedby="compare-test-hint">
+                <option value="" selected>Choose a suppressed analysis…</option>
+              </select>
+              <p class="field-hint" id="compare-test-hint">
+                Only analyses whose configuration is <em>suppressed</em> are listed.
+              </p>
+            </div>
+            <dl class="kv-list mt-4" id="compare-test-summary"></dl>
+          </div>
+          <div class="card-footer">
+            <div class="card-footer-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-compare-test-open">
+                Open in Results
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Empty -->
+      <div class="empty-state" id="compare-empty">
+        <span class="empty-state-icon"><svg class="icon" aria-hidden="true"><use href="#i-compare"/></svg></span>
+        <h2 class="empty-state-title">Choose two measurements</h2>
+        <p class="empty-state-text">
+          Insertion loss is only meaningful when both recordings were made on the same
+          microphone, at the same distance and angle, with the calibration unchanged
+          between them.
+        </p>
+      </div>
+
+      <!-- Comparison -->
+      <div class="stack-6" id="compare-loaded" hidden>
+
+        <div class="banner" data-tone="warn" id="compare-validity" hidden>
+          <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg></span>
+          <div class="banner-body">
+            <p class="banner-title" id="compare-validity-title">Comparison may not be defensible</p>
+            <ul class="stack-2" id="compare-validity-list"></ul>
+          </div>
+        </div>
+
+        <div class="metric-tile metric-tile-hero" id="il-hero" data-tone="accent">
+          <span class="metric-tile-label">
+            <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"/></svg>
+            Insertion loss — peak level, Z-weighted
+          </span>
+          <span class="metric-tile-figure">
+            <span class="metric-tile-value num" id="il-hero-value">—</span>
+            <span class="metric-tile-unit">dB</span>
+          </span>
+          <span class="metric-tile-caption" id="il-hero-caption">—</span>
+        </div>
+
+        <section aria-labelledby="compare-metrics-title">
+          <h2 class="subsection-title" id="compare-metrics-title">Insertion loss by metric</h2>
+          <div class="metric-grid" id="compare-metrics"></div>
+        </section>
+
+        <section aria-labelledby="compare-table-title">
+          <h2 class="subsection-title" id="compare-table-title">Reference against test</h2>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Insertion loss table, scrollable">
+            <table class="data-table" id="compare-table">
+              <caption>
+                Mean of valid shots. Insertion loss is reference minus test, so a positive
+                figure means the suppressed configuration is quieter.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Unit</th>
+                  <th scope="col" class="col-num">Reference</th>
+                  <th scope="col" class="col-num">Test</th>
+                  <th scope="col" class="col-delta">Insertion loss</th>
+                  <th scope="col" class="col-num">CI<sub>95</sub><span class="th-unit">±</span></th>
+                </tr>
+              </thead>
+              <tbody id="compare-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <figure class="figure">
+          <figcaption class="figure-toolbar">
+            <span class="section-title">Insertion loss by 1/3-octave band</span>
+            <span class="row-end unit">dB</span>
+          </figcaption>
+          <div class="figure-canvas">
+            <canvas id="compare-band-canvas" width="960" height="320"
+                    role="img" aria-label="Insertion loss against one-third-octave band centre frequency."></canvas>
+          </div>
+          <div class="figure-legend">
+            <span class="legend-item"><span class="legend-swatch" data-series="5"></span>Reference (unsuppressed)</span>
+            <span class="legend-item"><span class="legend-swatch" data-series="6"></span>Test (suppressed)</span>
+            <span class="legend-item"><span class="legend-swatch" data-series="1"></span>Insertion loss</span>
+          </div>
+          <p class="figure-caption" id="caption-compare-bands">—</p>
+        </figure>
+      </div>
+    </section>
+
+
+    <!-- =====================================================================
+         4. HISTORY
+         ===================================================================== -->
+    <section class="view" id="view-history" data-view="history" aria-labelledby="history-title" hidden>
+
+      <div class="view-header">
+        <div class="view-header-text">
+          <h1 class="view-title" id="history-title">History</h1>
+          <p class="view-subtitle">Every analysis this machine has produced.</p>
+        </div>
+        <div class="view-actions">
+          <button type="button" class="btn btn-secondary" id="btn-history-refresh">
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="table-toolbar">
+        <div class="field">
+          <label class="sr-only" for="history-filter">Filter analyses</label>
+          <div class="input-group">
+            <span class="input-prefix"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg></span>
+            <input type="search" class="input" id="history-filter"
+                   placeholder="Filter by file, weapon, suppressor or operator…" />
+          </div>
+        </div>
+        <div class="field">
+          <label class="sr-only" for="history-config-filter">Configuration</label>
+          <select class="select" id="history-config-filter">
+            <option value="all" selected>All configurations</option>
+            <option value="unsuppressed">Unsuppressed only</option>
+            <option value="suppressed">Suppressed only</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="history-list" id="history-list"></div>
+
+      <div class="empty-state" id="history-empty">
+        <span class="empty-state-icon"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></span>
+        <h2 class="empty-state-title">No analyses yet</h2>
+        <p class="empty-state-text">Completed analyses appear here with their key metadata.</p>
+        <div class="empty-state-actions">
+          <button type="button" class="btn btn-primary" data-view="analyze">Start an analysis</button>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- =====================================================================
+         5. SETTINGS
+         ===================================================================== -->
+    <section class="view" id="view-settings" data-view="settings" aria-labelledby="settings-title" hidden>
+
+      <div class="view-header">
+        <div class="view-header-text">
+          <h1 class="view-title" id="settings-title">Settings</h1>
+          <p class="view-subtitle">Application preferences and stored calibration profiles.</p>
+        </div>
+      </div>
+
+      <div class="card-grid">
+
+        <div class="card">
+          <div class="card-header"><h2 class="card-title">Appearance</h2></div>
+          <div class="card-body">
+            <div class="field">
+              <label class="field-label" for="theme-select">Theme</label>
+              <select class="select" id="theme-select" aria-describedby="theme-select-hint">
+                <option value="system" selected>Follow system</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+              <p class="field-hint" id="theme-select-hint">
+                Mirrors the control in the toolbar. Light is the default because reports
+                are printed.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2 class="card-title">Output</h2></div>
+          <div class="card-body">
+            <div class="field">
+              <label class="field-label" for="setting-output-dir">Output directory</label>
+              <div class="input-attached">
+                <input type="text" class="input input-mono" id="setting-output-dir"
+                       aria-describedby="setting-output-dir-hint" />
+                <button type="button" class="btn btn-secondary" id="btn-choose-output-dir">Choose…</button>
+              </div>
+              <p class="field-hint" id="setting-output-dir-hint">
+                One dated subdirectory is created per analysis.
+              </p>
+            </div>
+
+            <label class="check mt-4">
+              <input type="checkbox" id="setting-open-on-complete" checked />
+              <span class="check-text">
+                <span>Show results as soon as an analysis finishes</span>
+                <span class="field-hint">Switches to the Results view automatically.</span>
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Calibration profiles</h2>
+            <div class="card-header-actions">
+              <span class="card-badge num" id="profile-count">0</span>
+            </div>
+          </div>
+          <div class="card-body">
+            <p class="prose">
+              Named, verified calibrations for chains you use repeatedly. Each stores its
+              Pa/FS, the method that produced it and the date it was verified.
+            </p>
+          </div>
+          <div class="card-footer">
+            <div class="card-footer-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-open-profiles">
+                Manage profiles…
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2 class="card-title">About</h2></div>
+          <div class="card-body">
+            <dl class="kv-list" id="about-list">
+              <dt>Version</dt><dd id="about-version">—</dd>
+              <dt>Commit</dt><dd id="about-commit">—</dd>
+              <dt>Engine</dt><dd id="about-engine">—</dd>
+            </dl>
+            <hr class="rule" />
+            <p class="prose">
+              SASA reports acoustic measurements of firearm discharge. Its output is only as
+              defensible as its calibration and its test record. Nothing is uploaded; all
+              processing is local.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+
+<!-- ===========================================================================
+     TOASTS — polite live region
+     =========================================================================== -->
+<div class="toast-region" id="toast-region" role="region" aria-label="Notifications"
+     aria-live="polite" aria-relevant="additions"></div>
+
+
+<!-- ===========================================================================
+     DIALOGS
+     =========================================================================== -->
+
+<dialog class="modal" id="modal-confirm" aria-labelledby="modal-confirm-title">
+  <div class="modal-header">
+    <h2 class="modal-title" id="modal-confirm-title">Confirm</h2>
+    <button type="button" class="btn-icon" id="btn-modal-confirm-close"
+            aria-label="Close this dialog">
+      <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
   </div>
+  <div class="modal-body" id="modal-confirm-body"></div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-secondary" id="btn-modal-confirm-cancel">Cancel</button>
+    <button type="button" class="btn btn-danger" id="btn-modal-confirm-accept">Confirm</button>
+  </div>
+</dialog>
 
-  <script src="app.js"></script>
+<dialog class="modal modal-lg" id="modal-profiles" aria-labelledby="modal-profiles-title">
+  <div class="modal-header">
+    <h2 class="modal-title" id="modal-profiles-title">Calibration profiles</h2>
+    <button type="button" class="btn-icon" id="btn-modal-profiles-close"
+            aria-label="Close this dialog">
+      <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Saved calibration profiles, scrollable">
+      <table class="data-table" id="profiles-table">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col" class="col-num">Pa/FS</th>
+            <th scope="col">Method</th>
+            <th scope="col">Verified</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="profiles-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-secondary" id="btn-modal-profiles-done">Done</button>
+  </div>
+</dialog>
+
+<dialog class="modal modal-lg" id="modal-validity" aria-labelledby="modal-validity-title">
+  <div class="modal-header">
+    <h2 class="modal-title" id="modal-validity-title">Warnings and errors</h2>
+    <button type="button" class="btn-icon" id="btn-modal-validity-close"
+            aria-label="Close this dialog">
+      <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <h3 class="subsection-title">Errors</h3>
+    <ul class="stack-2" id="validity-errors-list"></ul>
+    <hr class="rule" />
+    <h3 class="subsection-title">Warnings</h3>
+    <ul class="stack-2" id="validity-warnings-list"></ul>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-secondary" id="btn-modal-validity-done">Close</button>
+  </div>
+</dialog>
+
+
+<!-- ===========================================================================
+     TEMPLATES
+     app.js clones these rather than assembling markup in strings, so the
+     component structure stays here, next to the CSS that styles it.
+     =========================================================================== -->
+
+<template id="tpl-metric-tile">
+  <div class="metric-tile" data-metric="">
+    <span class="metric-tile-label">
+      <svg class="icon" aria-hidden="true" data-slot="icon" hidden><use href=""/></svg>
+      <span data-slot="label"></span>
+    </span>
+    <span class="metric-tile-figure">
+      <span class="metric-tile-value num" data-slot="value">—</span>
+      <span class="metric-tile-unit" data-slot="unit"></span>
+    </span>
+    <span class="metric-tile-caption" data-slot="caption"></span>
+    <span class="metric-tile-delta" data-slot="delta" data-direction="flat" hidden>
+      <svg class="icon" aria-hidden="true" data-slot="delta-icon"><use href="#i-minus"/></svg>
+      <span data-slot="delta-value"></span>
+    </span>
+  </div>
+</template>
+
+<template id="tpl-check-item">
+  <div class="check-item" data-check="" data-state="unknown">
+    <svg class="icon" aria-hidden="true" data-slot="icon"><use href="#i-info"/></svg>
+    <span class="check-item-body">
+      <span class="check-item-name" data-slot="name"></span>
+      <span class="check-item-value" data-slot="value"></span>
+    </span>
+  </div>
+</template>
+
+<template id="tpl-metrics-row">
+  <tr data-shot="" data-rejected="false">
+    <th scope="row" class="num" data-slot="shot-number"></th>
+    <td>
+      <span class="row-flag" data-state="valid">
+        <svg class="icon" aria-hidden="true" data-slot="flag-icon"><use href="#i-check-circle"/></svg>
+        <span data-slot="flag-label">Valid</span>
+      </span>
+    </td>
+    <td class="col-num" data-slot="time_s"></td>
+    <td class="col-num" data-slot="Lpeak_Z_dB"></td>
+    <td class="col-num" data-slot="Lpeak_A_dB"></td>
+    <td class="col-num" data-slot="Lpeak_C_dB"></td>
+    <td class="col-num" data-slot="LAE_dB"></td>
+    <td class="col-num" data-slot="LZE_dB"></td>
+    <td class="col-num" data-slot="a_duration_ms"></td>
+    <td class="col-num" data-slot="b_duration_ms"></td>
+    <td class="col-num" data-slot="rise_time_us"></td>
+    <td class="col-num" data-slot="specific_impulse_Pa_s"></td>
+    <td class="col-num" data-slot="crest_factor_dB"></td>
+    <td class="col-num" data-slot="spectral_centroid_Hz"></td>
+    <td class="col-num" data-slot="snr_dB"></td>
+    <td>
+      <span class="cell-actions">
+        <button type="button" class="btn-icon" data-action="view-shot" aria-label="View this shot">
+          <svg class="icon" aria-hidden="true"><use href="#i-target"/></svg>
+        </button>
+        <button type="button" class="btn-icon btn-icon-danger" data-action="toggle-reject"
+                aria-label="Reject this shot">
+          <svg class="icon" aria-hidden="true"><use href="#i-ban"/></svg>
+        </button>
+      </span>
+    </td>
+  </tr>
+</template>
+
+<template id="tpl-compare-row">
+  <tr data-metric="">
+    <th scope="row" data-slot="name"></th>
+    <td data-slot="unit"></td>
+    <td class="col-num" data-slot="reference"></td>
+    <td class="col-num" data-slot="test"></td>
+    <td class="col-delta">
+      <span class="delta-mark" data-direction="flat">
+        <svg class="icon" aria-hidden="true" data-slot="delta-icon"><use href="#i-minus"/></svg>
+        <span data-slot="delta"></span>
+      </span>
+    </td>
+    <td class="col-num" data-slot="ci95"></td>
+  </tr>
+</template>
+
+<template id="tpl-bands-row">
+  <tr data-band="">
+    <th scope="row" class="num" data-slot="frequency"></th>
+    <td class="col-num" data-slot="mean"></td>
+    <td class="col-num" data-slot="std"></td>
+    <td class="col-num" data-slot="min"></td>
+    <td class="col-num" data-slot="max"></td>
+  </tr>
+</template>
+
+<template id="tpl-shot-chip">
+  <button type="button" class="shot-chip" data-shot="" data-rejected="false" aria-current="false">
+    <svg class="icon" aria-hidden="true" data-slot="icon"><use href="#i-check"/></svg>
+    <span data-slot="label"></span>
+  </button>
+</template>
+
+<template id="tpl-history-item">
+  <button type="button" class="history-item" data-dir="">
+    <span class="history-item-stat">
+      <span class="history-item-name" data-slot="name"></span>
+      <span class="history-item-sub" data-slot="path"></span>
+    </span>
+    <span class="history-item-stat">
+      <span class="history-item-stat-label">Configuration</span>
+      <span class="history-item-stat-value" data-slot="configuration"></span>
+    </span>
+    <span class="history-item-stat">
+      <span class="history-item-stat-label">Shots</span>
+      <span class="history-item-stat-value num" data-slot="shots"></span>
+    </span>
+    <span class="history-item-stat">
+      <span class="history-item-stat-label">Peak Z</span>
+      <span class="history-item-stat-value num" data-slot="peak"></span>
+    </span>
+    <span class="history-item-stat">
+      <span class="history-item-stat-label">Date</span>
+      <span class="history-item-stat-value num" data-slot="date"></span>
+    </span>
+    <span class="pill" data-slot="validity" data-tone="ok">
+      <svg class="icon" aria-hidden="true" data-slot="validity-icon"><use href="#i-check-circle"/></svg>
+      <span data-slot="validity-label">Valid</span>
+    </span>
+  </button>
+</template>
+
+<template id="tpl-toast">
+  <div class="toast" role="status" data-tone="info">
+    <span class="toast-icon"><svg class="icon" aria-hidden="true" data-slot="icon"><use href="#i-info"/></svg></span>
+    <span class="toast-body">
+      <span class="toast-title" data-slot="title"></span>
+      <span class="toast-text" data-slot="text"></span>
+    </span>
+    <button type="button" class="btn-icon" data-action="dismiss" aria-label="Dismiss this notification">
+      <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+</template>
+
+<template id="tpl-log-line">
+  <div class="log-line" data-level="info"></div>
+</template>
+
+<template id="tpl-kv-row">
+  <dt data-slot="key"></dt>
+  <dd data-slot="value"></dd>
+</template>
+
+<template id="tpl-profile-row">
+  <tr data-profile="">
+    <th scope="row" data-slot="name"></th>
+    <td class="col-num" data-slot="pafs"></td>
+    <td data-slot="method"></td>
+    <td class="col-num" data-slot="verified"></td>
+    <td>
+      <span class="cell-actions">
+        <button type="button" class="btn-icon" data-action="use-profile" aria-label="Use this profile">
+          <svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>
+        </button>
+        <button type="button" class="btn-icon btn-icon-danger" data-action="delete-profile"
+                aria-label="Delete this profile">
+          <svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>
+        </button>
+      </span>
+    </td>
+  </tr>
+</template>
+
+<template id="tpl-blocker">
+  <li class="banner-text" data-blocker=""></li>
+</template>
+
+<script src="app.js"></script>
 </body>
 </html>

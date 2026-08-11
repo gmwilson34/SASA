@@ -1,16 +1,22 @@
 {
   "name": "sasa-ui",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "SASA - Shot Acoustic Spectral Analysis",
   "main": "server.js",
+  "private": true,
+  "engines": {
+    "node": ">=18.18"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js && node --check bridge/python-bridge.js",
+    "audit": "npm audit --omit=dev"
   },
   "author": "Ridgeback Defense",
   "license": "PROPRIETARY",
   "dependencies": {
-    "express": "^4.21.0",
-    "multer": "^1.4.5-lts.1",
-    "ws": "^8.18.0"
+    "express": "^5.2.1",
+    "multer": "^2.2.0",
+    "ws": "^8.21.3"
   }
 }
