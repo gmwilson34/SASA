@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sasa"
-version = "2.1.1"
+version = "2.1.2"
 description = "SASA — Shot Acoustic Spectral Analysis: Professional-grade acoustic analysis for gunshot recordings"
 readme = "README.md"
 license = {text = "Proprietary — Copyright © 2024-2026 Ridgeback Defense"}
@@ -64,22 +64,39 @@ all = [
 sasa = "main:main"
 
 [tool.setuptools]
+# Every top-level module in the repository, with no exceptions. The console
+# script does not put the working directory on sys.path, so a module missing
+# from this list is a ModuleNotFoundError the moment `sasa` is run from
+# anywhere but the source tree -- which is exactly how it failed in CI: the
+# list had gone stale by eight modules and `sasa --help` died on `ahaah`.
+#
+# Static TOML cannot derive this from disk the way sasa.spec does, so
+# tests/test_packaging.py asserts the two agree and fails if a new module is
+# added without being listed here.
 py-modules = [
-    "main",
-    "app",
-    "calibration",
-    "weighting",
-    "shot_detect",
-    "bands",
-    "metrics",
-    "plots",
-    "provenance",
-    "STFT",
-    "WavLoader",
-    "WaveformPlot",
-    "SignalGenerator",
     "ExtractAudio",
     "FileSelector",
+    "STFT",
+    "SignalGenerator",
+    "WavLoader",
+    "WaveformPlot",
+    "ahaah",
+    "anomaly",
+    "app",
+    "atmosphere",
+    "bands",
+    "calibration",
+    "main",
+    "metrics",
+    "mic_array",
+    "pairing",
+    "plots",
+    "provenance",
+    "report",
+    "session",
+    "shot_detect",
+    "stringstats",
+    "weighting",
 ]
 
 [tool.pytest.ini_options]

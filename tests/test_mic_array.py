@@ -1,5 +1,5 @@
 """
-test_array.py - multi-microphone array geometry and consistency.
+test_mic_array.py - multi-microphone array geometry and consistency.
 
 The oracles are geometric and exact: a microphone three times further away
 hears exactly 20*log10(3) dB less, and hears it exactly 2/c seconds later. The
@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from array import (
+from mic_array import (
     CONSISTENCY_TOLERANCE_dB,
     MIN_CHANNELS,
     ArrayError,

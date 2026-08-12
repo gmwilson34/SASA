@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
-array.py - Multi-Microphone Array Geometry and Consistency
+mic_array.py - Multi-Microphone Array Geometry and Consistency
+
+NAMING: this file was called array.py, which is the name of a module in the
+standard library. Whether `import array` found this one or that one depended on
+how the interpreter was built -- CPython ships array as a shared object on some
+platforms and links it into the binary on others, and a built-in always wins
+regardless of sys.path. On an interpreter of the second kind, tests/ could not
+import this module at all, and any dependency reaching for the stdlib array
+inside the source tree got this one instead. Nothing in the standard library is
+named mic_array.
 
 SASA has always let the operator pick a channel. A multi-microphone array is
 more than several channels: it is several microphones at KNOWN, DIFFERENT places,
@@ -38,7 +47,7 @@ merely possible. Reporting the spread between channels is therefore the point of
 having them, and averaging it away is the one thing that would waste them.
 
 Usage:
-    from array import ArrayGeometry, MicPosition, check_array_consistency
+    from mic_array import ArrayGeometry, MicPosition, check_array_consistency
 
     geometry = ArrayGeometry([
         MicPosition(channel=0, distance_m=1.0, angle_deg=90.0),

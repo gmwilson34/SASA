@@ -144,14 +144,42 @@ def create_icon_image(size: int = 1024) -> Image.Image:
     return img
 
 
+ICO_SIZES = [16, 32, 48, 64, 128, 256]
+
+
 def save_ico(img: Image.Image, path: Path):
-    """Save as .ico with multiple sizes."""
-    sizes = [16, 32, 48, 64, 128, 256]
-    icons = []
-    for s in sizes:
-        resized = img.resize((s, s), Image.Resampling.LANCZOS)
-        icons.append(resized)
-    icons[0].save(str(path), format='ICO', sizes=[(s, s) for s in sizes], append_images=icons[1:])
+    """
+    Save as .ico with every size Windows asks for.
+
+    The base image passed to Pillow must be the LARGEST, not the smallest.
+    Pillow's ICO writer drops any requested size bigger than the image it was
+    handed, so saving from the 16x16 frame -- which is what
+    `icons[0].save(..., append_images=icons[1:])` did, since the list was built
+    ascending -- silently wrote a 660-byte file containing 16x16 alone. The
+    Windows executable then carried a 16-pixel icon scaled up to the taskbar.
+
+    The pre-resized frames are still passed so each entry is a LANCZOS
+    downsample of the 1024px master rather than a chain of rescales.
+    """
+    frames = {s: img.resize((s, s), Image.Resampling.LANCZOS) for s in ICO_SIZES}
+    largest = frames[max(ICO_SIZES)]
+    largest.save(
+        str(path),
+        format='ICO',
+        sizes=[(s, s) for s in ICO_SIZES],
+        append_images=[frames[s] for s in ICO_SIZES if s != max(ICO_SIZES)],
+    )
+
+    # Trust the file, not the call. A silently-truncated icon is exactly the
+    # failure this function just had, and it is invisible until someone looks
+    # at the packaged .exe on a Windows desktop.
+    with Image.open(str(path)) as written:
+        got = sorted(written.info.get('sizes', []))
+    want = [(s, s) for s in sorted(ICO_SIZES)]
+    if got != want:
+        raise SystemExit(
+            f'generate_icon.py: {path.name} was written with sizes {got}, expected {want}'
+        )
 
 
 def save_icns(img: Image.Image, path: Path):
