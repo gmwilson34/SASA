@@ -943,6 +943,80 @@ def _get_str(config: dict, key: str, *, max_length: int = 500) -> Optional[str]:
 ALLOWED_FORMATS = ('png', 'pdf', 'svg', 'html')
 
 
+def _calibration_from_tone(config: dict, Calibration,
+                           description: str) -> Tuple[Any, Dict[str, Any]]:
+    """
+    Resolve a calibration from a recorded calibrator tone.
+
+    The tone is read here rather than handed to the engine as a filename,
+    because this server's contract is that the calibration is DECIDED before
+    the run starts -- the backend never gets the chance to fall back to a
+    default on our behalf. The reading itself is WavLoader's, the same code the
+    engine would have used, and the channel policy matches main._read_calibrator:
+    the tone is read on the channel the test will be read on.
+
+    The level is required. A calibrator whose level is assumed is a calibration
+    that was invented, which is the failure this whole module is built around.
+    """
+    raw = _get_str(config, 'calibratorTone', max_length=4096)
+    if not raw:
+        raise ConfigError(
+            'Tone calibration needs the calibrator recording.',
+            [{'field': 'calibratorTone', 'message': 'Required for tone calibration.'}])
+
+    tone_path = resolve_within_roots(raw, [UPLOAD_DIR, EXTRACT_DIR, DATA_DIR / 'Audio'])
+    if tone_path is None or not tone_path.is_file():
+        raise ConfigError(
+            'The calibrator recording is not an accessible file in this workspace.',
+            [{'field': 'calibratorTone', 'message': 'Not an accessible uploaded recording.'}])
+
+    level_dB = _get_number(config, 'calibratorLevelDb', minimum=0, maximum=200)
+    if level_dB is None:
+        raise ConfigError(
+            'Tone calibration needs the level printed on the calibrator. There is no '
+            'default: an assumed calibrator level puts every dB SPL in the report out '
+            'by the difference between the assumption and the instrument.',
+            [{'field': 'calibratorLevelDb', 'message': 'Required for tone calibration.'}])
+
+    frequency_Hz = _get_number(config, 'calibratorFreqHz', minimum=1, maximum=200000)
+    channel = _get_int(config, 'channel', minimum=0, maximum=1024) or 0
+
+    try:
+        from WavLoader import get_wav_info, load_wav  # noqa: PLC0415
+    except ImportError as exc:
+        raise ConfigError(f'The calibrator recording could not be read: {exc}',
+                          [{'field': 'calibratorTone', 'message': str(exc)}]) from exc
+
+    try:
+        frames, sample_rate, _duration, channels = get_wav_info(tone_path)
+        if frames <= 0:
+            raise ValueError('the recording is empty')
+        data = load_wav(tone_path, dtype='float64',
+                        channel=channel if channel < channels else 0)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a configuration error
+        raise ConfigError(
+            f'The calibrator recording could not be read: {exc}',
+            [{'field': 'calibratorTone', 'message': str(exc)}]) from exc
+
+    kwargs: Dict[str, Any] = {
+        'calibrator_level_dB': float(level_dB),
+        'description': description or f'Calibrator tone at {float(level_dB):g} dB',
+    }
+    if frequency_Hz is not None:
+        kwargs['tone_frequency_Hz'] = float(frequency_Hz)
+
+    try:
+        calibration = Calibration.from_calibrator_tone(
+            data.samples, int(sample_rate), **kwargs)
+    except ValueError as exc:
+        raise ConfigError(
+            f'The calibrator tone in {tone_path.name} is unusable: {exc}',
+            [{'field': 'calibratorTone', 'message': str(exc)}]) from exc
+
+    inputs: Dict[str, Any] = {'Pa_per_FS': float(calibration.Pa_per_FS)}
+    return calibration, inputs
+
+
 def build_calibration(config: dict, Calibration) -> Tuple[Any, Dict[str, Any]]:
     """
     Build the Calibration for this run — or refuse the run.
@@ -965,11 +1039,28 @@ def build_calibration(config: dict, Calibration) -> Tuple[Any, Dict[str, Any]]:
 
     has_direct = _present(config, 'paPerFS')
     has_sens = _present(config, 'sensitivityMv')
-    has_vfs = _present(config, 'vPerFS')
+    # adcFullScaleV is what the interface calls the recorder's full-scale
+    # voltage; vPerFS is this server's older name for the same number, and the
+    # engine's own field carries both spellings too.
+    has_vfs = _present(config, 'vPerFS') or _present(config, 'adcFullScaleV')
+    has_tone = _present(config, 'calibratorTone')
+    said_uncalibrated = bool(config.get('uncalibrated'))
 
     if not mode:
         # Infer the intent from what was sent, but never invent a calibration.
-        if has_direct and not (has_sens or has_vfs):
+        #
+        # Three of these four branches did not exist, and the interface uses
+        # them: it sends `uncalibrated`, or a calibrator tone, or the chain
+        # under the name adcFullScaleV. None of those were read here, so the
+        # only calibration method that worked end to end in the packaged app
+        # was a saved profile -- every other choice was refused with the
+        # message below, which is true of the request but was not true of what
+        # the operator had actually filled in.
+        if said_uncalibrated:
+            mode = 'uncalibrated'
+        elif has_tone:
+            mode = 'tone'
+        elif has_direct and not (has_sens or has_vfs):
             mode = 'direct'
         elif has_sens or has_vfs:
             mode = 'sensitivity'
@@ -977,15 +1068,19 @@ def build_calibration(config: dict, Calibration) -> Tuple[Any, Dict[str, Any]]:
             raise ConfigError(
                 'No calibration was supplied. Choose a calibration mode: '
                 '"direct" (Pa per full scale), "sensitivity" (microphone sensitivity '
-                'and recorder full-scale voltage), or "uncalibrated" (results are '
-                'RELATIVE, in dB re FS, and must not be reported as dB SPL).',
-                [{'field': 'calMode', 'message': 'Choose direct, sensitivity or uncalibrated.'}],
+                'and recorder full-scale voltage), "tone" (a recorded calibrator), '
+                'or "uncalibrated" (results are RELATIVE, in dB re FS, and must not '
+                'be reported as dB SPL).',
+                [{'field': 'calMode', 'message': 'Choose direct, sensitivity, tone or uncalibrated.'}],
             )
 
     description = _get_str(config, 'calDesc', max_length=200) or ''
 
     if mode in ('uncalibrated', 'relative', 'none'):
         return Calibration.uncalibrated(), {'uncalibrated': True}
+
+    if mode in ('tone', 'calibrator', 'calibrator_tone'):
+        return _calibration_from_tone(config, Calibration, description)
 
     if mode == 'direct':
         if not has_direct:
@@ -1009,7 +1104,7 @@ def build_calibration(config: dict, Calibration) -> Tuple[Any, Dict[str, Any]]:
             missing.append({'field': 'sensitivityMv',
                             'message': 'Required: microphone sensitivity in mV/Pa.'})
         if not has_vfs:
-            missing.append({'field': 'vPerFS',
+            missing.append({'field': 'adcFullScaleV',
                             'message': 'Required: recorder full-scale voltage.'})
         if missing:
             names = ', '.join(m['field'] for m in missing)
@@ -1022,6 +1117,9 @@ def build_calibration(config: dict, Calibration) -> Tuple[Any, Dict[str, Any]]:
             )
         sensitivity = _get_number(config, 'sensitivityMv', minimum=0, exclusive_min=True, maximum=1e6)
         v_per_fs = _get_number(config, 'vPerFS', minimum=0, exclusive_min=True, maximum=1e6)
+        if v_per_fs is None:
+            v_per_fs = _get_number(config, 'adcFullScaleV', minimum=0, exclusive_min=True,
+                                   maximum=1e6)
         gain_dB = _get_number(config, 'preampGainDb', minimum=-200, maximum=200)
         inputs = {
             'sensitivity_mV_per_Pa': float(sensitivity),
@@ -1046,6 +1144,7 @@ _CONFIG_ALIASES: Dict[str, Tuple[str, ...]] = {
     'pre_ms': ('pre_shot_ms', 'pre_ms'),
     'post_ms': ('post_shot_ms', 'post_ms'),
     'nperseg': ('nperseg',),
+    'overlap_fraction': ('overlap_fraction',),
     'compute_bands': ('compute_bands',),
     'save_per_shot_plots': ('save_per_shot_plots',),
     'plot_formats': ('plot_formats',),
@@ -1214,6 +1313,13 @@ def build_analysis_config(config: dict, AnalysisConfig, Calibration, analyze_fn=
         _assign(kwargs, available, _CONFIG_ALIASES['nperseg'], nperseg)
         settings['nperseg'] = nperseg
 
+    # The interface offers this in Settings and it was going nowhere: the STFT
+    # ran at the engine's default overlap whatever the operator chose.
+    overlap = _get_number(config, 'overlapFraction', minimum=0, maximum=0.99)
+    if overlap is not None:
+        _assign(kwargs, available, _CONFIG_ALIASES['overlap_fraction'], overlap)
+        settings['overlap_fraction'] = overlap
+
     dtype = _get_str(config, 'dtype', max_length=16)
     if dtype is not None:
         if dtype not in ('float32', 'float64'):
@@ -1276,7 +1382,15 @@ def build_analysis_config(config: dict, AnalysisConfig, Calibration, analyze_fn=
         settings['mono_mix'] = mono_mix
 
     # ── Test metadata (operator, weapon, mic position, atmosphere) ──
+    # The interface sends this as `metadata`; `testMetadata` is this server's
+    # older name for it. Reading only the older one dropped the entire test
+    # record -- microphone distance and angle, temperature, humidity, pressure,
+    # weapon, operator -- from every run started through the packaged app. The
+    # atmospheric correction and the whole provenance block are built from it,
+    # so the loss was silent and total.
     raw_meta = config.get('testMetadata')
+    if not isinstance(raw_meta, dict) or not raw_meta:
+        raw_meta = config.get('metadata')
     if isinstance(raw_meta, dict) and raw_meta:
         clean_meta = {k: v for k, v in raw_meta.items()
                       if isinstance(k, str) and not isinstance(v, (dict, list))}
@@ -1289,6 +1403,30 @@ def build_analysis_config(config: dict, AnalysisConfig, Calibration, analyze_fn=
                     raise ConfigError(f'Invalid test metadata: {exc}',
                                       [{'field': 'testMetadata', 'message': str(exc)}])
         settings['test_metadata'] = clean_meta
+
+    # ── Output directory ──
+    # Confined to the results area, exactly as the development bridge confines
+    # it: this is a local server, but a client-supplied path is still a path
+    # the client chose, and nothing else in this file lets one out of the
+    # workspace. Ignored before this, so the operator's choice in Settings had
+    # no effect on where anything was written.
+    if _present(config, 'outputDir'):
+        raw_out = config['outputDir']
+        if not isinstance(raw_out, str):
+            raise ConfigError('The output directory must be text.',
+                              [{'field': 'outputDir', 'message': 'Must be text.'}])
+        out_dir = resolve_within_roots(raw_out, [ANALYSIS_DIR], must_exist=False)
+        if out_dir is None:
+            raise ConfigError(
+                'That output directory is outside the results area.',
+                [{'field': 'outputDir', 'message': 'Outside the permitted results area.'}])
+        if 'output_dir' in call_params:
+            call_kwargs['output_dir'] = out_dir
+            settings['output_dir'] = str(out_dir)
+        else:
+            raise ConfigError(
+                'This analysis backend does not accept an output directory.',
+                [{'field': 'outputDir', 'message': 'Not supported by the backend.'}])
 
     # ── Reference (unsuppressed) analysis for insertion loss ──
     if _present(config, 'referenceDir'):
