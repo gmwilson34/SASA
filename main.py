@@ -106,7 +106,7 @@ from provenance import (  # noqa: E402
     make_provenance_block,
 )
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 SCHEMA_VERSION = "2.0"
 
