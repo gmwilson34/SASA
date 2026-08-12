@@ -54,6 +54,7 @@ const STORAGE = {
   recent:   'sasa.recentFiles',
   prefs:    'sasa.prefs',
   rejects:  'sasa.rejects',
+  sidebar:  'sasa.sidebar',
 };
 
 const MAX_LOG_LINES  = 2000;
@@ -219,7 +220,38 @@ const VIEW_IDS = {
   settings: 'view-settings',
 };
 
-const TABS = ['overview', 'spectrogram', 'bands', 'shots', 'table', 'hazard'];
+// Order must match the tablist in index.html: arrow-key navigation walks this
+// array, so a tab missing here is unreachable by keyboard AND never revealed.
+const TABS = ['overview', 'spectrogram', 'bands', 'shots', 'string', 'table', 'hazard'];
+
+/* The guided flow. Order is the route; `owns` is the set of concerns whose
+   blockers are attributed to that stop, so a missing microphone distance is
+   reported on Test record and not as an anonymous item at the end. */
+const STEPS = [
+  { id: 'recording',   name: 'Recording',   panel: 'step-recording',   ready: 'Recording loaded' },
+  { id: 'calibration', name: 'Calibration', panel: 'step-calibration', ready: 'Method chosen' },
+  { id: 'metadata',    name: 'Test record', panel: 'step-metadata',    ready: 'Record complete' },
+  { id: 'settings',    name: 'Detection',   panel: 'step-settings',    ready: 'Settings valid' },
+  { id: 'run',         name: 'Run',         panel: 'step-run',         ready: 'Ready to run' },
+];
+
+const STEP_IDS = STEPS.map(s => s.id);
+
+/* Which stop owns each numeric control. Anything not listed belongs to
+   Detection, which is where the analysis parameters live. */
+const INPUT_STEP = {
+  'cal-tone-freq': 'calibration', 'cal-sensitivity': 'calibration',
+  'cal-gain': 'calibration', 'cal-fsv': 'calibration', 'cal-tone-level': 'calibration',
+  'md-barrel': 'metadata', 'md-distance': 'metadata', 'md-angle': 'metadata',
+  'md-height': 'metadata', 'md-temp': 'metadata', 'md-humidity': 'metadata',
+  'md-pressure': 'metadata', 'md-wind': 'metadata',
+};
+
+/* On a Mac the palette is Cmd-K, everywhere else Ctrl-K. Detected once, so the
+   keycap the operator is shown is the key they actually have. */
+const IS_APPLE = typeof navigator !== 'undefined'
+  && /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
+const MOD_LABEL = IS_APPLE ? '⌘' : 'Ctrl';
 
 
 /* ===========================================================================
@@ -558,6 +590,18 @@ const state = {
   view: 'analyze',
   theme: 'system',
 
+  /** Chrome that is not a measurement: which stop the flow is on, whether the
+      sidebar is collapsed, which floating surface is open. */
+  ui: {
+    step: 'recording',
+    stepDir: 'fwd',          // fwd | back — which way the panel should enter
+    visited: new Set(['recording']),
+    sidebar: 'full',         // full | rail
+    menu: null,              // id of the open menu, or null
+    paletteIndex: 0,
+    paletteQuery: '',
+  },
+
   /** Transport. status is the real socket state, never a guess. */
   ws: {
     socket: null,
@@ -672,6 +716,7 @@ function render() {
   renderMetadataCompleteness();
   renderSettingsDerived();
   renderBlockers();
+  renderFlow();
   renderRun();
   renderResults();
   renderCompare();
@@ -720,6 +765,9 @@ function wireTheme() {
   });
   const select = $('theme-select');
   if (select) select.addEventListener('change', () => applyTheme(select.value));
+
+  const cycle = $('btn-theme-cycle');
+  if (cycle) cycle.addEventListener('click', cycleTheme);
 
   if (darkQuery) {
     const onSystemChange = () => { if (state.theme === 'system') redrawCharts(); };
@@ -1021,12 +1069,15 @@ function wireTabs() {
 /* ---- keyboard shortcuts ------------------------------------------------- */
 
 const SHORTCUTS = [
+  [`${MOD_LABEL}K`, 'Command palette — every action by name'],
   ['1 … 5', 'Analyze, Results, Compare, History, Settings'],
+  ['← and →', 'Previous / next step, while the rail has focus'],
   ['R', 'Run the analysis'],
   ['Escape', 'Cancel a running analysis, or close a dialog'],
   ['[ and ]', 'Previous / next shot'],
   ['X', 'Reject or restore the selected shot'],
   ['T', 'Cycle theme: light, dark, system'],
+  ['B', 'Collapse or expand the sidebar'],
   ['/', 'Focus the filter in the current view'],
   ['?', 'This help'],
 ];
@@ -1038,6 +1089,15 @@ function showShortcuts() {
     build: (body) => {
       addParagraph(body, 'Shortcuts are inactive while the focus is in a text field.');
       addKeyList(body, SHORTCUTS);
+    },
+  });
+}
+
+function showAbout() {
+  confirmDialog({
+    title: 'About SASA',
+    mode: 'info',
+    build: (body) => {
       addParagraph(body,
         'SASA reports acoustic measurements of firearm discharge. Every analysis runs '
         + 'locally; nothing is uploaded. The result is only as defensible as its '
@@ -1053,10 +1113,23 @@ function showShortcuts() {
 
 function wireKeyboard() {
   document.addEventListener('keydown', (ev) => {
-    // Never hijack a browser-reserved combination.
+    // The one modified combination we do claim. Cmd/Ctrl-K is not reserved by
+    // any browser and is the near-universal binding for a command palette, so
+    // an operator arriving from any other professional tool already knows it.
+    // It works from inside a text field, which is the whole point.
+    if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && (ev.key === 'k' || ev.key === 'K')) {
+      ev.preventDefault();
+      const palette = $('palette');
+      if (palette && palette.open) closePalette();
+      else openPalette();
+      return;
+    }
+
+    // Never hijack any other browser-reserved combination.
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
 
     if (ev.key === 'Escape') {
+      if (state.ui.menu) { ev.preventDefault(); closeMenu({ restoreFocus: true }); return; }
       if (state.run.status === 'running' || state.run.status === 'starting') {
         ev.preventDefault();
         cancelRun();
@@ -1083,6 +1156,7 @@ function wireKeyboard() {
         if (state.view === 'results') { ev.preventDefault(); toggleReject(currentShotNumber()); }
         break;
       case 't': case 'T': ev.preventDefault(); cycleTheme(); break;
+      case 'b': case 'B': ev.preventDefault(); toggleSidebar(); break;
       case '?': ev.preventDefault(); showShortcuts(); break;
       case '/': {
         const target = state.view === 'history' ? $('history-filter')
@@ -1574,8 +1648,60 @@ function missingRequiredMetadata() {
   return missing;
 }
 
+/**
+ * Per-group completion. Derived from the DOM rather than from a second list,
+ * so a field moved between groups cannot leave the counter lying.
+ */
+function renderFieldsetCounts(missingIds) {
+  const form = $('metadata-form');
+  if (!form) return;
+
+  for (const fieldset of qsa('fieldset', form)) {
+    const legend = qs('.fieldset-legend', fieldset);
+    if (!legend) continue;
+
+    const required = qsa('.field-req', fieldset)
+      .map(mark => mark.closest('.field'))
+      .filter(Boolean);
+    if (required.length === 0) {
+      const stale = qs('.fieldset-count', legend);
+      if (stale) stale.remove();
+      continue;
+    }
+
+    const outstanding = required.filter(field => {
+      const input = qs('input, select, textarea', field);
+      return input && missingIds.has(input.id);
+    }).length;
+
+    let count = qs('.fieldset-count', legend);
+    if (!count) {
+      count = document.createElement('span');
+      count.className = 'fieldset-count';
+      legend.appendChild(count);
+    }
+    const done = required.length - outstanding;
+    count.textContent = `${done}/${required.length}`;
+    count.dataset.state = outstanding === 0 ? 'complete' : 'outstanding';
+    count.setAttribute('aria-label',
+      `${done} of ${required.length} required fields complete in this group`);
+  }
+}
+
 function renderMetadataCompleteness() {
   const missing = missingRequiredMetadata();
+  const missingIds = new Set(missing.map(entry => entry.input));
+
+  // A required marker escalates only once the operator has been past the field
+  // and left it empty. Before that it is information, not a fault.
+  for (const entry of REQUIRED_METADATA) {
+    const field = $(entry.field);
+    if (!field) continue;
+    const outstanding = missingIds.has(entry.input) && field.dataset.touched === 'true';
+    field.dataset.outstanding = outstanding ? 'true' : 'false';
+  }
+  renderFieldsetCounts(missingIds);
+
   setRaw($('metadata-missing-count'), String(missing.length));
   const wrapper = $('metadata-completeness');
   if (wrapper) {
@@ -1614,6 +1740,29 @@ function wireMetadata() {
   });
   form.addEventListener('change', () => { persistMetadata(); commit(); });
   form.addEventListener('submit', (ev) => ev.preventDefault());
+
+  // "Touched" is what separates a field the operator has not reached yet from
+  // one they looked at and left empty. Only the second deserves a warning.
+  // Captured, because blur does not bubble.
+  form.addEventListener('blur', (ev) => {
+    const field = ev.target.closest ? ev.target.closest('.field') : null;
+    if (!field) return;
+    if (field.dataset.touched === 'true') return;
+    field.dataset.touched = 'true';
+    commit();
+  }, true);
+}
+
+/** Mark every test-record field as seen — used when the flow leaves the step. */
+function touchMetadataFields() {
+  let changed = false;
+  for (const entry of REQUIRED_METADATA) {
+    const field = $(entry.field);
+    if (!field || field.dataset.touched === 'true') continue;
+    field.dataset.touched = 'true';
+    changed = true;
+  }
+  if (changed) commit();
 }
 
 const persistMetadata = debounce(() => store.set(STORAGE.metadata, metadataValues()), 400);
@@ -1741,53 +1890,60 @@ function wireSettings() {
 
 /**
  * Everything standing between the operator and a run, in the order it should
- * be fixed. The list drives #run-blockers and the disabled state of #btn-run,
- * so the primary action is never dead without a stated reason.
+ * be fixed, each item attributed to the stop that owns it.
+ *
+ * The attribution is the point. A blocker with nowhere to go is a dead end:
+ * the operator reads "Complete 4 required test-record fields" and then has to
+ * hunt. Tagged with its step, the same blocker lights up a disc on the rail,
+ * names itself on the bar, and the Continue button walks straight to it.
+ *
+ * @returns {{step: string, message: string}[]}
  */
-function runBlockers() {
-  const blockers = [];
+function detailedBlockers() {
+  const out = [];
+  const add = (step, message) => out.push({ step, message });
 
   if (state.run.status === 'starting' || state.run.status === 'running' || state.run.status === 'cancelling') {
-    blockers.push('An analysis is already running.');
-    return blockers;
+    add('run', 'An analysis is already running.');
+    return out;
   }
   if (state.ws.status !== 'open') {
-    blockers.push(state.ws.status === 'connecting'
+    add('run', state.ws.status === 'connecting'
       ? 'Connecting to the local analysis service…'
       : 'Not connected to the local analysis service.');
   }
-  if (state.input.uploading) blockers.push('The recording is still uploading.');
-  else if (!state.input.path) blockers.push('Select a recording.');
-  else if (state.input.error) blockers.push(`Recording: ${state.input.error}`);
+  if (state.input.uploading) add('recording', 'The recording is still uploading.');
+  else if (!state.input.path) add('recording', 'Select a recording.');
+  else if (state.input.error) add('recording', `Recording: ${state.input.error}`);
 
   const method = state.calibration.method;
   if (method === '') {
-    blockers.push('Choose a calibration method — there is no default.');
+    add('calibration', 'Choose a calibration method — there is no default.');
   } else if (method === 'tone') {
-    if (state.calibration.tone.error) blockers.push(`Calibrator tone: ${state.calibration.tone.error}`);
-    if (!state.calibration.tone.path) blockers.push('Add the calibrator tone recording.');
+    if (state.calibration.tone.error) add('calibration', `Calibrator tone: ${state.calibration.tone.error}`);
+    if (!state.calibration.tone.path) add('calibration', 'Add the calibrator tone recording.');
     const level = $('cal-tone-level');
-    if (!level || level.value === '') blockers.push('State the calibrator level printed on its body.');
+    if (!level || level.value === '') add('calibration', 'State the calibrator level printed on its body.');
   } else if (method === 'chain') {
     const sens = readNumber('cal-sensitivity');
     const gain = readNumber('cal-gain');
     const fsv = readNumber('cal-fsv');
-    if (sens.empty) blockers.push('Enter the microphone sensitivity.');
-    if (gain.empty) blockers.push('Enter the preamplifier gain (0 if unity).');
-    if (fsv.empty) blockers.push('Enter the ADC full-scale voltage.');
-    if (!sens.ok && !sens.empty) blockers.push(sens.error);
-    if (!gain.ok && !gain.empty) blockers.push(gain.error);
-    if (!fsv.ok && !fsv.empty) blockers.push(fsv.error);
+    if (sens.empty) add('calibration', 'Enter the microphone sensitivity.');
+    if (gain.empty) add('calibration', 'Enter the preamplifier gain (0 if unity).');
+    if (fsv.empty) add('calibration', 'Enter the ADC full-scale voltage.');
+    if (!sens.ok && !sens.empty) add('calibration', sens.error);
+    if (!gain.ok && !gain.empty) add('calibration', gain.error);
+    if (!fsv.ok && !fsv.empty) add('calibration', fsv.error);
   } else if (method === 'profile') {
-    if (!activeProfile()) blockers.push('Choose a saved calibration profile.');
+    if (!activeProfile()) add('calibration', 'Choose a saved calibration profile.');
   } else if (method === 'none') {
     const ack = $('cal-uncal-ack');
-    if (!ack || !ack.checked) blockers.push('Acknowledge that the results will be relative levels.');
+    if (!ack || !ack.checked) add('calibration', 'Acknowledge that the results will be relative levels.');
   }
 
   const missing = missingRequiredMetadata();
   if (missing.length > 0) {
-    blockers.push(missing.length === 1
+    add('metadata', missing.length === 1
       ? `Complete the test record: ${missing[0].name}.`
       : `Complete ${missing.length} required test-record fields: ${missing.slice(0, 3).map(m => m.name).join(', ')}${missing.length > 3 ? '…' : ''}.`);
   }
@@ -1797,16 +1953,26 @@ function runBlockers() {
     const el = $(id);
     if (!el) continue;
     const result = readNumber(id);
-    if (!result.ok && !result.empty) blockers.push(result.error);
+    if (!result.ok && !result.empty) add(INPUT_STEP[id] || 'settings', result.error);
   }
   // Required detection numbers must not be blank either — a blank here used to
   // be silently replaced by a built-in default.
   for (const id of ['threshold-value', 'refractory-ms', 'pre-ms', 'post-ms', 'stft-overlap']) {
     const result = readNumber(id);
-    if (result.empty) blockers.push(`${NUMERIC_INPUTS[id].label} must have a value.`);
+    if (result.empty) add(INPUT_STEP[id] || 'settings', `${NUMERIC_INPUTS[id].label} must have a value.`);
   }
 
-  return blockers;
+  return out;
+}
+
+/** The same list, flattened, for the run banner and the disabled Run button. */
+function runBlockers() {
+  return detailedBlockers().map(b => b.message);
+}
+
+/** Blockers owned by one stop. */
+function blockersForStep(step) {
+  return detailedBlockers().filter(b => b.step === step).map(b => b.message);
 }
 
 function renderBlockers() {
@@ -1826,10 +1992,15 @@ function renderBlockers() {
       list.appendChild(item);
     }
   }
-  show(banner, blockers.length > 0);
+  const busy = state.run.status === 'running' || state.run.status === 'starting' || state.run.status === 'cancelling';
+
+  // "Not ready to run: an analysis is already running" is a true sentence and a
+  // useless one — the progress card directly below it is already saying so, in
+  // more detail, with a stage and a percentage. While a run is in flight the
+  // banner has nothing to add and only competes with it.
+  show(banner, blockers.length > 0 && !busy);
   setDisabled(runButton, blockers.length > 0);
 
-  const busy = state.run.status === 'running' || state.run.status === 'starting' || state.run.status === 'cancelling';
   show($('btn-cancel-run'), busy);
   setDisabled($('btn-cancel-run'), state.run.status === 'cancelling');
 
@@ -2152,6 +2323,11 @@ function startRun() {
     toast({ title: 'Settings incomplete', text: built.problems[0], tone: 'danger' });
     return;
   }
+
+  // The progress bar and the log live on the last step. A run started from the
+  // palette or the R key can come from anywhere, and an operator who cannot
+  // see the run has no way to tell it apart from a run that never started.
+  setStep('run', { focus: false });
 
   const requestId = uid('run-');
   state.run = {
@@ -2828,6 +3004,39 @@ function validityChecks() {
   return checks;
 }
 
+/**
+ * Name a failing or cautioning check the way a technician needs to read it.
+ *
+ * The check's name alone is not a reason: "headroom." tells an operator nothing
+ * about what is wrong or how close to the edge they are. The value carries the
+ * measurement that tripped it, so both are stated.
+ */
+function describeCheck(check) {
+  // The NAME is prose and lowercases safely inside a sentence. The VALUE is not:
+  // it carries units, and "db" is not a unit — "dB" is. Casing in a measured
+  // quantity is part of the quantity, so the value is passed through untouched.
+  const name = String(check.name || '').toLowerCase();
+  const value = String(check.value || '').trim();
+  if (!value) return name;
+  return `${name} (${value})`;
+}
+
+/**
+ * Reasons are joined into one sentence with semicolons, so each has to arrive
+ * without its own terminator. Engine warnings are written as full sentences
+ * and check descriptions are not, which is how "...the muzzle blast.." got
+ * onto the verdict banner.
+ */
+function joinReasons(reasons, limit = 4) {
+  const cleaned = reasons
+    .map(reason => String(reason).trim().replace(/[.;]+$/, ''))
+    .filter(Boolean);
+  if (cleaned.length === 0) return '';
+  const shown = cleaned.slice(0, limit).join('; ');
+  const rest = cleaned.length - limit;
+  return `${shown}${rest > 0 ? `; and ${rest} more` : ''}.`;
+}
+
 function renderValidity() {
   const quality = metaBlock('quality');
   const calibration = metaBlock('calibration');
@@ -2860,17 +3069,15 @@ function renderValidity() {
     headline = 'This measurement must not be reported as a result';
     const reasons = [
       ...(noShots ? ['no shots were detected'] : []),
-      ...failed.map(c => c.name.toLowerCase()),
+      ...failed.map(describeCheck),
       ...errors,
     ];
-    text = `${reasons.slice(0, 4).join('; ')}${reasons.length > 4 ? `; and ${reasons.length - 4} more` : ''}. `
-      + 'Fix the recording or the setup and measure again.';
+    text = `${joinReasons(reasons)} Fix the recording or the setup and measure again.`;
   } else if (warned.length > 0 || warnings.length > 0) {
     tone = 'warn';
     verdict = 'Admissible with cautions';
     headline = 'Usable, but qualify the result';
-    const reasons = [...warned.map(c => c.name.toLowerCase()), ...warnings];
-    text = `${reasons.slice(0, 4).join('; ')}${reasons.length > 4 ? `; and ${reasons.length - 4} more` : ''}.`;
+    text = joinReasons([...warned.map(describeCheck), ...warnings]);
   } else {
     tone = 'ok';
     verdict = 'Admissible';
@@ -3148,6 +3355,11 @@ function renderSpectrogramPanel() {
       + `${isNum(source.sample_rate) && isNum(settings.nperseg) ? ` (${fmt(source.sample_rate / settings.nperseg, 1)} Hz per bin)` : ''}`
       + `, levels in ${levelUnit()}.`
     : 'No spectrogram was produced for this analysis.');
+
+  // Last, so it can take the panel over when the matrix is available. Called
+  // earlier, everything above would overwrite the canvas's caption and put the
+  // engine's picture back on top of it.
+  drawSpectrogramChart();
 }
 
 function shotImageFor(shotNumber) {
@@ -3201,6 +3413,8 @@ function renderBandsPanel() {
     setRaw(slot(row, 'max'), fmt(aggregate.band_exposure_max_dB[i], 1));
     tbody.appendChild(row);
   }
+
+  drawBandsChart();
 }
 
 /* ---- per-shot review ---------------------------------------------------- */
@@ -3695,9 +3909,989 @@ function renderHazardPanel() {
     ? `${fmtInt(hazard.n_rounds)} per working day, from ${hazard.n_shots_used} included shot(s)` : null);
   setText($('hazard-lae-mean'), hazard && isNum(hazard.LAE_mean_dB)
     ? `${fmt(hazard.LAE_mean_dB, 1)} ${levelUnit()}` : null);
+
+  renderAhaahPanel();
+}
+
+/**
+ * The second metric MIL-STD-1474E approves, and the one customers ask for by
+ * name. It is computed on every analysis and it declines to emit a number.
+ *
+ * This card exists so that the refusal REACHES the operator. Before it, the
+ * model ran nowhere and the interface was simply silent on the ARU, which
+ * reads as "not implemented" rather than as "implemented, and here is the
+ * argument for why it will not give you a figure". The distinction is the
+ * whole point: an ARU produced from four unspecified parameters would be an
+ * authoritative-looking number that is wrong.
+ */
+function renderAhaahPanel() {
+  const card = $('card-ahaah');
+  if (!card) return;
+  const block = metaBlock('ahaah');
+  const present = block && Object.keys(block).length > 0;
+  show(card, Boolean(present));
+  if (!present) return;
+
+  const unwarned = block.unwarned || null;
+  // valid is never true in this build; branch on it anyway so the day the
+  // model validates, this panel reports the number instead of the refusal.
+  const available = Boolean(unwarned && unwarned.valid);
+
+  setTone($('ahaah-pill'), available ? 'ok' : 'warn');
+  setRaw($('ahaah-pill-text'), available ? 'Available' : 'No number');
+
+  setRaw($('ahaah-headline'), block.attempted
+    ? (block.headline || 'AHAAH unavailable')
+    : `Not run — ${block.reason || 'no reason recorded'}`);
+
+  const notes = $('ahaah-notes');
+  if (notes) {
+    notes.textContent = '';
+    for (const note of (block.notes || []).slice(0, 4)) {
+      const item = document.createElement('li');
+      item.className = 'finding';
+      const body = document.createElement('div');
+      body.className = 'finding-body';
+      const message = document.createElement('p');
+      message.className = 'finding-message';
+      message.textContent = note;
+      body.appendChild(message);
+      item.appendChild(body);
+      notes.appendChild(item);
+    }
+    show(notes, (block.notes || []).length > 0);
+  }
+
+  const detail = $('ahaah-detail');
+  if (!detail) return;
+  detail.textContent = '';
+  const rows = [
+    ['Standing', block.validation_status === 'not_validated'
+      ? 'Not validated against the ARL reference case'
+      : String(block.validation_status || '—')],
+    ['Shot submitted', block.shot_number === null || block.shot_number === undefined
+      ? '—' : `Shot ${block.shot_number} — the loudest valid impulse`],
+  ];
+  if (unwarned) {
+    if (isNum(unwarned.peak_pressure_dB)) {
+      rows.push(['Peak submitted', `${fmt(unwarned.peak_pressure_dB, 1)} dB`]);
+    }
+    if (isNum(unwarned.category_c_count)) {
+      rows.push(['Unspecified parameters',
+        `${fmtInt(unwarned.category_c_count)} choices ARL's public release does not define`]);
+    }
+    if (unwarned.man_coe_md5) rows.push(['man.coe checksum', String(unwarned.man_coe_md5)]);
+  }
+  rows.push(['Metric in use', `A-weighted energy (MIL-STD-1474E), shown above`]);
+
+  for (const [key, value] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = key;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    detail.append(dt, dd);
+  }
 }
 
 /* ---- results dispatcher ------------------------------------------------- */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STRING ANALYSIS PANEL
+
+   Everything the string says about itself beyond its average: whether the first
+   round popped, what the average costs with and without it, whether the string
+   drifted, and which shots a technician should look at before any of it is
+   reported. Every verdict here is one the Python side already decided; the
+   renderer states it and never re-derives it, so the UI and the record on disk
+   can never disagree.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Put a card's leading rail into the tone of the verdict it carries.
+ *
+ * The rail is the one ornament in this interface, so it must always mean
+ * something. A card whose verdict is neutral gets no rail at all rather than a
+ * grey one, because a grey rail still reads as a status.
+ */
+function setCardTone(id, tone) {
+  const card = $(id);
+  if (!card) return;
+  if (tone) card.setAttribute('data-tone', tone);
+  else card.removeAttribute('data-tone');
+}
+
+/** The level unit this analysis earned: real dB SPL, or dB re FS. */
+function levelUnit() {
+  return metaBlock('calibration').level_unit || 'dB';
+}
+
+/** One entry in a findings list, built without innerHTML. */
+function findingRow(identifier, message, severity, amount) {
+  const li = document.createElement('li');
+  li.className = 'finding';
+  li.setAttribute('data-severity', severity || 'info');
+
+  const id = document.createElement('span');
+  id.className = 'finding-id';
+  id.textContent = identifier;
+  li.appendChild(id);
+
+  const body = document.createElement('div');
+  body.className = 'finding-body';
+
+  const text = document.createElement('p');
+  text.className = 'finding-message';
+  text.textContent = message;
+  body.appendChild(text);
+
+  if (amount) {
+    const quantity = document.createElement('span');
+    quantity.className = 'finding-amount';
+    quantity.textContent = amount;
+    body.appendChild(quantity);
+  }
+
+  li.appendChild(body);
+  return li;
+}
+
+function renderFirstRoundPop(stats) {
+  const pop = stats && stats.first_round_pop;
+  const unit = levelUnit();
+  const pill = $('frp-pill');
+  const note = $('frp-note');
+
+  if (!pop || pop.refusal) {
+    setCardTone('card-frp', 'info');
+    setTone(pill, 'info', 'i-info');
+    setText($('frp-pill-text'), 'Not measured');
+    ['frp-first', 'frp-rest', 'frp-interval', 'frp-p', 'frp-basis']
+      .forEach(id => setText($(id), null));
+    if (pop && pop.refusal) {
+      setText(note, `Not measured: ${pop.refusal}`);
+      note.className = 'note note-info';
+      show(note, true);
+    } else {
+      show(note, false);
+    }
+    return;
+  }
+
+  if (pop.established) {
+    setCardTone('card-frp', 'danger');
+    setTone(pill, 'danger', 'i-alert');
+    setText($('frp-pill-text'), `Pop established · ${fmtSigned(pop.observed_dB, 2)} dB`);
+  } else if (pop.first_shot_quieter) {
+    setCardTone('card-frp', 'warn');
+    setTone(pill, 'warn', 'i-alert');
+    setText($('frp-pill-text'), 'First round QUIETER than the string');
+  } else {
+    setCardTone('card-frp', 'ok');
+    setTone(pill, 'ok', 'i-check-circle');
+    setText($('frp-pill-text'), 'No pop this measurement can resolve');
+  }
+
+  setText($('frp-first'), isNum(pop.first_shot_dB) ? `${fmt(pop.first_shot_dB, 1)} ${unit}` : null);
+  setText($('frp-rest'), isNum(pop.subsequent_mean_dB)
+    ? `${fmt(pop.subsequent_mean_dB, 1)} ${unit} over ${pop.n_subsequent} shots (σ ${fmt(pop.subsequent_sd_dB, 2)})`
+    : null);
+  setText($('frp-interval'), (isNum(pop.prediction_lower_dB) && isNum(pop.prediction_upper_dB))
+    ? `${fmt(pop.prediction_lower_dB, 1)} to ${fmt(pop.prediction_upper_dB, 1)} ${unit}`
+    : null);
+  setText($('frp-p'), isNum(pop.p_value) ? pop.p_value.toFixed(4) : null);
+  setText($('frp-basis'), pop.basis === 'across-strings'
+    ? `Across ${pop.n_strings} strings`
+    : 'One string — a single observation');
+
+  if (pop.first_shot_quieter) {
+    setText(note, 'The first round was quieter than the rest of the string explains. '
+      + 'That is not first-round pop; check for a squib, a misfire or a detection error.');
+    note.className = 'note note-warn';
+    show(note, true);
+  } else if (Array.isArray(pop.notes) && pop.notes.length) {
+    setText(note, pop.notes.join(' '));
+    note.className = 'note note-info';
+    show(note, true);
+  } else {
+    show(note, false);
+  }
+}
+
+function renderStringMeans(breakdown) {
+  const body = $('string-means-tbody');
+  if (!body) return;
+  while (body.firstChild) body.removeChild(body.firstChild);
+
+  const unit = levelUnit();
+  const order = ['Lpeak_Z', 'Lpeak_A', 'LAE'];
+  const labels = { Lpeak_Z: 'Peak, Z-weighted', Lpeak_A: 'Peak, A-weighted', LAE: 'Sound exposure' };
+
+  order.forEach(key => {
+    const stats = breakdown[key];
+    if (!stats) return;
+    const row = document.createElement('tr');
+
+    const name = document.createElement('th');
+    name.setAttribute('scope', 'row');
+    name.textContent = labels[key] || key;
+    row.appendChild(name);
+
+    [
+      isNum(stats.energy_mean_dB) ? `${fmt(stats.energy_mean_dB, 1)} ${unit}` : '—',
+      isNum(stats.energy_mean_excluding_first_dB)
+        ? `${fmt(stats.energy_mean_excluding_first_dB, 1)} ${unit}` : '—',
+      isNum(stats.first_round_cost_dB) ? `${fmtSigned(stats.first_round_cost_dB, 2)} dB` : '—',
+    ].forEach(value => {
+      const cell = document.createElement('td');
+      cell.className = 'num';
+      cell.textContent = value;
+      row.appendChild(cell);
+    });
+
+    body.appendChild(row);
+  });
+}
+
+function renderStringDrift(stats) {
+  const unit = levelUnit();
+  const pill = $('drift-pill');
+
+  if (!stats || !isNum(stats.trend_dB_per_shot)) {
+    setCardTone('card-drift', 'info');
+    setTone(pill, 'info', 'i-info');
+    setText($('drift-pill-text'), 'Not tested');
+    setText($('drift-slope'), null);
+    setText($('drift-p'), null);
+  } else if (stats.trend_established) {
+    setCardTone('card-drift', 'warn');
+    setTone(pill, 'warn', 'i-alert');
+    setText($('drift-pill-text'), 'Drift established');
+    setText($('drift-slope'), `${fmtSigned(stats.trend_dB_per_shot, 3)} dB per shot`);
+    setText($('drift-p'), `p = ${Number(stats.trend_p_value).toFixed(3)}`);
+  } else {
+    setCardTone('card-drift', 'ok');
+    setTone(pill, 'ok', 'i-check-circle');
+    setText($('drift-pill-text'), 'No drift established');
+    setText($('drift-slope'), `${fmtSigned(stats.trend_dB_per_shot, 3)} dB per shot`);
+    setText($('drift-p'), `p = ${Number(stats.trend_p_value).toFixed(3)}`);
+  }
+
+  if (stats && isNum(stats.min_dB) && isNum(stats.max_dB)) {
+    setText($('string-range'),
+      `${fmt(stats.min_dB, 1)} to ${fmt(stats.max_dB, 1)} ${unit} (range ${fmt(stats.range_dB, 2)} dB)`);
+  } else {
+    setText($('string-range'), null);
+  }
+
+  const percentiles = stats && stats.percentiles_dB;
+  if (percentiles && Object.keys(percentiles).length) {
+    setText($('string-percentiles'), Object.keys(percentiles)
+      .sort((a, b) => Number(a) - Number(b))
+      .map(k => `p${k} ${fmt(percentiles[k], 1)}`)
+      .join('  ·  '));
+  } else {
+    setText($('string-percentiles'), null);
+  }
+}
+
+function renderShotReview() {
+  const review = metaBlock('shot_review');
+  const list = $('review-list');
+  const pill = $('review-pill');
+  const counter = $('tab-string-flags');
+  if (!list) return;
+
+  while (list.firstChild) list.removeChild(list.firstChild);
+
+  setText($('review-sensitivity'), review.sensitivity || '');
+
+  const flags = Array.isArray(review.flags) ? review.flags : [];
+  const actionable = flags.filter(f => f.severity === 'exclude' || f.severity === 'review');
+  const excluded = Array.isArray(review.shots_to_exclude) ? review.shots_to_exclude : [];
+
+  if (!actionable.length) {
+    setCardTone('card-review', 'ok');
+    setTone(pill, 'ok', 'i-check-circle');
+    setText($('review-pill-text'), 'No shot departs from the string');
+    show(counter, false);
+  } else {
+    const tone = excluded.length ? 'danger' : 'warn';
+    setCardTone('card-review', tone);
+    setTone(pill, tone, 'i-alert');
+    setText($('review-pill-text'), excluded.length
+      ? `${excluded.length} to exclude, ${actionable.length - excluded.length} to review`
+      : `${actionable.length} shot(s) to review`);
+    setText(counter, String(actionable.length));
+    counter.setAttribute('data-tone', tone);
+    show(counter, true);
+  }
+
+  // Worst first, so the shot that cannot carry a number is read before the
+  // shots that merely want a look.
+  const rank = { exclude: 0, review: 1, info: 2 };
+  flags.slice()
+    .sort((a, b) => (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3)
+      || a.shot_number - b.shot_number)
+    .forEach(flag => {
+      const amount = isNum(flag.esd_statistic) && isNum(flag.esd_critical)
+        ? `ESD ${fmt(flag.esd_statistic, 2)} against a critical value of ${fmt(flag.esd_critical, 2)}`
+        : null;
+      list.appendChild(findingRow(
+        `Shot ${flag.shot_number}`, flag.message, flag.severity, amount,
+      ));
+    });
+}
+
+function renderAtmospherePanel() {
+  const air = metaBlock('atmosphere');
+  const test = metaBlock('test_metadata');
+  const pill = $('atmosphere-pill');
+  const note = $('atmosphere-note');
+
+  const defaulted = Array.isArray(air.defaulted) ? air.defaulted : [];
+  const outOfRange = Array.isArray(air.out_of_standard_range) ? air.out_of_standard_range : [];
+
+  if (!defaulted.length) {
+    setCardTone('card-atmosphere', 'ok');
+    setTone(pill, 'ok', 'i-check-circle');
+    setText($('atmosphere-pill-text'), 'Recorded');
+  } else if (defaulted.length >= 3) {
+    setCardTone('card-atmosphere', 'warn');
+    setTone(pill, 'warn', 'i-alert');
+    setText($('atmosphere-pill-text'), 'Assumed — no weather recorded');
+  } else {
+    setCardTone('card-atmosphere', 'warn');
+    setTone(pill, 'warn', 'i-alert');
+    setText($('atmosphere-pill-text'), `${defaulted.length} field(s) assumed`);
+  }
+
+  const assumed = key => defaulted.includes(key) ? ' (assumed)' : '';
+  setText($('atm-temperature'), isNum(air.temperature_C)
+    ? `${fmt(air.temperature_C, 1)} °C${assumed('temperature_C')}` : null);
+  setText($('atm-humidity'), isNum(air.humidity_pct)
+    ? `${fmt(air.humidity_pct, 0)} %${assumed('humidity_pct')}` : null);
+  setText($('atm-pressure'), isNum(air.pressure_kPa)
+    ? `${fmt(air.pressure_kPa, 2)} kPa${assumed('pressure_kPa')}` : null);
+  setText($('atm-speed'), isNum(air.speed_of_sound_m_per_s)
+    ? `${fmt(air.speed_of_sound_m_per_s, 1)} m/s` : null);
+  setText($('atm-density'), isNum(air.density_kg_per_m3)
+    ? `${fmt(air.density_kg_per_m3, 4)} kg/m³` : null);
+  setText($('atm-distance'), isNum(test.mic_distance_m)
+    ? `${fmt(test.mic_distance_m, 2)} m` : 'not recorded');
+  setText($('atm-angle'), isNum(test.mic_angle_deg)
+    ? `${fmt(test.mic_angle_deg, 0)}° from the line of fire` : 'not recorded');
+
+  const problems = [];
+  if (defaulted.length) {
+    problems.push('Weather was not recorded, so ISO 9613-1 reference conditions were '
+      + 'assumed. Any distance or absorption correction computed from them carries '
+      + 'that assumption.');
+  }
+  outOfRange.forEach(text => problems.push(text));
+
+  if (problems.length) {
+    setText(note, problems.join(' '));
+    note.className = 'note note-warn';
+    show(note, true);
+  } else {
+    show(note, false);
+  }
+
+  drawAbsorptionChart();
+}
+
+/* ---------------------------------------------------------------------------
+   BANDS, DISTRIBUTION, SHOT-TO-SHOT BEHAVIOUR
+
+   Three charts that needed nothing from the engine: every value is already in
+   analysis_metadata.json. They also respond to shots being excluded, which a
+   figure rendered once at analysis time cannot.
+   --------------------------------------------------------------------------- */
+
+function drawBandsChart() {
+  const canvas = $('bands-canvas');
+  const image = $('img-bands');
+  if (!canvas) return;
+  chartRegistry.set('bands-canvas', drawBandsChart);
+
+  const aggregate = state.results.aggregate || {};
+  const frequencies = aggregate.band_frequencies_Hz || [];
+  const mean = aggregate.band_exposure_mean_dB || [];
+  if (frequencies.length < 2 || mean.length !== frequencies.length) {
+    show(canvas, false);
+    show(image, true);
+    return;
+  }
+  show(image, false);
+  show(canvas, true);
+
+  const palette = chartPalette();
+  drawBandedChart(canvas, {
+    frequencies,
+    unit: levelUnit(),
+    series: [{ label: 'Mean band exposure', color: palette.series[3], kind: 'bar', values: mean }],
+  });
+  setRaw($('caption-bands'),
+    `Energy mean over the ${includedShots().length} included shot(s), `
+    + `${frequencies.length} one-third-octave bands, levels in ${levelUnit()}. `
+    + 'Recomputed here when a shot is excluded.');
+}
+
+/** Freedman–Diaconis bin width, falling back to Sturges on a degenerate IQR. */
+function histogramBins(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (n < 2) return { edges: [], counts: [] };
+  const quantile = (q) => {
+    const pos = (n - 1) * q;
+    const base = Math.floor(pos);
+    const rest = pos - base;
+    return sorted[base] + (sorted[Math.min(base + 1, n - 1)] - sorted[base]) * rest;
+  };
+  const iqr = quantile(0.75) - quantile(0.25);
+  const lo = sorted[0];
+  const hi = sorted[n - 1];
+  const span = hi - lo;
+  if (!(span > 0)) return { edges: [lo, lo + 1], counts: [n] };
+  // Freedman-Diaconis adapts the width to the spread rather than assuming a
+  // shape; with a handful of shots the IQR can be zero, and Sturges is the
+  // standard fallback.
+  let width = iqr > 0 ? (2 * iqr) / Math.cbrt(n) : span / (Math.ceil(Math.log2(n)) + 1);
+  if (!(width > 0)) width = span / 4;
+  const count = clamp(Math.ceil(span / width), 3, 24);
+  const step = span / count;
+  const edges = Array.from({ length: count + 1 }, (_, i) => lo + i * step);
+  const counts = new Array(count).fill(0);
+  for (const v of sorted) counts[clamp(Math.floor((v - lo) / step), 0, count - 1)] += 1;
+  return { edges, counts };
+}
+
+function drawDistributionChart() {
+  const canvas = $('distribution-canvas');
+  const image = $('img-distribution');
+  const select = $('distribution-metric');
+  if (!canvas) return;
+  chartRegistry.set('distribution-canvas', drawDistributionChart);
+
+  if (select && select.options.length === 0) {
+    for (const metric of METRICS.filter(m => m.level)) {
+      const option = document.createElement('option');
+      option.value = metric.key;
+      option.textContent = metric.label || metric.key;
+      select.appendChild(option);
+    }
+  }
+  const key = select && select.value ? select.value : 'Lpeak_Z_dB';
+  const values = includedShots().map(s => s[key]).filter(isNum);
+
+  if (values.length < 2) {
+    show(canvas, false);
+    show(image, true);
+    return;
+  }
+  show(image, false);
+  show(canvas, true);
+
+  const { edges, counts } = histogramBins(values);
+  const palette = chartPalette();
+  const centres = counts.map((_, i) => (edges[i] + edges[i + 1]) / 2);
+
+  // Counts, and a cumulative count on the same axis — not a percentage on a
+  // second one. With eight shots a percentage implies a precision the sample
+  // does not have, and one axis keeps the two readable against each other.
+  let running = 0;
+  const cumulative = counts.map(c => (running += c));
+
+  drawXYChart(canvas, {
+    x: centres,
+    xScale: 'linear',
+    xFormat: (v) => fmt(v, 1),
+    xTitle: `${(METRICS.find(m => m.key === key) || {}).label || key}, ${levelUnit()}`,
+    unit: 'shots',
+    yMin: 0,
+    xNoun: 'level range',
+    series: [
+      { label: 'Shots in bin', color: palette.series[3], kind: 'step', values: counts },
+      { label: 'Cumulative', color: palette.series[2], kind: 'line', values: cumulative },
+    ],
+  });
+
+  // Computed from the same array that was binned, rather than looked up from
+  // the aggregate: the two would disagree the moment a shot is excluded.
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  setRaw($('caption-distribution'),
+    `${values.length} included shot(s) in ${counts.length} bins of `
+    + `${fmt(edges[1] - edges[0], 2)} ${levelUnit()}, width chosen by Freedman–Diaconis. `
+    + `Mean ${fmt(mean, 1)}, sigma ${fmt(sampleStd(values), 2)} ${levelUnit()}.`);
+}
+
+function drawVariabilityChart() {
+  const canvas = $('variability-canvas');
+  const figure = $('figure-variability');
+  if (!canvas) return;
+  chartRegistry.set('variability-canvas', drawVariabilityChart);
+
+  const shots = includedShots();
+  const key = ($('distribution-metric') && $('distribution-metric').value) || 'Lpeak_Z_dB';
+  const values = shots.map(s => (isNum(s[key]) ? s[key] : null));
+  const numbers = values.filter(isNum);
+  show(figure, numbers.length >= 2);
+  if (numbers.length < 2) return;
+
+  const mean = numbers.reduce((a, b) => a + b, 0) / numbers.length;
+  const sd = sampleStd(numbers);
+  const palette = chartPalette();
+  const order = shots.map((s, i) => (isNum(s.shot_number) ? s.shot_number : i + 1));
+
+  drawXYChart(canvas, {
+    x: order,
+    xScale: 'linear',
+    xFormat: (v) => `#${Math.round(v)}`,
+    xTitle: 'Position in the string',
+    unit: levelUnit(),
+    xNoun: 'string',
+    series: [
+      // The sigma band is drawn first so the shots sit on top of it.
+      ...(isNum(sd) && sd > 0 ? [{
+        label: 'Mean ± 1σ',
+        color: palette.series[3],
+        kind: 'band',
+        alpha: 0.16,
+        lower: order.map(() => mean - sd),
+        upper: order.map(() => mean + sd),
+      }] : []),
+      { label: 'Shot level', color: palette.series[0], kind: 'line', values },
+      { label: 'Shot level', color: palette.series[0], kind: 'marker', values },
+    ],
+  });
+
+  const first = values[0];
+  setRaw($('caption-variability'),
+    `${numbers.length} included shot(s). Mean ${fmt(mean, 1)} ${levelUnit()}, `
+    + `sigma ${fmt(sd, 2)} ${levelUnit()}, range ${fmt(Math.max(...numbers) - Math.min(...numbers), 2)} dB.`
+    + (isNum(first) ? ` First round ${fmtSigned(first - mean, 2)} dB against the mean.` : ''));
+}
+
+
+/* ---------------------------------------------------------------------------
+   SPECTROGRAM
+
+   Read from spectrogram_{z,c}_matrix.json, which holds the same 0.1 dB values
+   the engine plotted, quantised losslessly into uint16. Painting it here
+   rather than shipping a picture is what lets the operator put the cursor on
+   a smear at 4 kHz and be told what level it actually is.
+   --------------------------------------------------------------------------- */
+
+const spectrogramCache = new Map();
+
+function spectrogramArtifact(weighting) {
+  const artifacts = metaBlock('artifacts') || {};
+  return artifacts[`spectrogram_${String(weighting).toLowerCase()}_matrix`] || null;
+}
+
+function loadSpectrogramMatrix(weighting) {
+  const dir = state.results.dir;
+  const file = spectrogramArtifact(weighting);
+  if (!dir || !file) { drawSpectrogramChart(); return; }
+  const key = `${dir}::${file}`;
+  if (spectrogramCache.has(key)) { drawSpectrogramChart(); return; }
+  spectrogramCache.set(key, null);
+
+  fetch(artifactUrl(dir, file))
+    .then(r => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+    .then(payload => {
+      payload.decoded = decodeMatrix(payload.magnitude_dB_b64);
+      spectrogramCache.set(key, payload);
+      drawSpectrogramChart();
+    })
+    .catch(err => {
+      console.warn('spectrogram matrix unavailable', err);
+      spectrogramCache.set(key, false);
+      drawSpectrogramChart();
+    });
+}
+
+function currentSpectrogram() {
+  const dir = state.results.dir;
+  const select = $('spectrogram-weighting');
+  const file = spectrogramArtifact(select ? select.value : 'Z');
+  if (!dir || !file) return null;
+  return spectrogramCache.get(`${dir}::${file}`) || null;
+}
+
+function drawSpectrogramChart() {
+  const canvas = $('spectrogram-canvas');
+  const image = $('img-spectrogram');
+  if (!canvas) return;
+  chartRegistry.set('spectrogram-canvas', drawSpectrogramChart);
+
+  const payload = currentSpectrogram();
+  const shotSelect = $('spectrogram-shot');
+  const perShot = shotSelect && shotSelect.value !== 'all';
+
+  // The per-shot spectrograms are separate figures the engine renders; only
+  // the full-recording matrix is emitted as data. Rather than pretend, the
+  // per-shot selection falls back to the engine's picture and says so.
+  if (!payload || perShot) {
+    show(canvas, false);
+    show(image, true);
+    return;
+  }
+  show(image, false);
+  show(canvas, true);
+
+  const q = payload.quantisation || {};
+  // The colour scale spans the top 70 dB. Anchoring it at the true minimum
+  // would spend most of the ramp on the noise floor and leave the blasts —
+  // the measurement — compressed into the last few shades.
+  const vmax = Math.ceil(payload.max_dB);
+  const vmin = Math.max(Math.floor(payload.min_dB), vmax - 70);
+
+  drawHeatmapChart(canvas, {
+    matrix: payload.decoded,
+    frames: payload.frames,
+    bins: payload.bins,
+    time: payload.time_s,
+    frequencies: payload.frequencies_Hz,
+    offset: q.offset_dB,
+    step: q.step_dB,
+    missing: q.missing,
+    vmin,
+    vmax,
+    unit: payload.calibrated ? 'dB SPL' : 'dB re FS',
+    xTitle: 'Time',
+    yTitle: 'Hz',
+  });
+
+  setRaw($('caption-spectrogram'),
+    `${payload.weighting}-weighted, ${payload.nperseg}-point ${payload.window} window `
+    + `(${fmt(payload.enbw_Hz, 0)} Hz bins), ${payload.frames} frames. `
+    + `Colour scale ${vmin} to ${vmax} ${payload.calibrated ? 'dB SPL' : 'dB re FS'}. `
+    + 'Point at the plot to read a level off it.');
+}
+
+
+/* ---------------------------------------------------------------------------
+   WAVEFORM
+
+   Drawn from waveform_envelope.json, which the engine writes in the data stage
+   as a min/max envelope. The band between the two bounds is the signal: at
+   this scale a single line would be a line through the middle of a blast, and
+   the height of a blast is the measurement.
+
+   The whole recording and one shot are two different pictures, and the file
+   carries both. Zooming past the overview's own column width swaps in the
+   shot's higher-resolution envelope rather than magnifying columns that have
+   no more detail in them.
+   --------------------------------------------------------------------------- */
+
+/** dir -> the parsed envelope, so switching tabs does not refetch it. */
+const waveformCache = new Map();
+
+function loadWaveformEnvelope() {
+  const dir = state.results.dir;
+  const file = (metaBlock('artifacts') || {}).waveform_envelope;
+  if (!dir || !file) return;
+  const key = `${dir}::${file}`;
+  if (waveformCache.has(key)) { drawWaveformChart(); return; }
+  waveformCache.set(key, null);                    // in flight; do not refetch
+
+  fetch(artifactUrl(dir, file))
+    .then(response => (response.ok ? response.json() : Promise.reject(new Error(response.status))))
+    .then(payload => { waveformCache.set(key, payload); drawWaveformChart(); })
+    .catch(err => {
+      console.warn('waveform envelope unavailable', err);
+      waveformCache.set(key, false);               // known absent; fall back to the PNG
+      drawWaveformChart();
+    });
+}
+
+function currentEnvelope() {
+  const dir = state.results.dir;
+  const file = (metaBlock('artifacts') || {}).waveform_envelope;
+  if (!dir || !file) return null;
+  return waveformCache.get(`${dir}::${file}`) || null;
+}
+
+/** Which shot the waveform is zoomed to, or '' for the whole recording. */
+let waveformFocus = '';
+
+/** The visible time window, in seconds, or null for everything. */
+let waveformRange = null;
+
+/**
+ * Choose the coarsest pyramid level that still puts a column in every pixel.
+ *
+ * This is what makes the picture gain detail as the zoom goes in. A single
+ * envelope magnifies: 2048 columns across twelve seconds is 5.9 ms per column,
+ * so zooming to one blast just draws the same handful of columns wider. Here
+ * the visible span is measured against each level's column width and the first
+ * one fine enough is used — so a 5 ms window is drawn from the level with
+ * 131072 columns, at roughly one sample per pixel, and nothing deeper is ever
+ * decoded because there would be nothing left to see.
+ */
+function pickWaveformLevel(envelope, t0, t1, pixels) {
+  const levels = Array.isArray(envelope.levels) && envelope.levels.length
+    ? envelope.levels
+    : [{ columns: envelope.columns, lo: envelope.lo, hi: envelope.hi }];
+  const duration = envelope.duration_s || 1;
+  const span = Math.max(1e-9, t1 - t0);
+  const wanted = Math.max(1, pixels);
+  for (const level of levels) {
+    // Columns that will land inside the visible span at this level.
+    if ((level.columns * span) / duration >= wanted) return level;
+  }
+  return levels[levels.length - 1];
+}
+
+function drawWaveformChart() {
+  const canvas = $('waveform-canvas');
+  if (!canvas) return;
+  chartRegistry.set('waveform-canvas', drawWaveformChart);
+
+  const envelope = currentEnvelope();
+  const image = $('img-waveform');
+  const jump = $('waveform-jump');
+
+  // No envelope on this record — an analysis from an older build, or the
+  // chunked path. Fall back to the engine's PNG rather than an empty box.
+  if (!envelope) {
+    show(canvas, false);
+    show(image, true);
+    show(jump, false);
+    return;
+  }
+  show(image, false);
+  show(canvas, true);
+
+  const shots = Array.isArray(envelope.shots) ? envelope.shots : [];
+  if (jump) {
+    show(jump, shots.length > 0);
+    if (jump.options.length !== shots.length + 1) {
+      jump.textContent = '';
+      const whole = document.createElement('option');
+      whole.value = '';
+      whole.textContent = 'Whole recording';
+      jump.appendChild(whole);
+      for (const shot of shots) {
+        const option = document.createElement('option');
+        option.value = String(shot.shot_number);
+        option.textContent = `Shot ${shot.shot_number}`;
+        jump.appendChild(option);
+      }
+    }
+    if (jump.value !== waveformFocus) jump.value = waveformFocus;
+  }
+
+  const palette = chartPalette();
+  const focused = waveformFocus
+    ? shots.find(s => String(s.shot_number) === waveformFocus) || null
+    : null;
+
+  const pixels = Math.max(200, Math.round(canvas.getBoundingClientRect().width) - 72);
+
+  // A shot's own envelope is the finest thing available over its window, so it
+  // wins whenever the visible range lies inside one.
+  let lo;
+  let hi;
+  let t0;
+  let t1;
+  let sourceColumns;
+  let sourceLabel;
+
+  // A drag inside a focused shot must still narrow the view. Taking the
+  // window from the shot whenever one was selected made the zoom a no-op
+  // there — the selector chooses the STARTING window, not a fixed one.
+  const fallback0 = focused ? focused.t0_s : 0;
+  const fallback1 = focused ? focused.t1_s : (envelope.duration_s || 1);
+  const window0 = waveformRange ? Math.max(waveformRange.t0, fallback0) : fallback0;
+  const window1 = waveformRange ? Math.min(waveformRange.t1, fallback1) : fallback1;
+
+  const inside = (focused && window0 >= focused.t0_s && window1 <= focused.t1_s)
+    ? focused
+    : shots.find(s => window0 >= s.t0_s && window1 <= s.t1_s) || focused || null;
+
+  if (inside) {
+    const step = (inside.t1_s - inside.t0_s) / Math.max(1, inside.columns - 1);
+    const a = clamp(Math.floor((window0 - inside.t0_s) / step), 0, inside.columns - 1);
+    const b = clamp(Math.ceil((window1 - inside.t0_s) / step), a + 1, inside.columns - 1);
+    lo = inside.lo.slice(a, b + 1);
+    hi = inside.hi.slice(a, b + 1);
+    t0 = inside.t0_s + a * step;
+    t1 = inside.t0_s + b * step;
+    sourceColumns = inside.columns;
+    sourceLabel = `shot ${inside.shot_number}`;
+  } else {
+    const level = pickWaveformLevel(envelope, window0, window1, pixels);
+    const duration = envelope.duration_s || 1;
+    const step = duration / Math.max(1, level.columns - 1);
+    const a = clamp(Math.floor(window0 / step), 0, level.columns - 1);
+    const b = clamp(Math.ceil(window1 / step), a + 1, level.columns - 1);
+    lo = level.lo.slice(a, b + 1);
+    hi = level.hi.slice(a, b + 1);
+    t0 = a * step;
+    t1 = b * step;
+    sourceColumns = level.columns;
+    sourceLabel = `level ${level.columns}`;
+  }
+
+  const columns = Math.min(lo.length, hi.length);
+  if (columns < 2) { chartMessage(canvas, 'No waveform data'); return; }
+  const step = (t1 - t0) / Math.max(1, columns - 1);
+  const times = Array.from({ length: columns }, (_, i) => t0 + i * step);
+
+  // The zoom lives in seconds here, not in array indices, precisely because
+  // the array changes when a finer level is chosen.
+  const record = chartRecord(canvas);
+  record.view = null;
+
+  const markers = focused
+    ? [{ x: focused.peak_time_s, label: `#${focused.shot_number}` }]
+    : shots.filter(s => s.peak_time_s >= t0 && s.peak_time_s <= t1)
+      .map(s => ({ x: s.peak_time_s, label: String(s.shot_number) }));
+
+  const brief = (t1 - t0) < 1;
+  drawXYChart(canvas, {
+    x: times,
+    xScale: 'linear',
+    xFormat: (t) => (brief ? `${(t * 1000).toFixed(1)} ms` : `${t.toFixed(2)} s`),
+    xTitle: 'Time',
+    xNoun: 'recording',
+    unit: envelope.unit || 'Pa',
+    zeroLine: true,
+    series: [{
+      label: 'Pressure',
+      color: palette.series[0],
+      kind: 'band',
+      lower: lo,
+      upper: hi,
+      alpha: 0.9,
+    }],
+    markers,
+    onZoom: (a, b) => {
+      if (!isNum(a) || !isNum(b) || b <= a) return;
+      waveformRange = { t0: a, t1: b };
+      drawWaveformChart();
+    },
+    onReset: () => {
+      waveformRange = null;
+      waveformFocus = '';
+      const control = $('waveform-jump');
+      if (control) control.value = '';
+    },
+    isZoomed: () => Boolean(waveformRange) || Boolean(waveformFocus),
+  });
+
+  const peak = [...hi, ...lo].reduce(
+    (a, v) => (isNum(v) && Math.abs(v) > a ? Math.abs(v) : a), 0);
+  const resolution = (t1 - t0) / Math.max(1, columns - 1);
+  setRaw($('caption-waveform'),
+    `${brief ? `${fmt((t1 - t0) * 1000, 1)} ms` : `${fmt(t1 - t0, 2)} s`} shown, `
+    + `peak ${fmt(peak, 2)} Pa. ${columns} columns at `
+    + `${resolution < 1e-3 ? `${fmt(resolution * 1e6, 0)} µs` : `${fmt(resolution * 1e3, 2)} ms`} each, `
+    + `drawn from ${sourceLabel}. Each column is the extremes of its span, so the band always contains the true peak.`);
+  canvas.setAttribute('aria-label', focused
+    ? `Pressure against time for shot ${focused.shot_number}.`
+    : 'Pressure against time, with each detected shot marked.');
+}
+
+function wireWaveform() {
+  const jump = $('waveform-jump');
+  if (!jump) return;
+  jump.addEventListener('change', () => {
+    waveformFocus = jump.value;
+    waveformRange = null;
+    drawWaveformChart();
+    announce(waveformFocus ? `Waveform zoomed to shot ${waveformFocus}` : 'Waveform showing the whole recording');
+  });
+}
+
+/**
+ * Atmospheric absorption against frequency, drawn from the record.
+ *
+ * Log frequency, because absorption is a decade phenomenon: at 1 m the whole
+ * curve is under a tenth of a decibel until the last third of the audio range
+ * and then climbs by two orders of magnitude, and a linear axis shows that as
+ * a flat line with a spike at the right-hand edge.
+ *
+ * The alpha curve and the path loss are plotted TOGETHER on purpose. Alpha
+ * alone (dB per kilometre) sounds alarming at 20 kHz; over the metre that was
+ * actually measured it is half a decibel, and it is the second number that
+ * governs whether the measurement needed correcting.
+ */
+function drawAbsorptionChart() {
+  const canvas = $('absorption-canvas');
+  const card = $('card-absorption');
+  if (!canvas || !card) return;
+  chartRegistry.set('absorption-canvas', drawAbsorptionChart);
+
+  const effect = metaBlock('atmospheric_effect');
+  const frequencies = Array.isArray(effect.frequencies_Hz) ? effect.frequencies_Hz : [];
+  const alpha = Array.isArray(effect.alpha_dB_per_km) ? effect.alpha_dB_per_km : [];
+  const absorption = Array.isArray(effect.absorption_dB) ? effect.absorption_dB : [];
+
+  show(card, frequencies.length > 1 && absorption.length === frequencies.length);
+  if (card.hidden) return;
+
+  const palette = chartPalette();
+  const distance = isNum(effect.distance_m) ? effect.distance_m : null;
+
+  drawXYChart(canvas, {
+    x: frequencies,
+    xScale: 'log',
+    xFormat: (hz) => (hz >= 1000 ? `${hz / 1000}k` : String(Math.round(hz))),
+    xTitle: 'Frequency, Hz',
+    unit: 'dB',
+    // One quantity, one axis. The coefficient (dB/km) and the path loss (dB)
+    // differ by three orders of magnitude here, so drawing both against one
+    // scale would flatten the one that governs the decision. The coefficient
+    // is stated in the caption instead of being plotted on a borrowed axis.
+    series: [{
+      label: distance === null ? 'Absorption over the path' : `Absorption over ${fmt(distance, 2)} m`,
+      color: palette.series[3],
+      kind: 'line',
+      values: absorption,
+    }],
+  });
+
+  const worst = isNum(effect.worst_absorption_dB) ? effect.worst_absorption_dB : null;
+  const band = isNum(effect.worst_band_Hz) ? effect.worst_band_Hz : null;
+  setTone($('absorption-pill'), effect.matters ? 'warn' : 'ok');
+  setRaw($('absorption-pill-text'), effect.matters
+    ? 'Correction matters at this distance'
+    : 'Negligible at this distance');
+  const worstAlpha = alpha.length ? Math.max(...alpha.filter(isNum)) : null;
+  setRaw($('absorption-caption'), worst === null || band === null
+    ? 'Computed from the recorded atmosphere by ISO 9613-1.'
+    : `Worst band ${fmt(worst, 2)} dB at ${fmtHz(band)} over `
+      + `${distance === null ? 'the path' : `${fmt(distance, 2)} m`}`
+      + `${worstAlpha === null ? '' : `, from a coefficient of ${fmt(worstAlpha, 1)} dB/km`}. `
+      + 'ISO 9613-1, from the recorded atmosphere.');
+  canvas.setAttribute('aria-label',
+    `Atmospheric absorption against frequency; worst ${worst === null ? 'unknown' : fmt(worst, 2)} dB.`);
+}
+
+function renderStringPanel() {
+  const breakdown = metaBlock('string_statistics');
+  const headline = breakdown.Lpeak_Z || breakdown.Lpeak_A || breakdown.LAE || null;
+
+  renderFirstRoundPop(headline);
+  renderStringMeans(breakdown);
+  renderStringDrift(headline);
+  renderShotReview();
+  renderAtmospherePanel();
+
+  const distribution = pickImage(['level_distribution', 'distribution']);
+  const drawn = setFigure('img-distribution', distribution, null,
+    'Histogram and cumulative distribution of the per-shot levels.');
+  setText($('caption-distribution'), drawn
+    ? `Per-shot ${levelUnit()} levels: the histogram shows the shape, the cumulative `
+      + 'curve assumes no distribution at all.'
+    : 'Not generated for this analysis.');
+
+  drawDistributionChart();
+  drawVariabilityChart();
+}
 
 function renderResults() {
   const status = state.results.status;
@@ -3730,7 +4924,8 @@ function renderResults() {
   }
 
   const actionable = status === 'loaded';
-  ['btn-results-print', 'btn-results-csv', 'btn-results-folder', 'btn-results-copy-path']
+  ['btn-results-print', 'btn-results-csv', 'btn-results-folder', 'btn-results-copy-path',
+   'btn-results-menu']
     .forEach(id => setDisabled($(id), !actionable));
 
   if (status !== 'loaded') return;
@@ -3738,9 +4933,12 @@ function renderResults() {
   renderValidity();
   renderHeadlineMetrics();
   renderOverview();
+  loadWaveformEnvelope();
+  loadSpectrogramMatrix($('spectrogram-weighting') ? $('spectrogram-weighting').value : 'Z');
   renderSpectrogramPanel();
   renderBandsPanel();
   renderShotsPanel();
+  renderStringPanel();
   renderMetricsTable();
   renderHazardPanel();
 }
@@ -3753,7 +4951,10 @@ function wireResultsActions() {
   });
 
   const help = $('btn-help');
-  if (help) help.addEventListener('click', showShortcuts);
+  if (help) help.addEventListener('click', showAbout);
+
+  const shortcuts = $('btn-shortcuts');
+  if (shortcuts) shortcuts.addEventListener('click', showShortcuts);
 
   const copyPath = $('btn-results-copy-path');
   if (copyPath) copyPath.addEventListener('click', async () => {
@@ -3805,7 +5006,11 @@ function wireResultsActions() {
   if (details) details.addEventListener('click', () => openDialog($('modal-validity'), { opener: details }));
 
   const weighting = $('spectrogram-weighting');
-  if (weighting) weighting.addEventListener('change', () => commit());
+  if (weighting) weighting.addEventListener('change', () => {
+    // Each weighting is its own matrix; fetched once and then cached.
+    loadSpectrogramMatrix(weighting.value);
+    commit();
+  });
   const spectrogramShot = $('spectrogram-shot');
   if (spectrogramShot) spectrogramShot.addEventListener('change', () => commit());
 
@@ -3870,6 +5075,32 @@ function wireInput() {
 /** id -> draw function, so a theme or size change can repaint everything. */
 const chartRegistry = new Map();
 
+/**
+ * Per-canvas interaction state.
+ *
+ *   spec    the last spec drawn, so the overlay can read values without the
+ *           caller having to hand them over again
+ *   geom    the plot geometry from that draw: enough to map a pixel to a band
+ *           and a value back to a pixel
+ *   view    {i0, i1} inclusive band indices currently shown — the zoom
+ *   cursor  the band index under the pointer, or null
+ *   drag    {from, to} in band indices while a range is being dragged
+ *
+ * Kept in a WeakMap keyed by the canvas so a redraw (theme change, resize)
+ * preserves the zoom the operator set, and so nothing leaks if a canvas is
+ * removed from the document.
+ */
+const chartState = new WeakMap();
+
+function chartRecord(canvas) {
+  let record = chartState.get(canvas);
+  if (!record) {
+    record = { spec: null, geom: null, view: null, cursor: null, drag: null, wired: false };
+    chartState.set(canvas, record);
+  }
+  return record;
+}
+
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
@@ -3891,6 +5122,7 @@ function chartPalette() {
     accent: cssVar('--accent'),
     ok: cssVar('--ok'),
     warn: cssVar('--warn'),
+    shotMarker: cssVar('--shot-marker'),
     mono: cssVar('--font-mono') || 'monospace',
   };
 }
@@ -3911,7 +5143,11 @@ function prepareCanvas(canvas) {
   const width = Math.floor(host.clientWidth || 0);
   if (width <= 0) return null;
   const height = Math.round(width * Number(canvas.dataset.aspect));
-  const dpr = window.devicePixelRatio || 1;
+  // An export re-runs the SAME drawing code at a higher pixel ratio rather
+  // than scaling the finished picture up. Every line, glyph and axis label is
+  // rasterised at the export resolution, so zooming into the saved file finds
+  // real detail instead of interpolated pixels.
+  const dpr = Number(canvas.dataset.exportScale) || window.devicePixelRatio || 1;
 
   canvas.style.width = '100%';
   canvas.style.height = `${height}px`;
@@ -3949,6 +5185,16 @@ function isOctaveCentre(hz) {
   return OCTAVE_CENTRES.some(c => Math.abs(hz - c) / c < 0.06);
 }
 
+/** Axis-width band label. fmtHz() is the prose one; this one has ~30px. */
+function axisHz(hz) {
+  if (!isNum(hz)) return '—';
+  if (hz >= 1000) {
+    const k = hz / 1000;
+    return `${k % 1 === 0 ? k : k.toFixed(1)}k`;
+  }
+  return String(Math.round(hz * 10) / 10);
+}
+
 /**
  * A banded chart: categorical x (one slot per 1/3-octave band), any number of
  * bar or line series, an optional zero rule.
@@ -3968,12 +5214,31 @@ function drawBandedChart(canvas, spec) {
     return;
   }
 
-  const frequencies = spec.frequencies || [];
-  const series = (spec.series || []).filter(s =>
+  const allFrequencies = spec.frequencies || [];
+  const allSeries = (spec.series || []).filter(s =>
     Array.isArray(s.values) && s.values.length > 0 && Boolean(s.color));
-  const values = series.flatMap(s => s.values).filter(isNum);
-  if (frequencies.length === 0 || values.length === 0) {
+  if (allFrequencies.length === 0 || allSeries.flatMap(s => s.values).filter(isNum).length === 0) {
     chartMessage(canvas, 'No band data for the included shots');
+    return;
+  }
+
+  // The zoom, clamped to whatever data is actually present now: a shot with
+  // fewer bands than the one that was zoomed must not leave a view pointing
+  // past the end of the array.
+  const record = chartRecord(canvas);
+  record.spec = { ...spec, frequencies: allFrequencies, series: allSeries };
+  const last = allFrequencies.length - 1;
+  let view = record.view;
+  if (!view || view.i0 > last || view.i1 > last || view.i1 - view.i0 < 1) {
+    view = { i0: 0, i1: last };
+    record.view = null;                       // not zoomed
+  }
+
+  const frequencies = allFrequencies.slice(view.i0, view.i1 + 1);
+  const series = allSeries.map(s => ({ ...s, values: s.values.slice(view.i0, view.i1 + 1) }));
+  const values = series.flatMap(s => s.values).filter(isNum);
+  if (values.length === 0) {
+    chartMessage(canvas, 'No band data in the selected range');
     return;
   }
 
@@ -3984,6 +5249,9 @@ function drawBandedChart(canvas, spec) {
   const plotW = Math.max(10, width - pad.left - pad.right);
   const plotH = Math.max(10, height - pad.top - pad.bottom);
 
+  // The y range is recomputed from the VISIBLE bands, so zooming in on a
+  // narrow range actually resolves it instead of leaving it a flat line at
+  // the bottom of a scale set by bands that are no longer on screen.
   let lo = Math.min(...values);
   let hi = Math.max(...values);
   if (spec.zeroLine) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
@@ -3995,6 +5263,12 @@ function drawBandedChart(canvas, spec) {
   const yOf = (v) => pad.top + plotH - ((v - lo) / (hi - lo)) * plotH;
   const slot = plotW / frequencies.length;
   const xOf = (i) => pad.left + slot * (i + 0.5);
+
+  record.geom = {
+    kind: 'band', pad, plotW, plotH, slot, lo, hi, width, height,
+    i0: view.i0, i1: view.i1,
+    xValues: allFrequencies, xFormat: fmtHz, xNoun: 'band range',
+  };
 
   // ---- grid and y axis ----
   const ticks = 5;
@@ -4025,10 +5299,18 @@ function drawBandedChart(canvas, spec) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillStyle = palette.muted;
+  let labelled = 0;
   frequencies.forEach((hz, i) => {
     if (!isOctaveCentre(hz)) return;
-    ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), xOf(i), pad.top + plotH + 8);
+    labelled += 1;
+    ctx.fillText(axisHz(hz), xOf(i), pad.top + plotH + 8);
   });
+  // Zoomed in far enough and there may be no octave centre in view at all,
+  // which would leave the x axis unlabelled. Fall back to the ends.
+  if (labelled === 0 && frequencies.length > 0) {
+    const ends = frequencies.length === 1 ? [0] : [0, frequencies.length - 1];
+    for (const i of ends) ctx.fillText(axisHz(frequencies[i]), xOf(i), pad.top + plotH + 8);
+  }
   ctx.fillStyle = palette.text;
   ctx.textAlign = 'left';
   ctx.fillText(`Hz — ${spec.unit || 'dB'}`, pad.left, pad.top + plotH + 22);
@@ -4077,6 +5359,1029 @@ function drawBandedChart(canvas, spec) {
     ctx.stroke();
     ctx.lineWidth = 1;
   });
+
+  ensureChartInteraction(canvas);
+  drawChartOverlay(canvas);
+}
+
+
+/* ---------------------------------------------------------------------------
+   CHART INTERACTION — cursor readout and drag-to-zoom
+
+   Two canvases stacked in one container. The lower one holds the plot and is
+   repainted only when the DATA changes; the upper one holds the crosshair and
+   the drag selection and is repainted on every pointer move. That split is the
+   whole performance story: moving the pointer never re-runs the axis, grid,
+   label and series drawing underneath, so the cursor tracks at frame rate even
+   on a chart with forty bands and three series.
+
+   The readout SNAPS to a band. It never interpolates between two of them,
+   because there is no measurement between two 1/3-octave centres — a readout
+   that slid smoothly between bands would be showing a number nobody measured.
+   --------------------------------------------------------------------------- */
+
+/** Build (once) the container, the overlay canvas, the readout and the reset. */
+function ensureChartInteraction(canvas) {
+  const record = chartRecord(canvas);
+  if (record.wired) return record;
+
+  const host = canvas.parentElement;
+  if (!host) return record;
+
+  const shell = document.createElement('div');
+  shell.className = 'chart';
+  host.insertBefore(shell, canvas);
+  shell.appendChild(canvas);
+
+  const overlay = document.createElement('canvas');
+  overlay.className = 'chart-overlay';
+  overlay.setAttribute('aria-hidden', 'true');
+  shell.appendChild(overlay);
+
+  const readout = document.createElement('div');
+  readout.className = 'chart-readout';
+  readout.setAttribute('aria-hidden', 'true');
+  readout.hidden = true;
+  shell.appendChild(readout);
+
+  const reset = document.createElement('button');
+  reset.type = 'button';
+  reset.className = 'btn btn-secondary btn-sm chart-reset';
+  reset.textContent = 'Reset zoom';
+  reset.hidden = true;
+  shell.appendChild(reset);
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn-icon btn-icon-sm chart-save';
+  save.setAttribute('aria-label', 'Save this chart as a high-resolution image');
+  save.innerHTML = '';
+  const saveIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  saveIcon.setAttribute('class', 'icon');
+  saveIcon.setAttribute('aria-hidden', 'true');
+  const saveUse = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  saveUse.setAttribute('href', '#i-download');
+  saveIcon.appendChild(saveUse);
+  save.appendChild(saveIcon);
+  shell.appendChild(save);
+
+  const hint = document.createElement('p');
+  hint.className = 'chart-hint';
+  hint.textContent = 'Drag to zoom a range · double-click to reset · arrow keys to step';
+  shell.appendChild(hint);
+
+  // The container, not the canvas, takes focus: the canvas stays role="img"
+  // describing the picture, and the group around it is what you operate.
+  shell.tabIndex = 0;
+  shell.setAttribute('role', 'group');
+  shell.setAttribute('aria-label', canvas.getAttribute('aria-label') || 'Chart');
+
+  record.shell = shell;
+  record.overlay = overlay;
+  record.readout = readout;
+  record.reset = reset;
+  record.save = save;
+  record.wired = true;
+
+  save.addEventListener('click', () => exportChart(canvas));
+
+  wireChartPointer(canvas, record);
+  reset.addEventListener('click', () => {
+    record.view = null;
+    // A chart that owns its own zoom has to be told to drop it; clearing the
+    // index view alone would leave the waveform on its narrowed time window.
+    if (record.spec && typeof record.spec.onReset === 'function') record.spec.onReset();
+    redrawChart(canvas);
+  });
+  return record;
+}
+
+/* ===========================================================================
+   CONTINUOUS-X CHARTS
+
+   The banded chart above puts one measurement in each of N equal slots. This
+   one puts them at their real position on a linear or logarithmic axis, which
+   is what a waveform (time), an absorption curve (frequency, decades) and a
+   drift plot (shot number) each need.
+
+   It shares everything it can with the banded chart — the same canvas
+   preparation, the same palette, the same two-layer interaction — and differs
+   only in how a value becomes an x coordinate.
+   =========================================================================== */
+
+/** Nice round tick values covering [lo, hi] on a linear axis. */
+function linearTicks(lo, hi, target = 6) {
+  if (!(hi > lo)) return [lo];
+  const raw = (hi - lo) / target;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+  const normalised = raw / magnitude;
+  const step = (normalised >= 5 ? 10 : normalised >= 2 ? 5 : normalised >= 1 ? 2 : 1) * magnitude;
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) {
+    ticks.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  }
+  return ticks;
+}
+
+/** 1-2-5 ticks per decade, which is what a log frequency axis is read in. */
+function logTicks(lo, hi) {
+  if (!(lo > 0) || !(hi > lo)) return [];
+  const ticks = [];
+  const first = Math.floor(Math.log10(lo));
+  const last = Math.ceil(Math.log10(hi));
+  for (let decade = first; decade <= last; decade += 1) {
+    for (const mantissa of [1, 2, 5]) {
+      const value = mantissa * Math.pow(10, decade);
+      if (value >= lo && value <= hi) ticks.push(value);
+    }
+  }
+  return ticks;
+}
+
+/**
+ * A chart with a real x axis.
+ *
+ * @param {HTMLCanvasElement} canvas
+ * @param {{
+ *   x: number[], xScale?: 'linear'|'log', xFormat?: function, xTitle?: string,
+ *   unit?: string, zeroLine?: boolean, yMin?: number, yMax?: number,
+ *   series: {label:string, color:string, kind:'line'|'step'|'area'|'band'|'marker',
+ *            values?: number[], lower?: number[], upper?: number[]}[],
+ *   markers?: {x:number, label:string}[],
+ * }} spec
+ */
+function drawXYChart(canvas, spec) {
+  const surface = prepareCanvas(canvas);
+  if (!surface) return;
+  const { ctx, width, height } = surface;
+  const palette = chartPalette();
+  if (!palette.surface || !palette.axis) {
+    console.error('tokens.css did not resolve; the chart cannot be drawn in the current theme');
+    return;
+  }
+
+  const allX = (spec.x || []).filter(isNum);
+  const allSeries = (spec.series || []).filter(s => Boolean(s.color)
+    && (Array.isArray(s.values) || (Array.isArray(s.lower) && Array.isArray(s.upper))));
+  if (allX.length < 2 || allSeries.length === 0) {
+    chartMessage(canvas, 'No data to plot');
+    return;
+  }
+
+  const record = chartRecord(canvas);
+  record.spec = { ...spec, x: allX, series: allSeries, frequencies: allX };
+  const last = allX.length - 1;
+  let view = record.view;
+  if (!view || view.i0 > last || view.i1 > last || view.i1 - view.i0 < 1) {
+    view = { i0: 0, i1: last };
+    record.view = null;
+  }
+
+  const slice = (a) => (Array.isArray(a) ? a.slice(view.i0, view.i1 + 1) : null);
+  const xs = slice(allX);
+  const series = allSeries.map(s => ({
+    ...s, values: slice(s.values), lower: slice(s.lower), upper: slice(s.upper),
+  }));
+
+  const yPool = series.flatMap(s => [...(s.values || []), ...(s.lower || []), ...(s.upper || [])])
+    .filter(isNum);
+  if (yPool.length === 0) { chartMessage(canvas, 'No data in the selected range'); return; }
+
+  ctx.fillStyle = palette.surface;
+  ctx.fillRect(0, 0, width, height);
+
+  const pad = { left: 58, right: 14, top: 14, bottom: 40 };
+  const plotW = Math.max(10, width - pad.left - pad.right);
+  const plotH = Math.max(10, height - pad.top - pad.bottom);
+
+  // Reduced, not spread. Math.min(...array) passes every element as an
+  // argument and throws RangeError once the array outgrows the engine's
+  // argument limit — which a waveform envelope is already within one zoom
+  // level of reaching.
+  let lo = isNum(spec.yMin) ? spec.yMin : yPool.reduce((a, b) => (b < a ? b : a), Infinity);
+  let hi = isNum(spec.yMax) ? spec.yMax : yPool.reduce((a, b) => (b > a ? b : a), -Infinity);
+  if (spec.zeroLine) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (hi - lo < 1e-9) { hi += 0.5; lo -= 0.5; }
+  if (!isNum(spec.yMin) && !isNum(spec.yMax)) {
+    const span = hi - lo;
+    lo -= span * 0.08;
+    hi += span * 0.08;
+  }
+
+  const logX = spec.xScale === 'log';
+  const x0 = xs[0];
+  const x1 = xs[xs.length - 1];
+  const lx0 = logX ? Math.log10(Math.max(x0, 1e-9)) : x0;
+  const lx1 = logX ? Math.log10(Math.max(x1, 1e-9)) : x1;
+  const spanX = (lx1 - lx0) || 1;
+  const xOf = (v) => pad.left + ((logX ? Math.log10(Math.max(v, 1e-9)) : v) - lx0) / spanX * plotW;
+  const yOf = (v) => pad.top + plotH - ((v - lo) / (hi - lo)) * plotH;
+
+  // ---- grid, y ticks ----
+  ctx.font = `11px ${palette.mono}`;
+  ctx.lineWidth = 1;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const decimals = (hi - lo) < 5 ? 1 : 0;
+  for (const value of linearTicks(lo, hi, 5)) {
+    const y = Math.round(yOf(value)) + 0.5;
+    if (y < pad.top - 1 || y > pad.top + plotH + 1) continue;
+    ctx.strokeStyle = palette.grid;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
+    ctx.stroke();
+    ctx.fillStyle = palette.muted;
+    ctx.fillText(value.toFixed(decimals), pad.left - 8, y);
+  }
+
+  // ---- x ticks ----
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const format = spec.xFormat || ((v) => String(v));
+  const ticks = logX ? logTicks(x0, x1) : linearTicks(x0, x1, 7);
+  let lastRight = -Infinity;
+  for (const value of ticks) {
+    const x = xOf(value);
+    if (x < pad.left - 1 || x > pad.left + plotW + 1) continue;
+    const text = format(value);
+    const halfWidth = ctx.measureText(text).width / 2;
+    if (x - halfWidth < lastRight + 6) continue;      // never let two labels touch
+    lastRight = x + halfWidth;
+    ctx.strokeStyle = palette.grid;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, pad.top);
+    ctx.lineTo(Math.round(x) + 0.5, pad.top + plotH);
+    ctx.stroke();
+    ctx.fillStyle = palette.muted;
+    ctx.fillText(text, x, pad.top + plotH + 8);
+  }
+
+  ctx.strokeStyle = palette.axis;
+  ctx.beginPath();
+  ctx.moveTo(pad.left + 0.5, pad.top);
+  ctx.lineTo(pad.left + 0.5, pad.top + plotH + 0.5);
+  ctx.lineTo(pad.left + plotW, pad.top + plotH + 0.5);
+  ctx.stroke();
+
+  // The x title belongs under the x axis and the y unit beside the y axis.
+  // Joining them into one string put "Frequency, Hz - dB" under the abscissa,
+  // which reads as a single compound unit and is not one.
+  ctx.fillStyle = palette.text;
+  ctx.textAlign = 'center';
+  if (spec.xTitle) ctx.fillText(spec.xTitle, pad.left + plotW / 2, pad.top + plotH + 24);
+  if (spec.unit) {
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = palette.muted;
+    ctx.fillText(spec.unit, pad.left - 46, pad.top - 2);
+    ctx.textBaseline = 'top';
+  }
+
+  if (spec.zeroLine && lo < 0 && hi > 0) {
+    const y = Math.round(yOf(0)) + 0.5;
+    ctx.strokeStyle = palette.axis;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ---- series ----
+  for (const s of series) {
+    if (s.kind === 'band') {
+      // A filled region between two measured bounds — an envelope, or an
+      // interval. Never a smoothed ribbon around a single line.
+      ctx.fillStyle = s.color;
+      ctx.globalAlpha = isNum(s.alpha) ? s.alpha : 0.85;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < xs.length; i += 1) {
+        if (!isNum(s.upper[i])) continue;
+        const x = xOf(xs[i]);
+        const y = yOf(s.upper[i]);
+        if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+      }
+      for (let i = xs.length - 1; i >= 0; i -= 1) {
+        if (!isNum(s.lower[i])) continue;
+        ctx.lineTo(xOf(xs[i]), yOf(s.lower[i]));
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    if (s.kind === 'marker') {
+      ctx.fillStyle = s.color;
+      for (let i = 0; i < xs.length; i += 1) {
+        if (!isNum(s.values[i])) continue;
+        ctx.beginPath();
+        ctx.arc(xOf(xs[i]), yOf(s.values[i]), 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      continue;
+    }
+
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = s.kind === 'area' ? 1.5 : 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    let started = false;
+    let prevY = 0;
+    for (let i = 0; i < xs.length; i += 1) {
+      const v = s.values[i];
+      if (!isNum(v)) { started = false; continue; }
+      const x = xOf(xs[i]);
+      const y = yOf(v);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else if (s.kind === 'step') { ctx.lineTo(x, prevY); ctx.lineTo(x, y); }
+      else ctx.lineTo(x, y);
+      prevY = y;
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // ---- event markers (shot times, thresholds) ----
+  for (const marker of spec.markers || []) {
+    if (!isNum(marker.x) || marker.x < x0 || marker.x > x1) continue;
+    const x = Math.round(xOf(marker.x)) + 0.5;
+    ctx.strokeStyle = palette.shotMarker || palette.warn;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top);
+    ctx.lineTo(x, pad.top + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (marker.label) {
+      ctx.fillStyle = palette.muted;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(marker.label, x, pad.top + 2);
+    }
+  }
+
+  record.geom = {
+    kind: 'xy', pad, plotW, plotH, lo, hi, width, height,
+    i0: view.i0, i1: view.i1,
+    xs: xs.map(xOf),
+    xValues: allX,
+    xFormat: format,
+    xNoun: spec.xNoun || (spec.xTitle ? spec.xTitle.toLowerCase() : 'range'),
+    slot: plotW / Math.max(1, xs.length),
+  };
+
+  ensureChartInteraction(canvas);
+  drawChartOverlay(canvas);
+}
+
+
+/* ===========================================================================
+   HEATMAP — the spectrogram
+
+   The one chart whose marks are pixels rather than shapes. The matrix is
+   painted once into an offscreen canvas at its own resolution and then scaled
+   into place, so panning and zooming never re-run the colour lookup over a
+   hundred thousand cells.
+
+   CIVIDIS, and not by preference. plots.py sets CMAP_SPECTROGRAM = 'cividis'
+   for its figures; if this used a different ramp the same measurement would
+   be two different pictures depending on whether you were looking at the
+   screen or the report. It is also perceptually uniform and safe for the
+   commonest colour-vision deficiencies, which a rainbow ramp is not: on a
+   rainbow, equal steps in level are unequal steps in apparent brightness, so
+   the eye invents structure the data does not have.
+   =========================================================================== */
+
+const CIVIDIS_STOPS = [
+  [0.0000, 0, 34, 78], [0.0667, 0, 46, 108], [0.1333, 30, 58, 111],
+  [0.2000, 53, 69, 108], [0.2667, 71, 81, 108], [0.3333, 87, 93, 109],
+  [0.4000, 102, 105, 112], [0.4667, 117, 117, 117], [0.5333, 132, 130, 121],
+  [0.6000, 148, 142, 119], [0.6667, 165, 156, 116], [0.7333, 183, 169, 110],
+  [0.8000, 200, 184, 102], [0.8667, 219, 199, 90], [0.9333, 238, 214, 73],
+  [1.0000, 254, 232, 56],
+];
+
+let cividisLUT = null;
+
+/** 256-entry RGB lookup, built once. */
+function colourLUT() {
+  if (cividisLUT) return cividisLUT;
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i += 1) {
+    const t = i / 255;
+    let k = 0;
+    while (k < CIVIDIS_STOPS.length - 2 && CIVIDIS_STOPS[k + 1][0] < t) k += 1;
+    const [t0, r0, g0, b0] = CIVIDIS_STOPS[k];
+    const [t1, r1, g1, b1] = CIVIDIS_STOPS[k + 1];
+    const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+    lut[i * 3] = r0 + (r1 - r0) * f;
+    lut[i * 3 + 1] = g0 + (g1 - g0) * f;
+    lut[i * 3 + 2] = b0 + (b1 - b0) * f;
+  }
+  cividisLUT = lut;
+  return lut;
+}
+
+/** base64 big-endian uint16 -> Uint16Array, in the order it was written. */
+function decodeMatrix(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  const out = new Uint16Array(bytes.length >> 1);
+  for (let i = 0; i < out.length; i += 1) out[i] = (bytes[i * 2] << 8) | bytes[i * 2 + 1];
+  return out;
+}
+
+/**
+ * @param {HTMLCanvasElement} canvas
+ * @param {{matrix:Uint16Array, frames:number, bins:number, time:number[],
+ *          frequencies:number[], offset:number, step:number, missing:number,
+ *          vmin:number, vmax:number, unit:string, xTitle:string, yTitle:string}} spec
+ */
+function drawHeatmapChart(canvas, spec) {
+  const surface = prepareCanvas(canvas);
+  if (!surface) return;
+  const { ctx, width, height } = surface;
+  const palette = chartPalette();
+  if (!palette.surface) return;
+
+  const { frames, bins } = spec;
+  if (!frames || !bins || !spec.matrix) { chartMessage(canvas, 'No spectrogram data'); return; }
+
+  const record = chartRecord(canvas);
+  record.spec = { ...spec, frequencies: spec.time, unit: spec.unit || 'dB', series: [] };
+  let view = record.view;
+  if (!view || view.i1 > frames - 1 || view.i1 - view.i0 < 1) {
+    view = { i0: 0, i1: frames - 1 };
+    record.view = null;
+  }
+
+  ctx.fillStyle = palette.surface;
+  ctx.fillRect(0, 0, width, height);
+
+  const pad = { left: 58, right: 70, top: 14, bottom: 40 };
+  const plotW = Math.max(10, width - pad.left - pad.right);
+  const plotH = Math.max(10, height - pad.top - pad.bottom);
+
+  const span = Math.max(1e-6, spec.vmax - spec.vmin);
+  const lut = colourLUT();
+  const cols = view.i1 - view.i0 + 1;
+
+  // Painted at the matrix's own resolution, then scaled by the compositor.
+  // Rasterising per screen pixel would redo the colour lookup on every zoom.
+  const tile = document.createElement('canvas');
+  tile.width = cols;
+  tile.height = bins;
+  const tileCtx = tile.getContext('2d');
+  const image = tileCtx.createImageData(cols, bins);
+  const pixels = image.data;
+  for (let row = 0; row < bins; row += 1) {
+    // Frequency increases upward on the axis and downward in image rows.
+    const sourceRow = bins - 1 - row;
+    for (let col = 0; col < cols; col += 1) {
+      const raw = spec.matrix[sourceRow * frames + (view.i0 + col)];
+      const target = (row * cols + col) * 4;
+      if (raw === spec.missing) { pixels[target + 3] = 0; continue; }
+      const dB = spec.offset + raw * spec.step;
+      const index = clamp(Math.round(((dB - spec.vmin) / span) * 255), 0, 255);
+      pixels[target] = lut[index * 3];
+      pixels[target + 1] = lut[index * 3 + 1];
+      pixels[target + 2] = lut[index * 3 + 2];
+      pixels[target + 3] = 255;
+    }
+  }
+  tileCtx.putImageData(image, 0, 0);
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tile, pad.left, pad.top, plotW, plotH);
+  ctx.imageSmoothingEnabled = true;
+
+  // ---- axes ----
+  const f0 = spec.frequencies[0];
+  const f1 = spec.frequencies[spec.frequencies.length - 1];
+  const yOf = (hz) => pad.top + plotH - ((hz - f0) / Math.max(1e-9, f1 - f0)) * plotH;
+  ctx.font = `11px ${palette.mono}`;
+  ctx.fillStyle = palette.muted;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const hz of linearTicks(f0, f1, 5)) {
+    const y = yOf(hz);
+    if (y < pad.top - 1 || y > pad.top + plotH + 1) continue;
+    ctx.fillText(hz >= 1000 ? `${Math.round(hz / 1000)}k` : String(Math.round(hz)), pad.left - 8, y);
+  }
+
+  const t0 = spec.time[view.i0];
+  const t1 = spec.time[view.i1];
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  let lastRight = -Infinity;
+  for (const t of linearTicks(t0, t1, 7)) {
+    const x = pad.left + ((t - t0) / Math.max(1e-9, t1 - t0)) * plotW;
+    if (x < pad.left - 1 || x > pad.left + plotW + 1) continue;
+    const text = `${t.toFixed(t1 - t0 < 1 ? 3 : 2)} s`;
+    const half = ctx.measureText(text).width / 2;
+    if (x - half < lastRight + 6) continue;
+    lastRight = x + half;
+    ctx.fillText(text, x, pad.top + plotH + 8);
+  }
+  ctx.fillStyle = palette.text;
+  ctx.fillText(spec.xTitle || 'Time', pad.left + plotW / 2, pad.top + plotH + 24);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = palette.muted;
+  ctx.fillText(spec.yTitle || 'Hz', pad.left - 46, pad.top - 2);
+
+  ctx.strokeStyle = palette.axis;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(pad.left + 0.5, pad.top + 0.5, plotW, plotH);
+
+  // ---- colour scale ----
+  const barX = pad.left + plotW + 14;
+  const barW = 12;
+  for (let i = 0; i < plotH; i += 1) {
+    const index = clamp(Math.round((1 - i / plotH) * 255), 0, 255);
+    ctx.fillStyle = `rgb(${lut[index * 3]},${lut[index * 3 + 1]},${lut[index * 3 + 2]})`;
+    ctx.fillRect(barX, pad.top + i, barW, 1);
+  }
+  ctx.strokeRect(barX + 0.5, pad.top + 0.5, barW, plotH);
+  ctx.fillStyle = palette.muted;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(spec.vmax.toFixed(0), barX + barW + 4, pad.top + 4);
+  ctx.fillText(spec.vmin.toFixed(0), barX + barW + 4, pad.top + plotH - 4);
+
+  record.geom = {
+    kind: 'xy',                 // time is the interactive axis, as on a waveform
+    pad, plotW, plotH, width, height,
+    lo: f0, hi: f1,
+    i0: view.i0, i1: view.i1,
+    xs: Array.from({ length: cols }, (_, i) => pad.left + ((i + 0.5) / cols) * plotW),
+    xValues: spec.time,
+    xFormat: (t) => `${Number(t).toFixed(3)} s`,
+    xNoun: 'recording',
+    heatmap: { bins, frames, yOf, f0, f1 },
+  };
+
+  ensureChartInteraction(canvas);
+  drawChartOverlay(canvas);
+}
+
+
+/* ---- mapping a pixel to a measurement, and back ---------------------------
+   Two chart shapes share one interaction layer. A BAND chart has evenly
+   spaced categorical slots; an XY chart has samples at arbitrary positions on
+   a linear or logarithmic axis. Both resolve a pointer to the INDEX of a
+   measured point, never to a position between two of them, so the readout can
+   only ever show a number that was measured. */
+
+/** Pixel x -> absolute index of the nearest measured point, clamped to view. */
+function indexAtX(record, x) {
+  const g = record.geom;
+  if (!g) return null;
+  if (g.kind === 'xy') {
+    // The positions are monotonic, so a binary search finds the neighbours and
+    // the nearer of the two wins. Linear scanning was fine at 31 bands and is
+    // not at a few thousand waveform columns.
+    const xs = g.xs;
+    if (!xs || xs.length === 0) return null;
+    let lo = 0;
+    let hi = xs.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (xs[mid] <= x) lo = mid; else hi = mid;
+    }
+    const nearest = Math.abs(xs[lo] - x) <= Math.abs(xs[hi] - x) ? lo : hi;
+    return g.i0 + nearest;
+  }
+  const visible = g.i1 - g.i0 + 1;
+  const local = clamp(Math.floor((x - g.pad.left) / g.slot), 0, visible - 1);
+  return g.i0 + local;
+}
+
+/** Absolute index -> pixel x. */
+function xAt(record, index) {
+  const g = record.geom;
+  if (g.kind === 'xy') {
+    const local = clamp(index - g.i0, 0, (g.xs || []).length - 1);
+    return g.xs[local];
+  }
+  return g.pad.left + g.slot * (index - g.i0 + 0.5);
+}
+
+/** How the x value at an index is written in the readout and announcements. */
+function xLabelAt(record, index) {
+  const g = record.geom;
+  const spec = record.spec;
+  if (!g || !spec) return '';
+  const format = g.xFormat || fmtHz;
+  const values = g.xValues || spec.frequencies || [];
+  return format(values[index]);
+}
+
+function wireChartPointer(canvas, record) {
+  const shell = record.shell;
+  let frame = null;
+
+  const schedule = () => {
+    if (frame !== null) return;
+    frame = requestAnimationFrame(() => { frame = null; drawChartOverlay(canvas); });
+  };
+
+  const localX = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    // A heatmap needs both axes to resolve a cell; the line charts ignore y.
+    record.cursorY = ev.clientY - rect.top;
+    return ev.clientX - rect.left;
+  };
+
+  shell.addEventListener('pointermove', (ev) => {
+    if (!record.geom) return;
+    const x = localX(ev);
+    const index = indexAtX(record, x);
+    if (record.drag) record.drag.to = index;
+    if (record.cursor === index && !record.drag) return;
+    record.cursor = index;
+    schedule();
+  });
+
+  shell.addEventListener('pointerleave', () => {
+    if (record.drag) return;
+    record.cursor = null;
+    schedule();
+  });
+
+  shell.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0 || !record.geom) return;
+    const index = indexAtX(record, localX(ev));
+    record.drag = { from: index, to: index };
+    record.cursor = index;
+    shell.setPointerCapture(ev.pointerId);
+    schedule();
+  });
+
+  shell.addEventListener('pointerup', (ev) => {
+    if (!record.drag) return;
+    const { from, to } = record.drag;
+    record.drag = null;
+    if (shell.hasPointerCapture(ev.pointerId)) shell.releasePointerCapture(ev.pointerId);
+    // A drag of a single band is a click, not a range: zooming to one bar
+    // would leave a chart with nothing to compare against.
+    if (Math.abs(to - from) >= 1) {
+      const i0 = Math.min(from, to);
+      const i1 = Math.max(from, to);
+      // A chart that can fetch more detail for a range owns the zoom itself:
+      // it keeps the range in DATA units, picks a finer source, and redraws
+      // from scratch. Index-based zoom cannot survive the array changing
+      // underneath it.
+      const spec = record.spec;
+      if (spec && typeof spec.onZoom === 'function') {
+        const xs = spec.x || spec.frequencies || [];
+        record.view = null;
+        spec.onZoom(xs[i0], xs[i1]);
+      } else {
+        record.view = { i0, i1 };
+        redrawChart(canvas);
+      }
+      announceChartRange(canvas, record);
+    } else {
+      schedule();
+    }
+  });
+
+  shell.addEventListener('dblclick', () => {
+    if (!record.view) return;
+    record.view = null;
+    if (record.spec && typeof record.spec.onReset === 'function') record.spec.onReset();
+    redrawChart(canvas);
+    announce(`Zoom reset; the whole ${record.geom.xNoun || 'range'} is shown.`);
+  });
+
+  shell.addEventListener('keydown', (ev) => {
+    if (!record.geom) return;
+    const g = record.geom;
+    const step = ev.shiftKey ? 5 : 1;
+    let handled = true;
+    if (ev.key === 'ArrowRight') {
+      record.cursor = clamp((record.cursor === null ? g.i0 - 1 : record.cursor) + step, g.i0, g.i1);
+    } else if (ev.key === 'ArrowLeft') {
+      record.cursor = clamp((record.cursor === null ? g.i1 + 1 : record.cursor) - step, g.i0, g.i1);
+    } else if (ev.key === 'Home') { record.cursor = g.i0; }
+    else if (ev.key === 'End') { record.cursor = g.i1; }
+    else if (ev.key === 'Escape') {
+      if (record.view || (record.spec && record.spec.onReset)) {
+        record.view = null;
+        if (record.spec && typeof record.spec.onReset === 'function') record.spec.onReset();
+        redrawChart(canvas);
+        announce(`Zoom reset; the whole ${g.xNoun || 'range'} is shown.`);
+      }
+      record.cursor = null;
+    } else { handled = false; }
+    if (!handled) return;
+    ev.preventDefault();
+    drawChartOverlay(canvas);
+    announceChartCursor(canvas, record);
+  });
+}
+
+/**
+ * Save the chart as a high-resolution PNG.
+ *
+ * Not a screenshot. The chart is RE-DRAWN at EXPORT_SCALE times the screen's
+ * pixel ratio, so every rule, glyph and axis label is rasterised at that
+ * resolution — zooming into the saved file finds real detail rather than
+ * interpolation. A 960 px chart lands at 3840 px, which prints past 300 dpi at
+ * a full page width.
+ *
+ * What is exported is exactly what is on screen, INCLUDING the current zoom.
+ * A saved figure that quietly reverted to the full range would not be the
+ * thing the operator was looking at when they pressed the button.
+ */
+const EXPORT_TARGET_PX = 3840;
+
+function exportChart(canvas) {
+  const draw = chartRegistry.get(canvas.id);
+  if (!draw) return;
+  const record = chartRecord(canvas);
+
+  // The crosshair lives on the overlay and is not part of the figure.
+  const cursor = record.cursor;
+  record.cursor = null;
+
+  // A fixed TARGET WIDTH, not a multiple of the screen's pixel ratio. Scaling
+  // by the ratio would hand a Retina user an 8x render — four times the pixels
+  // of a standard display for the same figure, and close to the browser's
+  // canvas limits on a wide chart. 3840 px is past 300 dpi across a printed
+  // page and is the same file whatever machine saved it.
+  const cssWidth = canvas.getBoundingClientRect().width || 960;
+  canvas.dataset.exportScale = String(clamp(EXPORT_TARGET_PX / cssWidth, 2, 8));
+  try {
+    draw();
+  } catch (err) {
+    console.error('export redraw failed', err);
+  }
+
+  const finish = () => {
+    delete canvas.dataset.exportScale;
+    record.cursor = cursor;
+    try { draw(); } catch { /* the on-screen redraw is best effort */ }
+  };
+
+  const name = `${(canvas.id || 'chart').replace(/-canvas$/, '')}.png`;
+  if (typeof canvas.toBlob !== 'function') { finish(); return; }
+  canvas.toBlob((blob) => {
+    if (blob) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast({
+        title: 'Chart saved',
+        text: `${name} at ${Math.round(canvas.width)} × ${Math.round(canvas.height)} pixels.`,
+        tone: 'ok',
+      });
+    }
+    finish();
+  }, 'image/png');
+}
+
+/** Whether this chart is showing less than all of its data. */
+function chartIsZoomed(record) {
+  if (!record) return false;
+  if (record.view) return true;
+  const spec = record.spec;
+  return Boolean(spec && typeof spec.isZoomed === 'function' && spec.isZoomed());
+}
+
+/** Redraw the plot layer through whatever function owns this canvas. */
+function redrawChart(canvas) {
+  const draw = chartRegistry.get(canvas.id);
+  if (draw) { draw(); return; }
+  redrawCharts();
+}
+
+function chartValuesAt(record, index) {
+  const spec = record.spec;
+  if (!spec) return [];
+
+  const grid = record.geom && record.geom.heatmap;
+  if (grid) {
+    // One cell, addressed by both axes. Reporting the column alone would give
+    // a level with no frequency attached to it, which is not a measurement.
+    const { bins, frames, f0, f1 } = grid;
+    const g = record.geom;
+    const y = clamp(record.cursorY === undefined ? g.pad.top : record.cursorY,
+      g.pad.top, g.pad.top + g.plotH);
+    const fraction = 1 - (y - g.pad.top) / g.plotH;
+    const row = clamp(Math.round(fraction * (bins - 1)), 0, bins - 1);
+    const raw = spec.matrix[row * frames + index];
+    const hz = f0 + (f1 - f0) * (row / Math.max(1, bins - 1));
+    if (raw === spec.missing) {
+      return [{ label: fmtHz(hz), color: cssVar('--text-3'), text: 'no value' }];
+    }
+    return [{
+      label: fmtHz(hz),
+      color: cssVar('--accent'),
+      value: spec.offset + raw * spec.step,
+    }];
+  }
+
+  const out = [];
+  for (const s of spec.series) {
+    // A band has no single value at a point — it has two, and reporting one of
+    // them (or their average, which was measured by nobody) would misstate it.
+    if (s.kind === 'band') {
+      const lower = (s.lower || [])[index];
+      const upper = (s.upper || [])[index];
+      if (isNum(lower) && isNum(upper)) {
+        out.push({ label: s.label, color: s.color, value: upper, pair: [lower, upper] });
+      }
+      continue;
+    }
+    const value = (s.values || [])[index];
+    if (isNum(value)) out.push({ label: s.label, color: s.color, value });
+  }
+  return out;
+}
+
+function announceChartRange(canvas, record) {
+  const spec = record.spec;
+  if (!spec) return;
+  if (!record.view) { announce('Zoomed in.'); return; }
+  announce(`Zoomed to ${xLabelAt(record, record.view.i0)} through `
+    + `${xLabelAt(record, record.view.i1)}.`);
+}
+
+function announceChartCursor(canvas, record) {
+  const spec = record.spec;
+  if (!spec || record.cursor === null) return;
+  const parts = chartValuesAt(record, record.cursor)
+    .map(entry => `${entry.label} ${fmt(entry.value, 1)} ${spec.unit || 'dB'}`);
+  announce(`${xLabelAt(record, record.cursor)}: ${parts.join(', ') || 'no value'}`);
+}
+
+/**
+ * The cheap layer. Clears and redraws only the crosshair, the highlighted
+ * slot, the value dots and the drag selection.
+ */
+function drawChartOverlay(canvas) {
+  const record = chartState.get(canvas);
+  if (!record || !record.overlay || !record.geom || !record.spec) return;
+  const g = record.geom;
+  const overlay = record.overlay;
+  const dpr = window.devicePixelRatio || 1;
+
+  overlay.style.width = `${g.width}px`;
+  overlay.style.height = `${g.height}px`;
+  const backingWidth = Math.round(g.width * dpr);
+  const backingHeight = Math.round(g.height * dpr);
+  if (overlay.width !== backingWidth) overlay.width = backingWidth;
+  if (overlay.height !== backingHeight) overlay.height = backingHeight;
+
+  const ctx = overlay.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, g.width, g.height);
+
+  const palette = chartPalette();
+  // Asked of the chart, not inferred from record.view. A chart that owns its
+  // own zoom (the waveform keeps a time window, not an index range) has
+  // record.view === null while zoomed, so this used to hide the reset button
+  // on the very charts that most needed it — and hide it again on every
+  // pointer move for the ones that had it.
+  show(record.reset, chartIsZoomed(record));
+
+  // ---- drag selection ----
+  if (record.drag && Math.abs(record.drag.to - record.drag.from) >= 1) {
+    const half = g.kind === 'xy' ? 0 : g.slot / 2;
+    const a = xAt(record, Math.min(record.drag.from, record.drag.to)) - half;
+    const b = xAt(record, Math.max(record.drag.from, record.drag.to)) + half;
+    ctx.fillStyle = palette.accent;
+    ctx.globalAlpha = 0.14;
+    ctx.fillRect(a, g.pad.top, b - a, g.plotH);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = palette.accent;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(a) + 0.5, g.pad.top);
+    ctx.lineTo(Math.round(a) + 0.5, g.pad.top + g.plotH);
+    ctx.moveTo(Math.round(b) + 0.5, g.pad.top);
+    ctx.lineTo(Math.round(b) + 0.5, g.pad.top + g.plotH);
+    ctx.stroke();
+  }
+
+  const index = record.cursor;
+  if (index === null || index < g.i0 || index > g.i1) {
+    show(record.readout, false);
+    return;
+  }
+
+  // ---- crosshair ----
+  const x = Math.round(xAt(record, index)) + 0.5;
+  ctx.strokeStyle = palette.accent;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(x, g.pad.top);
+  ctx.lineTo(x, g.pad.top + g.plotH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ---- a dot on each series at this band ----
+  const entries = chartValuesAt(record, index);
+  const yOf = (v) => g.pad.top + g.plotH - ((v - g.lo) / (g.hi - g.lo)) * g.plotH;
+  for (const entry of entries) {
+    const y = yOf(entry.value);
+    ctx.beginPath();
+    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = entry.color;
+    ctx.fill();
+    ctx.strokeStyle = palette.surface;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  renderChartReadout(record, index, entries, x);
+}
+
+/** Decimal places that resolve the visible range into about 500 steps. */
+function readoutDigits(geom) {
+  const span = geom && isNum(geom.hi) && isNum(geom.lo) ? Math.abs(geom.hi - geom.lo) : 0;
+  if (!(span > 0)) return 1;
+  if (span < 0.5) return 4;
+  if (span < 5) return 3;
+  if (span < 50) return 2;
+  return 1;
+}
+
+function renderChartReadout(record, index, entries, x) {
+  const readout = record.readout;
+  const spec = record.spec;
+  if (!readout || !spec) return;
+
+  readout.textContent = '';
+  const head = document.createElement('p');
+  head.className = 'chart-readout-head';
+  head.textContent = xLabelAt(record, index);
+  readout.appendChild(head);
+
+  for (const entry of entries) {
+    const row = document.createElement('p');
+    row.className = 'chart-readout-row';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'chart-readout-swatch';
+    swatch.style.background = entry.color;
+    row.appendChild(swatch);
+
+    const label = document.createElement('span');
+    label.className = 'chart-readout-label';
+    label.textContent = entry.label;
+    row.appendChild(label);
+
+    const value = document.createElement('span');
+    value.className = 'chart-readout-value';
+    if (entry.text) {
+      value.textContent = entry.text;
+      row.appendChild(value);
+      readout.appendChild(row);
+      continue;
+    }
+    // A difference carries its sign; an absolute level does not. zeroLine is
+    // set exactly on the charts whose values are differences.
+    // Precision follows the range actually on screen. One decimal is right
+    // for a 40 dB band chart and useless on an absorption curve whose whole
+    // span is half a decibel — every reading there would print as "0.0".
+    const digits = readoutDigits(record.geom);
+    value.textContent = entry.pair
+      ? `${fmt(entry.pair[0], digits)} to ${fmt(entry.pair[1], digits)} ${spec.unit || 'dB'}`
+      : `${spec.zeroLine ? fmtSigned(entry.value, digits) : fmt(entry.value, digits)} `
+        + `${spec.unit || 'dB'}`;
+    row.appendChild(value);
+
+    readout.appendChild(row);
+  }
+
+  show(readout, entries.length > 0);
+  if (entries.length === 0) return;
+
+  // Flip to whichever side of the crosshair has room, so the readout never
+  // covers the part of the trace the operator is pointing at.
+  const g = record.geom;
+  const box = readout.getBoundingClientRect();
+  const wantLeft = x + 12 + box.width > g.width - g.pad.right;
+  readout.style.left = wantLeft
+    ? `${Math.max(g.pad.left, x - 12 - box.width)}px`
+    : `${x + 12}px`;
+  readout.style.top = `${g.pad.top + 4}px`;
 }
 
 /** Band exposure for the selected shot against the aggregate of the rest. */
@@ -4658,6 +6963,9 @@ function renderCompare() {
 function drawCompareBandChart() {
   const canvas = $('compare-band-canvas');
   if (!canvas) return;
+  // Registered so a theme change, a resize, or a zoom reset can repaint it
+  // through the same path as every other chart.
+  chartRegistry.set('compare-band-canvas', drawCompareBandChart);
   const bands = state.compare.bands;
   if (!bands) {
     chartMessage(canvas, 'No comparable band data');
@@ -5117,7 +7425,787 @@ async function loadHealth() {
 
 
 /* ===========================================================================
-   15. BOOT
+   15. THE GUIDED FLOW
+
+   Five stops instead of one long form. The rail below is the only component
+   that knows the whole route; each panel only has to be one step's worth of
+   work. Nothing is hidden that the operator has not already dealt with — the
+   rail states every stop's condition at all times, so "one at a time" never
+   becomes "you cannot see what is left".
+   =========================================================================== */
+
+function stepIndex(id) {
+  const i = STEP_IDS.indexOf(id);
+  return i < 0 ? 0 : i;
+}
+
+/**
+ * The condition of one stop.
+ *
+ *   current  — where the operator is
+ *   done     — nothing outstanding
+ *   blocked  — outstanding items, and the operator has already been here
+ *   todo     — outstanding items, not yet visited
+ *
+ * The visited distinction is not cosmetic. Painting an untouched form amber
+ * accuses the operator of a mistake they have not had the chance to make; the
+ * same mark after they have been and gone is a genuine reminder.
+ */
+function stepCondition(id) {
+  if (id === state.ui.step) return 'current';
+  const outstanding = blockersForStep(id).length > 0;
+  if (id === 'run') {
+    if (state.run.status === 'complete') return 'done';
+    return outstanding ? (state.ui.visited.has(id) ? 'blocked' : 'todo') : 'todo';
+  }
+  if (!outstanding) return 'done';
+  return state.ui.visited.has(id) ? 'blocked' : 'todo';
+}
+
+const CAL_METHOD_LABEL = {
+  tone: 'Calibrator tone',
+  chain: 'Sensitivity chain',
+  profile: 'Saved profile',
+  none: 'Uncalibrated',
+};
+
+/** A short, true statement of what each stop currently holds. */
+function stepStatusText(id) {
+  switch (id) {
+    case 'recording': {
+      if (state.input.uploading) return 'Uploading…';
+      if (state.input.error) return 'Unreadable';
+      return state.input.name ? basename(state.input.name) : 'Not chosen';
+    }
+    case 'calibration': {
+      const method = state.calibration.method;
+      if (!method) return 'No method';
+      const label = CAL_METHOD_LABEL[method] || method;
+      const outstanding = blockersForStep('calibration').length;
+      return outstanding ? `${label} — incomplete` : label;
+    }
+    case 'metadata': {
+      const missing = missingRequiredMetadata().length;
+      return missing === 0 ? 'Complete' : `${missing} missing`;
+    }
+    case 'settings': {
+      const current = settingsValues();
+      let changed = 0;
+      for (const [key, value] of Object.entries(SETTING_DEFAULTS)) {
+        if (!(key in current)) continue;
+        if (String(current[key]) !== String(value)) changed += 1;
+      }
+      const outstanding = blockersForStep('settings').length;
+      if (outstanding) return `${outstanding} to fix`;
+      return changed === 0 ? 'Defaults' : `${changed} changed`;
+    }
+    case 'run': {
+      if (state.run.status === 'running' || state.run.status === 'starting') return 'Running…';
+      if (state.run.status === 'complete') return 'Complete';
+      if (state.run.status === 'error') return 'Failed';
+      const outstanding = detailedBlockers().length;
+      return outstanding === 0 ? 'Ready' : `${outstanding} outstanding`;
+    }
+    default: return '';
+  }
+}
+
+function setStep(id, { focus = true } = {}) {
+  if (!STEP_IDS.includes(id)) return;
+  if (state.ui.step === id) return;
+  // Leaving the test record counts as having seen all of it, so its empty
+  // required fields start reporting themselves rather than waiting to be
+  // individually focused and abandoned.
+  if (state.ui.step === 'metadata') touchMetadataFields();
+  state.ui.stepDir = stepIndex(id) >= stepIndex(state.ui.step) ? 'fwd' : 'back';
+  state.ui.step = id;
+  state.ui.visited.add(id);
+  if (state.view !== 'analyze') setView('analyze', { focus: false });
+  commit();
+
+  if (focus) {
+    // Focus the panel's heading, not the first field: a keyboard user needs to
+    // be told where they have arrived before they are asked for a value.
+    const step = STEPS[stepIndex(id)];
+    const heading = qs(`#${step.panel} .flow-step-title`);
+    if (heading) {
+      heading.setAttribute('tabindex', '-1');
+      heading.focus({ preventScroll: true });
+    }
+    const panel = $(step.panel);
+    if (panel) panel.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }
+  announce(`Step ${stepIndex(id) + 1} of ${STEPS.length}: ${STEPS[stepIndex(id)].name}`);
+}
+
+/** The first stop with anything outstanding, or null when the route is clear. */
+function firstIncompleteStep() {
+  const blockers = detailedBlockers();
+  for (const step of STEP_IDS) {
+    if (blockers.some(b => b.step === step)) return step;
+  }
+  return null;
+}
+
+function renderStepper() {
+  const flow = $('analyze-flow');
+  if (flow) {
+    flow.dataset.step = state.ui.step;
+    flow.dataset.dir = state.ui.stepDir;
+  }
+
+  for (const step of STEPS) {
+    const node = qs(`.stepper-node[data-step="${step.id}"]`);
+    if (!node) continue;
+    const item = node.closest('.stepper-item');
+    const condition = stepCondition(step.id);
+    if (item) item.dataset.state = condition;
+
+    if (condition === 'current') node.setAttribute('aria-current', 'step');
+    else node.removeAttribute('aria-current');
+
+    const status = slot(node, 'status');
+    setRaw(status, stepStatusText(step.id));
+
+    // The visible label is short; the accessible name carries the whole story,
+    // because a screen-reader user cannot see the disc's colour.
+    const count = blockersForStep(step.id).length;
+    node.setAttribute('aria-label',
+      `Step ${stepIndex(step.id) + 1}, ${step.name}. ${stepStatusText(step.id)}.`
+      + (count > 0 ? ` ${count} item${count === 1 ? '' : 's'} outstanding.` : ''));
+
+    const panel = $(step.panel);
+    if (panel) {
+      panel.dataset.active = step.id === state.ui.step ? 'true' : 'false';
+      // hidden would defeat the entrance animation and the print rule that
+      // shows every step; data-active drives display instead.
+      panel.removeAttribute('hidden');
+    }
+  }
+}
+
+/**
+ * On the last step the bar carries the run action itself.
+ *
+ * The buttons are MOVED, not duplicated: a second Run button that looked
+ * identical to the first would be two things claiming to be the same action,
+ * and moving the node keeps its listeners, its id and its aria-describedby
+ * pointing at the blocker list. The review sheet is long enough to scroll,
+ * and the action that ends the flow should not scroll away from it.
+ */
+function placeRunControls(onLast) {
+  const bar = $('flow-bar');
+  const home = $('run-action-home');
+  const run = $('btn-run');
+  const cancel = $('btn-cancel-run');
+  if (!bar || !home || !run) return;
+
+  const target = onLast ? bar : home;
+  if (run.parentElement !== target) {
+    target.appendChild(run);
+    if (cancel) target.appendChild(cancel);
+  }
+}
+
+function renderFlowBar() {
+  const index = stepIndex(state.ui.step);
+  const back = $('btn-step-back');
+  const next = $('btn-step-next');
+  const status = $('flow-bar-status');
+
+  setDisabled(back, index === 0);
+
+  const mine = blockersForStep(state.ui.step);
+  const onLast = index === STEPS.length - 1;
+  placeRunControls(onLast);
+
+  if (next) {
+    show(next, !onLast);
+    // "Continue anyway" rather than a disabled button: the flow never locks
+    // the operator into a step. An unfinished step is reported, on the rail
+    // and here, and the run itself is what refuses — a step is a place to
+    // work, not a gate.
+    next.textContent = '';
+    const label = document.createElement('span');
+    label.textContent = mine.length > 0 ? 'Continue anyway' : 'Continue';
+    next.appendChild(label);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '#i-chevron-right');
+    svg.appendChild(use);
+    next.appendChild(svg);
+  }
+
+  if (status) {
+    if (mine.length === 1) {
+      setRaw(status, mine[0]);
+      status.dataset.tone = 'warn';
+    } else if (mine.length > 1) {
+      setRaw(status, `${mine.length} items outstanding on this step`);
+      status.dataset.tone = 'warn';
+    } else if (onLast) {
+      const all = detailedBlockers().length;
+      setRaw(status, all === 0 ? 'Ready to run' : `${all} outstanding on earlier steps`);
+      status.dataset.tone = all === 0 ? 'ok' : 'warn';
+    } else {
+      setRaw(status, 'Nothing outstanding here');
+      status.dataset.tone = 'ok';
+    }
+  }
+}
+
+/* ---- the review sheet ---------------------------------------------------- */
+
+/** One row of the review sheet. */
+function reviewRow(label, value, { tone = 'ok', step = null } = {}) {
+  return { label, value, tone, step };
+}
+
+/**
+ * The configuration restated in the operator's own words. Everything here is
+ * read back from the controls rather than from a parallel copy, so the sheet
+ * cannot drift from what will actually be sent.
+ */
+function reviewRows() {
+  const rows = [];
+  const md = metadataValues();
+  const value = (id) => {
+    const raw = md[id];
+    return raw === undefined || raw === null || String(raw).trim() === '' ? null : String(raw).trim();
+  };
+
+  rows.push(reviewRow('Recording',
+    state.input.name ? basename(state.input.name) : 'Not chosen',
+    { tone: state.input.path ? 'ok' : 'warn', step: 'recording' }));
+
+  const method = state.calibration.method;
+  const paPerFS = resolvedPaPerFS();
+  let calValue;
+  if (!method) calValue = 'Not chosen';
+  else if (method === 'none') calValue = 'None — output is dB re FS';
+  else if (isNum(paPerFS)) calValue = `${CAL_METHOD_LABEL[method]} · ${fmt(fullScaleDb(paPerFS), 1)} dB SPL at full scale`;
+  else calValue = `${CAL_METHOD_LABEL[method]} — incomplete`;
+  rows.push(reviewRow('Calibration', calValue, {
+    tone: !method ? 'warn'
+      : method === 'none' ? 'info'
+      : isNum(paPerFS) ? 'ok' : 'warn',
+    step: 'calibration',
+  }));
+
+  rows.push(reviewRow('Level scale', levelUnitForMethod() === 'dB SPL'
+    ? 'dB SPL — absolute'
+    : 'dB re FS — relative only', { tone: 'info', step: 'calibration' }));
+
+  const missing = missingRequiredMetadata();
+  rows.push(reviewRow('Test record',
+    missing.length === 0 ? 'All required fields present'
+      : `${missing.length} missing: ${missing.slice(0, 3).map(m => m.name).join(', ')}${missing.length > 3 ? '…' : ''}`,
+    { tone: missing.length === 0 ? 'ok' : 'warn', step: 'metadata' }));
+
+  const weapon = value('md-weapon');
+  const ammo = value('md-ammunition');
+  const suppressor = value('md-suppressor');
+  if (weapon || ammo) {
+    rows.push(reviewRow('Configuration',
+      [weapon, ammo, suppressor ? `with ${suppressor}` : null].filter(Boolean).join(' · '),
+      { tone: 'info', step: 'metadata' }));
+  }
+
+  const distance = value('md-distance');
+  const angle = value('md-angle');
+  const height = value('md-height');
+  if (distance || angle || height) {
+    rows.push(reviewRow('Microphone',
+      [distance ? `${distance} m` : null,
+       angle ? `${angle}°` : null,
+       height ? `${height} m high` : null].filter(Boolean).join(' · '),
+      { tone: 'info', step: 'metadata' }));
+  }
+
+  const temp = value('md-temp');
+  const humidity = value('md-humidity');
+  const pressure = value('md-pressure');
+  if (temp || humidity || pressure) {
+    rows.push(reviewRow('Atmosphere',
+      [temp ? `${temp} °C` : null,
+       humidity ? `${humidity} % RH` : null,
+       pressure ? `${pressure} kPa` : null].filter(Boolean).join(' · '),
+      { tone: 'info', step: 'metadata' }));
+  }
+
+  const mode = thresholdMode();
+  const threshold = readNumber('threshold-value');
+  rows.push(reviewRow('Detection',
+    `${mode === 'relative' ? 'Relative' : 'Absolute'} threshold ${threshold.empty ? '—' : threshold.value} dB`
+    + ` · ${$('refractory-ms') ? $('refractory-ms').value : '—'} ms refractory`,
+    { tone: 'info', step: 'settings' }));
+
+  const nperseg = $('stft-nperseg');
+  rows.push(reviewRow('Spectral',
+    `${nperseg ? nperseg.value : '—'}-point window · ${$('stft-overlap') ? $('stft-overlap').value : '—'} % overlap`,
+    { tone: 'info', step: 'settings' }));
+
+  return rows;
+}
+
+function renderReviewSheet() {
+  const list = $('review-list');
+  if (!list) return;
+  list.textContent = '';
+
+  for (const row of reviewRows()) {
+    const frag = fromTemplate('tpl-review-row');
+    if (!frag) break;
+    const node = frag.firstElementChild;
+    const stateCell = slot(node, 'state');
+    if (stateCell) {
+      stateCell.dataset.tone = row.tone;
+      setIcon(stateCell.querySelector('svg'),
+        row.tone === 'warn' ? 'i-alert' : row.tone === 'info' ? 'i-info' : 'i-check');
+    }
+    setRaw(slot(node, 'label'), row.label);
+    setRaw(slot(node, 'value'), row.value);
+
+    const edit = slot(node, 'edit');
+    if (edit) {
+      if (row.step) {
+        edit.dataset.step = row.step;
+        edit.setAttribute('aria-label', `Change ${row.label.toLowerCase()}`);
+      } else {
+        edit.remove();
+      }
+    }
+    list.appendChild(node);
+  }
+
+  const outstanding = detailedBlockers().length;
+  const pill = $('review-pill');
+  if (pill) {
+    setTone(pill, outstanding === 0 ? 'ok' : 'warn');
+    setRaw($('review-pill-text'), outstanding === 0 ? 'Ready' : `${outstanding} outstanding`);
+  }
+}
+
+function renderFlow() {
+  renderStepper();
+  renderFlowBar();
+  renderReviewSheet();
+}
+
+function wireFlow() {
+  const stepper = $('analyze-stepper');
+  if (stepper) {
+    stepper.addEventListener('click', (ev) => {
+      const node = ev.target.closest('.stepper-node');
+      if (!node) return;
+      setStep(node.dataset.step);
+    });
+    // Left/right walk the rail, the same gesture as the result tabs.
+    stepper.addEventListener('keydown', (ev) => {
+      const index = stepIndex(state.ui.step);
+      let next = null;
+      if (ev.key === 'ArrowRight') next = Math.min(STEPS.length - 1, index + 1);
+      else if (ev.key === 'ArrowLeft') next = Math.max(0, index - 1);
+      else if (ev.key === 'Home') next = 0;
+      else if (ev.key === 'End') next = STEPS.length - 1;
+      if (next === null) return;
+      ev.preventDefault();
+      setStep(STEP_IDS[next]);
+      const node = qs(`.stepper-node[data-step="${STEP_IDS[next]}"]`);
+      if (node) node.focus();
+    });
+  }
+
+  const back = $('btn-step-back');
+  if (back) back.addEventListener('click', () => setStep(STEP_IDS[Math.max(0, stepIndex(state.ui.step) - 1)]));
+
+  const next = $('btn-step-next');
+  if (next) {
+    next.addEventListener('click', () =>
+      setStep(STEP_IDS[Math.min(STEPS.length - 1, stepIndex(state.ui.step) + 1)]));
+  }
+
+  // The review sheet's pencils walk back to the step that owns the row.
+  const list = $('review-list');
+  if (list) {
+    list.addEventListener('click', (ev) => {
+      const button = ev.target.closest('[data-step]');
+      if (!button) return;
+      setStep(button.dataset.step);
+    });
+  }
+}
+
+
+/* ===========================================================================
+   16. MENUS
+
+   One implementation for every dropdown: the trigger owns aria-expanded, the
+   surface owns role="menu", and exactly one menu is open at a time.
+   =========================================================================== */
+
+function closeMenu({ restoreFocus = false } = {}) {
+  if (!state.ui.menu) return;
+  const menu = $(state.ui.menu);
+  const trigger = qs(`[aria-controls="${state.ui.menu}"]`);
+  show(menu, false);
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) trigger.focus();
+  }
+  state.ui.menu = null;
+}
+
+function openMenu(id) {
+  if (state.ui.menu === id) { closeMenu(); return; }
+  closeMenu();
+  const menu = $(id);
+  const trigger = qs(`[aria-controls="${id}"]`);
+  if (!menu) return;
+  show(menu, true);
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
+  state.ui.menu = id;
+  const first = qs('.menu-item:not([disabled])', menu);
+  if (first) first.focus();
+}
+
+function menuItems(menu) {
+  return qsa('.menu-item:not([disabled])', menu);
+}
+
+function wireMenus() {
+  document.addEventListener('click', (ev) => {
+    const trigger = ev.target.closest('[aria-haspopup="menu"]');
+    if (trigger) {
+      ev.preventDefault();
+      openMenu(trigger.getAttribute('aria-controls'));
+      return;
+    }
+    // A click inside the open menu runs its item, then closes; a click
+    // anywhere else just closes.
+    const item = ev.target.closest('.menu-item');
+    if (item) { closeMenu(); return; }
+    if (state.ui.menu && !ev.target.closest('.menu')) closeMenu();
+  });
+
+  document.addEventListener('keydown', (ev) => {
+    if (!state.ui.menu) return;
+    const menu = $(state.ui.menu);
+    if (!menu) return;
+    const items = menuItems(menu);
+    const index = items.indexOf(document.activeElement);
+
+    if (ev.key === 'Escape') { ev.preventDefault(); closeMenu({ restoreFocus: true }); return; }
+    if (ev.key === 'Tab') { closeMenu(); return; }
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      items[(index + 1 + items.length) % items.length]?.focus();
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      items[(index - 1 + items.length) % items.length]?.focus();
+    } else if (ev.key === 'Home') { ev.preventDefault(); items[0]?.focus(); }
+    else if (ev.key === 'End') { ev.preventDefault(); items[items.length - 1]?.focus(); }
+  });
+}
+
+
+/* ===========================================================================
+   17. COMMAND PALETTE
+
+   Every action in the application has a name here. That is what lets the
+   header keep three controls instead of fifteen, and it is the fastest route
+   for someone who already knows where they are going.
+   =========================================================================== */
+
+/** Built fresh on every open so availability is the truth, not a cached guess. */
+function paletteCommands() {
+  const commands = [];
+  const add = (command) => commands.push(command);
+  const loaded = state.results.status === 'loaded';
+  const busy = state.run.status === 'running' || state.run.status === 'starting';
+
+  add({ group: 'Go', name: 'Analyze', hint: 'Set up a measurement', icon: 'i-analyze', key: '1',
+        run: () => setView('analyze') });
+  add({ group: 'Go', name: 'Results', hint: loaded ? 'The loaded measurement' : 'Nothing loaded yet',
+        icon: 'i-results', key: '2', disabled: !loaded, run: () => setView('results') });
+  add({ group: 'Go', name: 'Compare', hint: 'Insertion loss between two runs', icon: 'i-compare', key: '3',
+        run: () => setView('compare') });
+  add({ group: 'Go', name: 'History', hint: 'Every analysis on this machine', icon: 'i-history', key: '4',
+        run: () => setView('history') });
+  add({ group: 'Go', name: 'Settings', hint: 'Preferences and calibration profiles', icon: 'i-settings', key: '5',
+        run: () => setView('settings') });
+
+  STEPS.forEach((step, i) => {
+    add({
+      group: 'Step',
+      name: step.name,
+      hint: `Step ${i + 1} — ${stepStatusText(step.id)}`,
+      icon: 'i-arrow-right',
+      run: () => setStep(step.id),
+    });
+  });
+
+  add({ group: 'Run', name: 'Run analysis', hint: 'Start the measurement', icon: 'i-play', key: 'R',
+        disabled: detailedBlockers().length > 0, run: () => startRun() });
+  add({ group: 'Run', name: 'Cancel analysis', hint: 'Stop the engine', icon: 'i-stop',
+        disabled: !busy, run: () => cancelRun() });
+
+  if (loaded) {
+    const TAB_NAMES = {
+      overview: 'Overview', spectrogram: 'Spectrogram', bands: 'Bands', shots: 'Shots',
+      string: 'String analysis', table: 'Metrics table', hazard: 'Hazard',
+    };
+    for (const tab of TABS) {
+      add({
+        group: 'Results',
+        name: TAB_NAMES[tab] || tab,
+        hint: 'Result tab',
+        icon: 'i-results',
+        run: () => { setView('results'); setTab(tab); },
+      });
+    }
+    add({ group: 'Results', name: 'Export metrics as CSV', hint: 'Per-shot values', icon: 'i-download',
+          run: () => downloadMetricsCsv() });
+
+    // Individual shots, so a long string is navigable by number instead of by
+    // clicking along the strip. Capped at what a search can usefully rank.
+    shotList().slice(0, 60).forEach((shot, index) => {
+      add({
+        group: 'Shot',
+        name: `Shot ${shot.shot_number}`,
+        hint: isRejected(shot) ? 'Excluded from the aggregate' : 'Go to this shot',
+        icon: 'i-target',
+        run: () => { setView('results'); setTab('shots'); selectShot(index, { focusStrip: true }); },
+      });
+    });
+  }
+
+  add({ group: 'Setup', name: 'Calibration profiles', hint: 'Saved sensitivity chains', icon: 'i-mic',
+        run: () => openProfiles(null) });
+  add({ group: 'Setup', name: 'Restore default settings', hint: 'Detection and analysis only', icon: 'i-restore',
+        run: () => { applySettings(SETTING_DEFAULTS); persistSettings(); commit(); } });
+
+  add({ group: 'View', name: 'Light theme', icon: 'i-sun', run: () => applyTheme('light') });
+  add({ group: 'View', name: 'Dark theme', icon: 'i-moon', run: () => applyTheme('dark') });
+  add({ group: 'View', name: 'Match the system theme', icon: 'i-monitor', run: () => applyTheme('system') });
+  add({ group: 'View', name: state.ui.sidebar === 'rail' ? 'Expand the sidebar' : 'Collapse the sidebar',
+        icon: 'i-sidebar', run: () => toggleSidebar() });
+
+  add({ group: 'Help', name: 'Keyboard shortcuts', icon: 'i-keyboard', key: '?', run: () => showShortcuts() });
+  add({ group: 'Help', name: 'About SASA', hint: 'Version, engine, connection', icon: 'i-question',
+        run: () => showAbout() });
+  add({ group: 'Help', name: 'Print this view', icon: 'i-print', run: () => window.print() });
+
+  return commands;
+}
+
+/**
+ * Ordered subsequence match, scored so that a name match always outranks a
+ * hint match and an earlier match outranks a later one. Deliberately not a
+ * fuzzy ranker with tuned weights: on a list this size, predictable beats
+ * clever — the same query must always produce the same first result.
+ */
+function paletteScore(command, query) {
+  if (!query) return 0;
+  const name = command.name.toLowerCase();
+  const hint = `${command.group} ${command.hint || ''}`.toLowerCase();
+
+  if (name.startsWith(query)) return 0;
+  const direct = name.indexOf(query);
+  if (direct > 0) return 10 + direct;
+
+  // Subsequence within the name.
+  let cursor = 0;
+  for (const character of query) {
+    const at = name.indexOf(character, cursor);
+    if (at === -1) { cursor = -1; break; }
+    cursor = at + 1;
+  }
+  if (cursor !== -1) return 100 + cursor;
+
+  const inHint = hint.indexOf(query);
+  if (inHint !== -1) return 500 + inHint;
+
+  return null;
+}
+
+function paletteMatches() {
+  const query = state.ui.paletteQuery.trim().toLowerCase();
+  const scored = [];
+  for (const command of paletteCommands()) {
+    const score = paletteScore(command, query);
+    if (score === null) continue;
+    scored.push({ command, score });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  return scored.slice(0, 40).map(entry => entry.command);
+}
+
+let paletteVisible = [];
+
+function renderPalette() {
+  const list = $('palette-list');
+  if (!list) return;
+  paletteVisible = paletteMatches();
+  if (state.ui.paletteIndex >= paletteVisible.length) state.ui.paletteIndex = 0;
+
+  list.textContent = '';
+  paletteVisible.forEach((command, index) => {
+    const frag = fromTemplate('tpl-palette-item');
+    if (!frag) return;
+    const node = frag.firstElementChild;
+    node.id = `palette-option-${index}`;
+    node.dataset.index = String(index);
+    const selected = index === state.ui.paletteIndex;
+    node.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (command.disabled) node.setAttribute('aria-disabled', 'true');
+
+    setIcon(node.querySelector('.palette-item-icon'), command.icon || 'i-arrow-right');
+    setRaw(slot(node, 'name'), command.name);
+    const hint = slot(node, 'hint');
+    setRaw(hint, command.hint || '');
+    show(hint, Boolean(command.hint));
+    setRaw(slot(node, 'group'), command.group);
+    const key = slot(node, 'key');
+    if (key) {
+      setRaw(key, command.key || '');
+      show(key, Boolean(command.key));
+    }
+    list.appendChild(node);
+  });
+
+  show($('palette-empty'), paletteVisible.length === 0);
+
+  const input = $('palette-input');
+  if (input) {
+    const active = paletteVisible.length > 0 ? `palette-option-${state.ui.paletteIndex}` : '';
+    if (active) input.setAttribute('aria-activedescendant', active);
+    else input.removeAttribute('aria-activedescendant');
+  }
+
+  const selectedNode = list.children[state.ui.paletteIndex];
+  if (selectedNode) selectedNode.scrollIntoView({ block: 'nearest' });
+}
+
+function openPalette() {
+  const dialog = $('palette');
+  const input = $('palette-input');
+  if (!dialog) return;
+  closeMenu();
+  state.ui.paletteQuery = '';
+  state.ui.paletteIndex = 0;
+  if (input) input.value = '';
+  renderPalette();
+  openDialog(dialog, { focus: input });
+}
+
+function closePalette() {
+  closeDialog($('palette'));
+}
+
+function runPaletteCommand(index) {
+  const command = paletteVisible[index];
+  if (!command || command.disabled) return;
+  closePalette();
+  // After the dialog has given focus back, so the command's own focus wins.
+  setTimeout(() => { try { command.run(); } catch (err) { console.error(err); } }, 0);
+}
+
+function wirePalette() {
+  const dialog = $('palette');
+  const input = $('palette-input');
+  const list = $('palette-list');
+  const trigger = $('btn-command');
+  if (!dialog || !input) return;
+
+  const hint = $('cmdk-hint');
+  if (hint) hint.textContent = `${MOD_LABEL}K`;
+
+  if (trigger) trigger.addEventListener('click', openPalette);
+
+  input.addEventListener('input', () => {
+    state.ui.paletteQuery = input.value;
+    state.ui.paletteIndex = 0;
+    renderPalette();
+  });
+
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      if (paletteVisible.length === 0) return;
+      state.ui.paletteIndex = (state.ui.paletteIndex + 1) % paletteVisible.length;
+      renderPalette();
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      if (paletteVisible.length === 0) return;
+      state.ui.paletteIndex = (state.ui.paletteIndex - 1 + paletteVisible.length) % paletteVisible.length;
+      renderPalette();
+    } else if (ev.key === 'Home') { ev.preventDefault(); state.ui.paletteIndex = 0; renderPalette(); }
+    else if (ev.key === 'End') {
+      ev.preventDefault();
+      state.ui.paletteIndex = Math.max(0, paletteVisible.length - 1);
+      renderPalette();
+    } else if (ev.key === 'Enter') {
+      ev.preventDefault();
+      runPaletteCommand(state.ui.paletteIndex);
+    }
+  });
+
+  if (list) {
+    list.addEventListener('click', (ev) => {
+      const item = ev.target.closest('.palette-item');
+      if (!item) return;
+      runPaletteCommand(Number(item.dataset.index));
+    });
+    list.addEventListener('mousemove', (ev) => {
+      const item = ev.target.closest('.palette-item');
+      if (!item) return;
+      const index = Number(item.dataset.index);
+      if (index === state.ui.paletteIndex) return;
+      state.ui.paletteIndex = index;
+      renderPalette();
+    });
+  }
+
+  dialog.addEventListener('cancel', (ev) => { ev.preventDefault(); closePalette(); });
+  dialog.addEventListener('click', (ev) => { if (ev.target === dialog) closePalette(); });
+}
+
+
+/* ===========================================================================
+   18. SIDEBAR COLLAPSE
+   =========================================================================== */
+
+function applySidebar(mode) {
+  const rail = mode === 'rail';
+  state.ui.sidebar = rail ? 'rail' : 'full';
+  document.documentElement.dataset.sidebar = state.ui.sidebar;
+  const toggle = $('btn-sidebar-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', rail ? 'true' : 'false');
+    toggle.setAttribute('aria-label', rail ? 'Expand the sidebar' : 'Collapse the sidebar');
+  }
+  // Every canvas chart is sized from its container, so a width change has to
+  // be followed by a redraw or the plots stay at the old width.
+  setTimeout(redrawCharts, 320);
+}
+
+function toggleSidebar() {
+  const next = state.ui.sidebar === 'rail' ? 'full' : 'rail';
+  applySidebar(next);
+  store.setRaw(STORAGE.sidebar, next);
+}
+
+function wireSidebar() {
+  const toggle = $('btn-sidebar-toggle');
+  if (toggle) toggle.addEventListener('click', toggleSidebar);
+}
+
+
+/* ===========================================================================
+   19. BOOT
 
    Order matters: hydrate the controls from storage BEFORE wiring, so the
    listeners do not fire on the hydration writes; then wire; then connect.
@@ -5133,7 +8221,10 @@ function applyMetadataValues(values) {
 }
 
 function hydrate() {
-  applyTheme(store.getRaw(STORAGE.theme, 'system'));
+  // Light unless the operator has chosen otherwise. See boot-theme.js: the
+  // report is printed, so the screen should match the paper by default.
+  applyTheme(store.getRaw(STORAGE.theme, 'light'));
+  applySidebar(store.getRaw(STORAGE.sidebar, 'full'));
 
   applySettings({ ...SETTING_DEFAULTS, ...(store.get(STORAGE.settings, {}) || {}) });
   applyMetadataValues(store.get(STORAGE.metadata, {}) || {});
@@ -5204,10 +8295,15 @@ function boot() {
   wireMetricsTable();
   wireResultsActions();
   wireCharts();
+  wireWaveform();
   wireCompare();
   wireHistory();
   wireProfiles();
   wirePrefs();
+  wireFlow();
+  wireMenus();
+  wirePalette();
+  wireSidebar();
 
   setTab('overview');
   renderProfiles();

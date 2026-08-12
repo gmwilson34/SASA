@@ -17,7 +17,9 @@ from shot_detect import (
     DetectionReport,
     detect_shots,
     detect_shots_adaptive,
+    classify_arrivals,
     find_arrivals,
+    find_shot_string_span,
     refine_peak_location,
     summarize_shots,
 )
@@ -406,3 +408,196 @@ def test_shot_event_serialises_for_the_output_record():
                 "window_end", "truncated", "clipped", "arrivals"):
         assert key in data
     assert data["window_end"] > data["window_start"]
+
+
+# ---------------------------------------------------------------------------
+# Auto-trim to the shot string
+# ---------------------------------------------------------------------------
+
+def test_auto_trim_spans_the_string_plus_its_margin_exactly():
+    """
+    The span runs from the first shot's window start to the last shot's window
+    end, plus the margin, clamped to the recording. That is exact arithmetic on
+    the detected windows, so it is checked exactly.
+    """
+    x = make_shot_train(FS, [4.0, 4.5, 5.0], duration=12.0, amplitude=0.9,
+                        noise_rms=0.001)
+    shots = detect_shots(x, FS)
+    span = find_shot_string_span(shots, x.size, FS, margin_s=1.0)
+
+    first = min(s.window_start for s in shots)
+    last = max(s.window_end for s in shots)
+    assert span.applied
+    assert span.start == max(0, first - FS)
+    assert span.end == min(x.size, last + FS)
+
+
+def test_auto_trim_never_cuts_into_a_shot_window():
+    x = make_shot_train(FS, [3.0, 3.6, 4.2], duration=10.0, amplitude=0.9,
+                        noise_rms=0.001)
+    shots = detect_shots(x, FS)
+    span = find_shot_string_span(shots, x.size, FS, margin_s=0.0)
+    for shot in shots:
+        assert span.start <= shot.window_start
+        assert span.end >= shot.window_end
+
+
+def test_auto_trim_removes_the_silence_it_claims_to():
+    x = make_shot_train(FS, [8.0, 8.4], duration=20.0, amplitude=0.9, noise_rms=0.001)
+    shots = detect_shots(x, FS)
+    span = find_shot_string_span(shots, x.size, FS, margin_s=0.5)
+
+    trimmed = span.apply(x)
+    assert trimmed.size == span.end - span.start
+    assert span.removed_s == pytest.approx((x.size - trimmed.size) / FS, abs=1e-9)
+    assert trimmed.size < x.size
+
+
+def test_auto_trim_keeps_every_shot_detectable_after_trimming():
+    """The point of the trim is that it changes what is analysed, not the result."""
+    x = make_shot_train(FS, [6.0, 6.5, 7.0, 7.5], duration=18.0, amplitude=0.9,
+                        noise_rms=0.001)
+    shots = detect_shots(x, FS)
+    span = find_shot_string_span(shots, x.size, FS)
+    assert len(detect_shots(span.apply(x), FS)) == len(shots)
+
+
+def test_auto_trim_declines_when_no_shots_were_detected():
+    span = find_shot_string_span([], 96000, FS)
+    assert not span.applied
+    assert "no shots were detected" in span.reason
+    assert span.apply(np.zeros(10)).size == 10
+
+
+def test_auto_trim_declines_when_the_string_already_fills_the_recording():
+    x = make_shot_train(FS, [0.2, 0.6], duration=1.0, amplitude=0.9, noise_rms=0.001)
+    shots = detect_shots(x, FS)
+    span = find_shot_string_span(shots, x.size, FS, margin_s=5.0)
+    assert not span.applied
+    assert "nothing to remove" in span.reason
+
+
+def test_auto_trim_serialises_for_the_output_record():
+    x = make_shot_train(FS, [5.0], duration=15.0, amplitude=0.9, noise_rms=0.001)
+    shots = detect_shots(x, FS)
+    data = find_shot_string_span(shots, x.size, FS).to_dict()
+    for key in ("applied", "start_sample", "end_sample", "start_s", "end_s",
+                "duration_s", "removed_s", "n_shots", "reason"):
+        assert key in data
+
+
+def test_auto_trim_rejects_an_impossible_sample_rate():
+    with pytest.raises(ValueError):
+        find_shot_string_span([], 100, 0)
+
+
+# ---------------------------------------------------------------------------
+# Arrival classification: the basis must match the evidence
+# ---------------------------------------------------------------------------
+
+def _two_arrivals(separation_s, fs=FS):
+    """A short high-frequency burst followed by a longer low-frequency one."""
+    n = int(0.05 * fs)
+    x = np.zeros(n)
+    crack = make_decaying_sinusoid(0.35, 0.00012, 9000.0, fs, int(0.004 * fs))
+    blast = make_decaying_sinusoid(0.95, 0.004, 700.0, fs, int(0.03 * fs))
+    i0 = int(0.005 * fs)
+    i1 = i0 + int(round(separation_s * fs))
+    x[i0:i0 + crack.size] += crack
+    x[i1:i1 + blast.size] += blast
+    return x
+
+
+def test_geometry_identifies_the_crack_outright():
+    """
+    When the observed separation matches the Mach-cone delay computed from the
+    recorded geometry, the crack is identified rather than guessed, and the
+    basis says so.
+    """
+    separation = 0.0020
+    arrivals = find_arrivals(_two_arrivals(separation), FS)
+    assert len(arrivals) == 2
+
+    observed = arrivals[1].offset_s - arrivals[0].offset_s
+    classify_arrivals(arrivals, expected_delay_s=observed)
+    assert [a.label for a in arrivals] == ["crack", "blast"]
+    assert all(a.basis == "geometric" for a in arrivals)
+
+
+def test_a_separation_that_contradicts_the_geometry_is_not_labelled_geometrically():
+    """
+    A reflection does not arrive at the Mach-cone delay. When the geometry says
+    the crack should lead by 2 ms and the second arrival is 15 ms later, the
+    geometric identification must not fire.
+    """
+    arrivals = find_arrivals(_two_arrivals(0.0020), FS)
+    classify_arrivals(arrivals, expected_delay_s=0.015)
+    assert all(a.basis != "geometric" for a in arrivals)
+
+
+def test_a_subsonic_round_has_no_crack_to_find():
+    arrivals = find_arrivals(_two_arrivals(0.0020), FS)
+    classify_arrivals(arrivals, projectile_supersonic=False)
+    labels = [a.label for a in arrivals]
+    assert "crack" not in labels
+    assert "blast" in labels
+    blast = next(a for a in arrivals if a.label == "blast")
+    assert blast.basis == "subsonic"
+
+
+def test_a_single_arrival_is_not_claimed_to_be_the_muzzle_blast():
+    """
+    One arrival cannot be shown to be blast rather than crack, and a suppressor
+    credited against the crack has been credited with nothing.
+    """
+    window = make_decaying_sinusoid(0.9, 0.004, 900.0, FS, int(0.05 * FS))
+    arrivals = find_arrivals(window, FS)
+    assert len(arrivals) == 1
+    assert arrivals[0].label == "unclassified"
+    assert not arrivals[0].classified
+    assert "single arrival" in arrivals[0].ambiguity
+
+
+def test_spectral_character_separates_an_n_wave_from_a_blast():
+    """
+    The crack is both higher in centre frequency and faster to decay. Both
+    indicators must agree before the label is applied on character alone.
+    """
+    arrivals = find_arrivals(_two_arrivals(0.0025), FS)
+    assert len(arrivals) == 2
+    assert arrivals[0].centroid_Hz > arrivals[1].centroid_Hz
+    assert arrivals[0].decay_ms < arrivals[1].decay_ms
+    assert [a.label for a in arrivals] == ["crack", "blast"]
+    assert arrivals[0].basis == "spectral"
+
+
+def test_an_ordering_only_label_admits_it_is_ordering_only():
+    """
+    Two arrivals of the same character cannot be told apart on character, so the
+    label falls back to ordering and must carry that admission.
+    """
+    n = int(0.05 * FS)
+    x = np.zeros(n)
+    quiet = make_decaying_sinusoid(0.4, 0.004, 800.0, FS, int(0.03 * FS))
+    loud = make_decaying_sinusoid(0.95, 0.004, 800.0, FS, int(0.03 * FS))
+    x[int(0.005 * FS):int(0.005 * FS) + quiet.size] += quiet
+    x[int(0.012 * FS):int(0.012 * FS) + loud.size] += loud
+
+    arrivals = find_arrivals(x, FS)
+    if len(arrivals) >= 2:
+        crack = next((a for a in arrivals if a.label == "crack"), None)
+        assert crack is not None
+        assert crack.basis == "ordering"
+        assert "order alone" in crack.ambiguity
+
+
+def test_arrival_serialises_its_basis_and_character():
+    arrivals = find_arrivals(_two_arrivals(0.0025), FS)
+    data = arrivals[0].to_dict()
+    for key in ("offset_s", "peak_Pa", "peak_dB", "label", "basis", "ambiguity",
+                "centroid_Hz", "decay_ms"):
+        assert key in data
+
+
+def test_classifying_an_empty_arrival_list_is_safe():
+    assert classify_arrivals([]) == []

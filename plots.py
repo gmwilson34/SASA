@@ -1739,6 +1739,698 @@ def plot_measurement_quality(
 #  Multi-panel shot summary
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Per-band insertion loss with its uncertainty
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _band_stats_dB(shot_bands: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Energy mean and standard error per band across a shot string.
+
+    Levels are averaged on an energy basis, matching metrics.py; the dispersion
+    is taken on the decibel values, because that is what shot-to-shot spread
+    means to a reader and what the confidence interval must describe.
+
+    Returns:
+        (mean_dB, standard_error_dB, n_shots)
+    """
+    arr = np.atleast_2d(np.asarray(shot_bands, dtype=float))
+    if arr.size == 0:
+        return np.array([]), np.array([]), 0
+    n = arr.shape[0]
+    mean = 10.0 * np.log10(np.mean(10.0 ** (arr / 10.0), axis=0))
+    if n > 1:
+        se = np.std(arr, axis=0, ddof=1) / math.sqrt(n)
+    else:
+        se = np.zeros(arr.shape[1])
+    return mean, se, n
+
+
+def plot_band_insertion_loss_ci(
+    reference_shot_bands: np.ndarray,
+    test_shot_bands: np.ndarray,
+    frequencies: np.ndarray,
+    *,
+    title: str = "Per-Band Insertion Loss with 95% Confidence",
+    ax: Optional[Axes] = None,
+    figsize: Tuple[float, float] = SIZE_TALL,
+    level_unit: Optional[str] = None,
+    reference_label: str = "Unsuppressed reference",
+    test_label: str = "Suppressed test",
+    provenance: Union[None, FigureProvenance, Mapping[str, Any], str] = None,
+) -> Tuple[Figure, Axes]:
+    """
+    Per-band insertion loss drawn with the confidence interval it actually has.
+
+    The headline plot shows a reduction per band. What it cannot show, from mean
+    spectra alone, is whether that reduction is larger than the shot-to-shot
+    scatter it was computed from. A band with 2 dB of reduction and 3 dB of
+    scatter has not been shown to do anything, and drawing it the same way as a
+    band with 12 dB of reduction and 0.4 dB of scatter is exactly the kind of
+    confident-looking wrong number this codebase exists to avoid.
+
+    Bands whose interval spans zero are hatched and reported separately: for
+    those the measurement does not establish a reduction in either direction.
+
+    Args:
+        reference_shot_bands: (n_shots, n_bands) band levels for the reference.
+        test_shot_bands: (n_shots, n_bands) band levels for the test article.
+        frequencies: Band centre frequencies (Hz).
+
+    Returns:
+        (figure, axes)
+    """
+    unit = _resolve_level_unit(level_unit)
+    owns = ax is None
+    if owns:
+        fig, ax = plt.subplots(figsize=figsize, layout='constrained')
+    else:
+        fig = ax.figure  # type: ignore[assignment]
+
+    ref_mean, ref_se, n_ref = _band_stats_dB(reference_shot_bands)
+    tst_mean, tst_se, n_tst = _band_stats_dB(test_shot_bands)
+    fc = np.asarray(frequencies, dtype=float).ravel()
+
+    n = int(min(ref_mean.size, tst_mean.size, fc.size))
+    ref_mean, ref_se = ref_mean[:n], ref_se[:n]
+    tst_mean, tst_se = tst_mean[:n], tst_se[:n]
+    fc = fc[:n]
+
+    il = ref_mean - tst_mean
+    # Independent strings, so the variances add.
+    ci = 1.96 * np.sqrt(ref_se ** 2 + tst_se ** 2)
+    x = np.arange(n)
+
+    inconclusive = np.abs(il) <= ci
+    increase = (il < 0) & ~inconclusive
+    reduction = (il > 0) & ~inconclusive
+
+    for mask, colour, edge, hatch, label in (
+        (reduction, _series(5), _c('border'), None, 'Reduction (established)'),
+        (increase, _c('danger'), _c('danger_border'), '//',
+         'Increase (LOUDER than reference)'),
+        (inconclusive, _c('bg_sunken'), _c('warn_border'), 'xx',
+         'Within measurement scatter'),
+    ):
+        if np.any(mask):
+            ax.bar(x[mask], il[mask], color=colour, width=0.82, edgecolor=edge,
+                   linewidth=0.5, hatch=hatch, zorder=3, label=label)
+
+    ax.errorbar(x, il, yerr=ci, fmt='none', ecolor=_c('text_2'),
+                elinewidth=0.8, capsize=2.0, capthick=0.8, zorder=5)
+    ax.axhline(0.0, color=_c('text_2'), linewidth=1.0, zorder=4)
+
+    n_inconclusive = int(np.count_nonzero(inconclusive))
+    # Each band is its own 95% interval, so across a full filter bank a few bands
+    # read as established by chance alone. Stating the expected count stops a
+    # single isolated "established" band from being read as a finding.
+    expected_false = 0.05 * n
+    box_lines = [
+        f'{reference_label[:22]:<22s} n = {n_ref}',
+        f'{test_label[:22]:<22s} n = {n_tst}',
+        f'Mean per-band       {float(np.nanmean(il)) if n else float("nan"):+7.1f} dB',
+        f'Bands within scatter {n_inconclusive:>3d} of {n:<3d}',
+        f'~{expected_false:.1f} band(s) read established by chance',
+    ]
+    ax.text(0.985, 0.03, '\n'.join(box_lines), transform=ax.transAxes,
+            ha='right', va='bottom', fontsize=FONT_XS, family='monospace',
+            color=_c('text'), zorder=7,
+            bbox=dict(boxstyle='round,pad=0.45', facecolor=_c('accent_wash'),
+                      edgecolor=_c('accent_border'), linewidth=0.7))
+
+    step = max(1, n // 20)
+    ax.set_xticks(x[::step])
+    ax.set_xticklabels([_fmt_freq(f) for f in fc[::step]], rotation=45, ha='right')
+    ax.set_xlim(-0.8, n - 0.2 if n else 1)
+    if n:
+        lo = float(np.min(il - ci))
+        hi = float(np.max(il + ci))
+        rng = max(1.0, hi - lo)
+        ax.set_ylim(min(0.0, lo) - 0.45 * rng, max(0.0, hi) + 0.20 * rng)
+    ax.set_xlabel('1/3-octave band centre (Hz)')
+    ax.set_ylabel('Insertion loss (dB reduction)')
+    ax.set_title(title)
+    _grid(ax, axis='y')
+    _mono_ticks(ax)
+    ax.legend(loc='upper left', fontsize=FONT_SM)
+
+    _attach_provenance(fig, provenance, unit)
+    _finalize(fig, owns)
+    return fig, ax  # type: ignore[return-value]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Shot-to-shot variability
+# ═══════════════════════════════════════════════════════════════════════════
+
+_VARIABILITY_METRICS: Tuple[Tuple[str, str, str], ...] = (
+    ('Lpeak_Z', 'Peak level', 'dB'),
+    ('LAE', 'Exposure level', 'dB'),
+    ('spectral_centroid_Hz', 'Spectral centroid', 'Hz'),
+    ('a_duration_ms', 'A-duration', 'ms'),
+)
+
+
+def plot_shot_variability(
+    shot_metrics: Sequence[Any],
+    *,
+    flagged_shots: Optional[Sequence[int]] = None,
+    metrics: Sequence[Tuple[str, str, str]] = _VARIABILITY_METRICS,
+    title: str = "Shot-to-Shot Variability",
+    figsize: Optional[Tuple[float, float]] = None,
+    level_unit: Optional[str] = None,
+    provenance: Union[None, FigureProvenance, Mapping[str, Any], str] = None,
+) -> Tuple[Figure, np.ndarray]:
+    """
+    Every shot's value for each metric, against the string's median and spread.
+
+    A string mean is only meaningful if the string is one population. This shows
+    whether it is: the median line and the robust spread band give the reader the
+    context to see whether a shot sits outside the group, and any shot named in
+    `flagged_shots` is drawn in the danger colour and marked, never colour alone.
+
+    Args:
+        shot_metrics: Per-shot metrics exposing the ShotMetrics attribute names.
+        flagged_shots: Shot numbers to mark, e.g. anomaly.AnomalyReport
+                       .flagged_shot_numbers().
+        metrics: (attribute, label, unit) triples to draw, one row each.
+
+    Returns:
+        (figure, array of axes)
+    """
+    unit = _resolve_level_unit(level_unit)
+    shots = list(shot_metrics)
+    rows = max(1, len(metrics))
+    if figsize is None:
+        figsize = (FIGURE_WIDTH_IN, 1.6 * rows + 0.9)
+
+    fig, axes = plt.subplots(rows, 1, figsize=figsize, sharex=True,
+                             layout='constrained', squeeze=False)
+    axes = axes.ravel()
+    flagged = set(int(s) for s in (flagged_shots or ()))
+
+    numbers = np.array(
+        [int(getattr(s, 'shot_number', i + 1) or (i + 1)) for i, s in enumerate(shots)],
+        dtype=float,
+    )
+
+    legend_drawn = False
+    for row, (attr, label, metric_unit) in enumerate(metrics):
+        ax = axes[row]
+        values = np.array(
+            [float(getattr(s, attr, float('nan')) or float('nan')) for s in shots],
+            dtype=float,
+        )
+        finite = np.isfinite(values)
+
+        if np.any(finite):
+            median = float(np.median(values[finite]))
+            mad = float(np.median(np.abs(values[finite] - median)))
+            # 1.4826 * MAD is the consistent estimate of sigma for normal data.
+            spread = 1.4826 * mad
+            ax.axhline(median, color=_c('accent'), linewidth=1.0,
+                       linestyle=(0, (5, 2)), zorder=3)
+            if spread > 0:
+                ax.axhspan(median - 2 * spread, median + 2 * spread,
+                           color=_c('accent_wash'), zorder=1)
+
+            normal = finite & ~np.isin(numbers, list(flagged))
+            marked = finite & np.isin(numbers, list(flagged))
+            ax.plot(numbers[normal], values[normal], marker='o', markersize=3.4,
+                    linestyle='none', color=_series(row % 6), zorder=4)
+            if np.any(marked):
+                ax.plot(numbers[marked], values[marked], marker='X',
+                        markersize=6.5, linestyle='none', color=_c('danger'),
+                        markeredgecolor=_c('danger_border'), markeredgewidth=0.7,
+                        zorder=5, label='flagged for review')
+                # One legend for the whole figure: repeating it on every row
+                # crowds the panels it is meant to explain.
+                if not legend_drawn:
+                    ax.legend(loc='upper right', fontsize=FONT_2XS)
+                    legend_drawn = True
+
+        axis_unit = unit if metric_unit == 'dB' else metric_unit
+        ax.set_ylabel(f'{label}\n({axis_unit})', fontsize=FONT_SM)
+        _grid(ax, axis='y')
+        _mono_ticks(ax)
+
+    axes[-1].set_xlabel('Shot number')
+    if numbers.size:
+        axes[-1].set_xticks(numbers.astype(int))
+    fig.suptitle(title, fontsize=FONT_LG)
+
+    _attach_provenance(fig, provenance, unit)
+    _finalize(fig, True)
+    return fig, axes
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  First-round pop
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_first_round_pop(
+    levels_dB: Sequence[float],
+    *,
+    pop: Any = None,
+    metric_label: str = "Peak level",
+    title: str = "First-Round Pop",
+    ax: Optional[Axes] = None,
+    figsize: Tuple[float, float] = SIZE_PANEL,
+    level_unit: Optional[str] = None,
+    provenance: Union[None, FigureProvenance, Mapping[str, Any], str] = None,
+) -> Tuple[Figure, Axes]:
+    """
+    The first round against the string that followed it, and the band a further
+    shot would have been expected to land in.
+
+    First-round pop is the most-quoted suppressor number after overall
+    reduction, and the easiest to overstate: one shot against nine is a single
+    observation, and a two-decibel first round in a string with two decibels of
+    scatter is the scatter. Drawing the PREDICTION interval - where one more
+    shot should land - puts the reader in a position to see that for themselves,
+    rather than taking a headline number on trust.
+
+    Args:
+        levels_dB: Per-shot levels in shot order; the first is the first round.
+        pop: Optional stringstats.FirstRoundPop, whose interval and verdict are
+             drawn. Without it only the levels are shown.
+
+    Returns:
+        (figure, axes)
+    """
+    unit = _resolve_level_unit(level_unit)
+    owns = ax is None
+    if owns:
+        fig, ax = plt.subplots(figsize=figsize, layout='constrained')
+    else:
+        fig = ax.figure  # type: ignore[assignment]
+
+    values = np.asarray(list(levels_dB), dtype=float)
+    n = values.size
+    x = np.arange(1, n + 1, dtype=float)
+
+    def _field(name):
+        """
+        Read one field from a FirstRoundPop or from its serialised dict.
+
+        to_dict() writes None where a value was not finite, so a plain getattr
+        would hand `None` to math.isfinite. Everything unreadable becomes NaN,
+        which the drawing code already treats as "not available".
+        """
+        if pop is None:
+            return float('nan')
+        value = pop.get(name) if isinstance(pop, Mapping) else getattr(pop, name, None)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float('nan')
+
+    upper = _field('prediction_upper_dB')
+    lower = _field('prediction_lower_dB')
+    mean = _field('subsequent_mean_dB')
+    if pop is None:
+        established = False
+    elif isinstance(pop, Mapping):
+        established = bool(pop.get('established', False))
+    else:
+        established = bool(getattr(pop, 'established', False))
+
+    if math.isfinite(lower) and math.isfinite(upper):
+        ax.axhspan(lower, upper, color=_c('accent_wash'), zorder=1,
+                   label='where one more shot was expected')
+        ax.axhline(upper, color=_c('accent_border'), linewidth=0.8,
+                   linestyle=(0, (4, 2)), zorder=2)
+        ax.axhline(lower, color=_c('accent_border'), linewidth=0.8,
+                   linestyle=(0, (4, 2)), zorder=2)
+    if math.isfinite(mean):
+        ax.axhline(mean, color=_c('accent'), linewidth=1.0, zorder=3,
+                   label='mean of the rest of the string')
+
+    if n > 1:
+        ax.plot(x[1:], values[1:], marker='o', markersize=4.0, linestyle='none',
+                color=_series(0), zorder=4, label='subsequent rounds')
+
+    if n:
+        first_colour = _c('danger') if established else _c('warn')
+        ax.plot(x[:1], values[:1], marker='D', markersize=8.0, linestyle='none',
+                color=first_colour, markeredgecolor=_c('text'),
+                markeredgewidth=0.7, zorder=6, label='first round')
+
+    refusal = ''
+    if pop is not None:
+        refusal = (pop.get('refusal') if isinstance(pop, Mapping)
+                   else getattr(pop, 'refusal', '')) or ''
+    verdict = (
+        'POP ESTABLISHED' if established
+        else 'not established — inside the string’s own spread'
+    )
+    if refusal:
+        verdict = f'not measured — {refusal}'
+    observed = _field('observed_dB')
+    box = [f'{verdict}']
+    if math.isfinite(observed):
+        box.append(f'First round {observed:+.2f} dB vs the rest')
+    p_value = _field('p_value')
+    if math.isfinite(p_value):
+        box.append(f'p = {p_value:.4f} (one-sided)')
+    ax.text(0.985, 0.04, '\n'.join(box), transform=ax.transAxes, ha='right',
+            va='bottom', fontsize=FONT_XS, family='monospace', color=_c('text'),
+            zorder=8,
+            bbox=dict(boxstyle='round,pad=0.45',
+                      facecolor=_c('danger_wash') if established else _c('bg_inset'),
+                      edgecolor=_c('danger_border') if established else _c('border'),
+                      linewidth=0.7))
+
+    ax.set_xlabel('Shot number')
+    ax.set_ylabel(_level_axis_label(unit, metric_label))
+    ax.set_title(title)
+    if n:
+        ax.set_xticks(x.astype(int))
+        ax.set_xlim(0.4, n + 0.6)
+        # Headroom below for the verdict box, above for the first round, so
+        # neither ever sits on top of a data point.
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            lo = float(min(finite.min(), lower if math.isfinite(lower) else finite.min()))
+            hi = float(max(finite.max(), upper if math.isfinite(upper) else finite.max()))
+            rng = max(1.0, hi - lo)
+            ax.set_ylim(lo - 0.45 * rng, hi + 0.15 * rng)
+    _grid(ax, axis='y')
+    _mono_ticks(ax)
+    # Below the axes: the string occupies the full plot width, so an inset
+    # legend would always cover shots.
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.19), ncols=4,
+              fontsize=FONT_2XS, frameon=False)
+
+    _attach_provenance(fig, provenance, unit)
+    _finalize(fig, owns)
+    return fig, ax  # type: ignore[return-value]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Level distribution
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_level_distribution(
+    levels_dB: Sequence[float],
+    *,
+    comparison_dB: Optional[Sequence[float]] = None,
+    label: str = "Test",
+    comparison_label: str = "Reference",
+    metric_label: str = "Peak level",
+    title: str = "Level Distribution",
+    figsize: Tuple[float, float] = SIZE_PANEL,
+    level_unit: Optional[str] = None,
+    provenance: Union[None, FigureProvenance, Mapping[str, Any], str] = None,
+) -> Tuple[Figure, np.ndarray]:
+    """
+    The distribution of per-shot levels, as a histogram and as a cumulative curve.
+
+    A mean and a standard deviation describe a string only if the string is one
+    population. The empirical cumulative curve makes no such assumption: a
+    bimodal string, a long tail, or a single displaced first round are all
+    visible in it and none of them are visible in a mean. When a reference is
+    supplied both are drawn, so the separation between the two configurations is
+    read directly rather than inferred from two summary numbers.
+
+    Returns:
+        (figure, array of two axes: histogram, cumulative)
+    """
+    unit = _resolve_level_unit(level_unit)
+    fig, axes = plt.subplots(1, 2, figsize=figsize, layout='constrained')
+
+    series = [(np.asarray(list(levels_dB), dtype=float), label, _series(0))]
+    if comparison_dB is not None:
+        series.append(
+            (np.asarray(list(comparison_dB), dtype=float), comparison_label, _series(4))
+        )
+
+    finite_all = np.concatenate(
+        [s[np.isfinite(s)] for s, _, _ in series if np.any(np.isfinite(s))]
+    ) if any(np.any(np.isfinite(s)) for s, _, _ in series) else np.array([])
+
+    if finite_all.size:
+        lo, hi = float(finite_all.min()), float(finite_all.max())
+        pad = max(0.5, 0.08 * (hi - lo))
+        bins = np.linspace(lo - pad, hi + pad, min(24, max(6, finite_all.size)))
+    else:
+        bins = 10
+
+    for values, name, colour in series:
+        finite = values[np.isfinite(values)]
+        if not finite.size:
+            continue
+        axes[0].hist(finite, bins=bins, alpha=0.62, color=colour, label=name,
+                     edgecolor=_c('border'), linewidth=0.4, zorder=3)
+        # Empirical cumulative distribution: no distributional assumption at all.
+        ordered = np.sort(finite)
+        cumulative = np.arange(1, ordered.size + 1) / ordered.size
+        axes[1].step(ordered, cumulative, where='post', color=colour,
+                     linewidth=1.4, label=name, zorder=3)
+        axes[1].plot(ordered, cumulative, marker='o', markersize=2.6,
+                     linestyle='none', color=colour, zorder=4)
+
+    axes[0].set_xlabel(_level_axis_label(unit, metric_label))
+    axes[0].set_ylabel('Shots')
+    axes[0].set_title('Distribution', fontsize=FONT_MD)
+    axes[1].set_xlabel(_level_axis_label(unit, metric_label))
+    axes[1].set_ylabel('Fraction of shots at or below')
+    axes[1].set_ylim(0.0, 1.02)
+    axes[1].set_title('Cumulative', fontsize=FONT_MD)
+
+    for ax in axes:
+        _grid(ax)
+        _mono_ticks(ax)
+        if len(series) > 1:
+            ax.legend(loc='best', fontsize=FONT_SM)
+
+    fig.suptitle(title, fontsize=FONT_LG)
+    _attach_provenance(fig, provenance, unit)
+    _finalize(fig, True)
+    return fig, axes
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Atmospheric absorption
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_atmospheric_absorption(
+    effect: Any,
+    *,
+    title: str = "Atmospheric Absorption Over the Measurement Path",
+    figsize: Tuple[float, float] = SIZE_PANEL,
+    level_unit: Optional[str] = None,
+    provenance: Union[None, FigureProvenance, Mapping[str, Any], str] = None,
+) -> Tuple[Figure, np.ndarray]:
+    """
+    What the air took out of the signal, and how sure of it we are.
+
+    Air absorbs sound very unevenly with frequency: over a hundred metres at
+    ordinary conditions the 10 kHz band loses more than ten decibels while the
+    100 Hz band loses a twentieth of one. A measurement made downrange is
+    therefore not the same measurement made at the bench, and the difference is
+    not a constant that can be subtracted.
+
+    The left panel is the absorption this path actually cost, band by band. The
+    right panel is the part that matters operationally: how much that answer
+    would move if the recorded temperature, humidity or pressure were wrong by a
+    realistic amount. When the right panel is flat near zero, the weather did not
+    have to be measured accurately for this test. When it is not, it did.
+
+    Args:
+        effect: An atmosphere.AtmosphericEffect, or its serialised dict.
+
+    Returns:
+        (figure, array of two axes)
+    """
+    unit = _resolve_level_unit(level_unit)
+
+    def field(name, default=None):
+        if effect is None:
+            return default
+        value = effect.get(name) if isinstance(effect, Mapping) else getattr(effect, name, default)
+        return default if value is None else value
+
+    freqs = np.asarray(field('frequencies_Hz', []), dtype=float).ravel()
+    absorption = np.asarray(field('absorption_dB', []), dtype=float).ravel()
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, layout='constrained')
+
+    if freqs.size == 0 or absorption.size == 0:
+        for ax in axes:
+            ax.text(0.5, 0.5, 'Not computed:\nno path length recorded',
+                    transform=ax.transAxes, ha='center', va='center',
+                    fontsize=FONT_SM, color=_c('text_3'))
+            ax.set_xticks([])
+            ax.set_yticks([])
+        fig.suptitle(title, fontsize=FONT_LG)
+        _attach_provenance(fig, provenance, unit)
+        _finalize(fig, True)
+        return fig, axes
+
+    n = min(freqs.size, absorption.size)
+    freqs, absorption = freqs[:n], absorption[:n]
+
+    # -- left: what the path cost --
+    ax = axes[0]
+    ax.plot(freqs, absorption, marker='o', markersize=3.2, linewidth=1.4,
+            color=_series(3), zorder=4)
+    ax.fill_between(freqs, 0.0, absorption, color=_series(3), alpha=0.16, zorder=2)
+
+    # 0.5 dB is the drift a session is invalidated at, so it is the line at which
+    # the atmosphere stops being a rounding error.
+    ax.axhline(0.5, color=_c('warn'), linewidth=1.0, linestyle=(0, (4, 2)), zorder=5)
+    ax.annotate('0.5 dB — the session drift limit', xy=(freqs[0], 0.5),
+                xytext=(2, 3), textcoords='offset points',
+                fontsize=FONT_2XS, color=_c('warn'), family='monospace')
+
+    distance = field('distance_m')
+    worst = float(np.max(absorption))
+    worst_at = float(freqs[int(np.argmax(absorption))])
+    ax.set_title(
+        f'Absorption over {distance:g} m' if isinstance(distance, (int, float))
+        else 'Absorption over the path', fontsize=FONT_MD)
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('Absorbed by the air (dB)')
+    ax.set_xscale('log')
+    # Upper left: absorption rises monotonically with frequency, so that corner
+    # is always empty and the box can never sit on the curve or on the drift
+    # annotation along the bottom.
+    ax.text(0.03, 0.97,
+            f'worst {worst:.2f} dB\nat {_fmt_freq(worst_at)} Hz',
+            transform=ax.transAxes, ha='left', va='top',
+            fontsize=FONT_XS, family='monospace', color=_c('text'),
+            bbox=dict(boxstyle='round,pad=0.4', facecolor=_c('accent_wash'),
+                      edgecolor=_c('accent_border'), linewidth=0.7))
+
+    # -- right: how sure of it are we --
+    #
+    # The two accepted input shapes name these three arrays differently, and
+    # this panel only knew the object's names. Given the serialised dict --
+    # which is what main.py passes -- every lookup missed and the panel drew
+    # "Sensitivity not computed" over live data, in every report shipped so
+    # far. It is the half of the figure that answers whether the weather had
+    # to be measured accurately, so a blank one is worse than no panel.
+    def sensitivity(flat_name: str, nested_name: str, default=None):
+        value = field(flat_name)
+        if value is not None:
+            return value
+        block = field('sensitivity')
+        if isinstance(block, Mapping):
+            return block.get(nested_name, default)
+        return getattr(block, nested_name, default) if block is not None else default
+
+    ax2 = axes[1]
+    drawn = False
+    for name, nested, label, index in (
+        ('temperature_sensitivity_dB', 'temperature_dB', 'temperature ±5 °C', 0),
+        ('humidity_sensitivity_dB', 'humidity_dB', 'humidity ±20 %', 1),
+        ('pressure_sensitivity_dB', 'pressure_dB', 'pressure ±2 kPa', 2),
+    ):
+        values = np.asarray(sensitivity(name, nested, []), dtype=float).ravel()
+        if values.size < n:
+            continue
+        ax2.plot(freqs, values[:n], marker='s', markersize=2.6, linewidth=1.2,
+                 color=_series(index), label=label, zorder=4)
+        drawn = True
+
+    ax2.axhline(0.0, color=_c('text_2'), linewidth=1.0, zorder=3)
+    ax2.set_title('If a condition were mis-recorded', fontsize=FONT_MD)
+    ax2.set_xlabel('Frequency (Hz)')
+    ax2.set_ylabel('Change in the absorbed amount (dB)')
+    ax2.set_xscale('log')
+    if drawn:
+        ax2.legend(loc='best', fontsize=FONT_SM)
+    else:
+        ax2.text(0.5, 0.5, 'Sensitivity not computed', transform=ax2.transAxes,
+                 ha='center', va='center', fontsize=FONT_SM, color=_c('text_3'))
+
+    for axis in axes:
+        _grid(axis)
+        _mono_ticks(axis)
+
+    fig.suptitle(title, fontsize=FONT_LG)
+    _attach_provenance(fig, provenance, unit)
+    _finalize(fig, True)
+    return fig, axes
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Session trend
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_session_trend(
+    values_dB: Sequence[float],
+    *,
+    labels: Optional[Sequence[str]] = None,
+    ci95: Optional[Sequence[float]] = None,
+    metric_label: str = "Peak level",
+    title: str = "Session Trend",
+    ax: Optional[Axes] = None,
+    figsize: Tuple[float, float] = SIZE_STRIP,
+    level_unit: Optional[str] = None,
+    provenance: Union[None, FigureProvenance, Mapping[str, Any], str] = None,
+) -> Tuple[Figure, Axes]:
+    """
+    One metric across every string in a range session, in the order they were shot.
+
+    Drift across a session is the signature of a chain that is not stable: a
+    warming barrel, a settling suppressor, a microphone creeping on its stand, a
+    calibration going off. It is invisible within any single string and obvious
+    across them, which is why it needs its own view.
+
+    The least-squares trend is drawn ONLY when there are at least three strings,
+    since a line through two points is not evidence of a trend.
+
+    Args:
+        values_dB: One value per string, in session order.
+        labels: String names for the x axis.
+        ci95: Optional 95% confidence half-widths, drawn as error bars.
+
+    Returns:
+        (figure, axes)
+    """
+    unit = _resolve_level_unit(level_unit)
+    owns = ax is None
+    if owns:
+        fig, ax = plt.subplots(figsize=figsize, layout='constrained')
+    else:
+        fig = ax.figure  # type: ignore[assignment]
+
+    values = np.asarray(list(values_dB), dtype=float)
+    n = values.size
+    x = np.arange(n, dtype=float)
+    finite = np.isfinite(values)
+
+    if ci95 is not None and len(ci95) == n:
+        ax.errorbar(x, values, yerr=np.asarray(list(ci95), dtype=float), fmt='none',
+                    ecolor=_c('text_2'), elinewidth=0.8, capsize=2.5, zorder=3)
+
+    ax.plot(x[finite], values[finite], marker='o', markersize=4.0,
+            linestyle='-', linewidth=1.2, color=_series(0), zorder=4)
+
+    if int(np.count_nonzero(finite)) >= 3:
+        slope, intercept = np.polyfit(x[finite], values[finite], 1)
+        ax.plot(x, slope * x + intercept, color=_c('accent'), linewidth=1.0,
+                linestyle=(0, (5, 2)), zorder=5,
+                label=f'trend {slope:+.2f} {unit}/string')
+        ax.legend(loc='best', fontsize=FONT_SM)
+
+    ax.set_xticks(x)
+    if labels is not None and len(labels) == n:
+        ax.set_xticklabels([_ellipsize(str(text), 18) for text in labels],
+                           rotation=30, ha='right')
+    ax.set_ylabel(_level_axis_label(unit, metric_label))
+    ax.set_xlabel('String, in session order')
+    ax.set_title(title)
+    _grid(ax, axis='y')
+    _mono_ticks(ax)
+
+    _attach_provenance(fig, provenance, unit)
+    _finalize(fig, owns)
+    return fig, ax  # type: ignore[return-value]
+
+
 def create_shot_summary_figure(
     time_s: np.ndarray,
     pressure_Pa: np.ndarray,

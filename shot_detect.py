@@ -139,12 +139,37 @@ class Arrival:
     peak_dB: float
     label: str = "unclassified"   # "crack", "blast" or "unclassified"
 
+    # How the label was arrived at, so a guess is never mistaken for a deduction.
+    #   "geometric" - the separation matched the Mach-cone delay computed from
+    #                 the recorded distance, angle and muzzle velocity
+    #   "subsonic"  - the round cannot produce a crack, so the arrival is blast
+    #   "spectral"  - the two arrivals differ in BOTH centre frequency and decay
+    #                 in the directions an N-wave and a blast must differ
+    #   "ordering"  - only the loudest-arrival heuristic was available
+    #   "none"      - not labelled
+    basis: str = "none"
+    ambiguity: str = ""      # why a label was withheld, when it was
+
+    # Character measurements the classification is based on.
+    centroid_Hz: float = float("nan")
+    decay_ms: float = float("nan")
+
+    @property
+    def classified(self) -> bool:
+        return self.label in ("crack", "blast")
+
     def to_dict(self) -> dict:
+        def num(x):
+            return round(float(x), 3) if math.isfinite(x) else None
         return {
             "offset_s": round(self.offset_s, 6),
             "peak_Pa": round(self.peak_Pa, 4),
             "peak_dB": round(self.peak_dB, 1),
             "label": self.label,
+            "basis": self.basis,
+            "ambiguity": self.ambiguity,
+            "centroid_Hz": num(self.centroid_Hz),
+            "decay_ms": num(self.decay_ms),
         }
 
 
@@ -379,13 +404,224 @@ def find_arrivals(
         for i in sorted(strongest)
     ]
 
-    if len(arrivals) >= 2:
+    for arrival in arrivals:
+        centroid, decay = _arrival_character(raw, x, sample_rate, arrival.offset_s)
+        arrival.centroid_Hz = centroid
+        arrival.decay_ms = decay
+
+    classify_arrivals(arrivals)
+    return arrivals
+
+
+# ---- Arrival classification ----
+
+# Span over which an arrival's spectral character is measured. A ballistic crack
+# is an N-wave a few hundred microseconds long; a muzzle blast runs to several
+# milliseconds. Two milliseconds covers the crack entirely and captures enough of
+# the blast to separate them, without reaching the next arrival at the 0.5 ms
+# minimum separation used above.
+CHARACTER_SPAN_MS: float = 2.0
+
+# Decibels of envelope decay used to define an arrival's decay time.
+CHARACTER_DECAY_DB: float = 10.0
+
+# How far the observed crack-to-blast separation may sit from the delay computed
+# from geometry and still be treated as that delay. Muzzle velocity is quoted to
+# a few percent and the microphone position to a few centimetres, so a fixed
+# window in absolute time is the honest form of this tolerance.
+GEOMETRIC_DELAY_TOLERANCE_MS: float = 0.5
+
+# How much higher in centre frequency, and how much faster to decay, an arrival
+# must be before "it looks like an N-wave" counts as evidence.
+#
+# Without a margin these comparisons are just orderings, and two acoustically
+# IDENTICAL arrivals satisfy an ordering by chance about a quarter of the time -
+# which would stamp a spectral basis on a rounding difference. A ballistic crack
+# carries most of its energy above 2 kHz while a muzzle blast peaks in the low
+# hundreds of hertz, and an N-wave is a few hundred microseconds against the
+# blast's several milliseconds. Both true ratios are therefore well beyond 2, so
+# requiring a factor of 2 rejects coincidence without rejecting real cracks.
+CHARACTER_CENTROID_RATIO: float = 2.0
+CHARACTER_DECAY_RATIO: float = 2.0
+
+
+def _arrival_character(
+    raw: np.ndarray,
+    envelope: np.ndarray,
+    sample_rate: int,
+    offset_s: float,
+) -> Tuple[float, float]:
+    """
+    Measure the spectral centroid and decay time of one arrival.
+
+    Returns:
+        (centroid_Hz, decay_ms), either of which may be NaN when the span is too
+        short to measure.
+    """
+    start = int(round(offset_s * sample_rate))
+    span = max(8, int(round(CHARACTER_SPAN_MS * sample_rate / 1000.0)))
+    stop = min(raw.size, start + span)
+    segment = raw[start:stop]
+
+    centroid = float("nan")
+    if segment.size >= 8:
+        spectrum = np.abs(np.fft.rfft(segment * np.hanning(segment.size)))
+        freqs = np.fft.rfftfreq(segment.size, 1.0 / sample_rate)
+        total = float(spectrum.sum())
+        if total > EPS:
+            centroid = float(np.dot(freqs, spectrum) / total)
+
+    decay = float("nan")
+    if start < envelope.size:
+        peak = float(envelope[start])
+        if peak > EPS:
+            floor = peak * (10.0 ** (-CHARACTER_DECAY_DB / 20.0))
+            tail = envelope[start:]
+            below = np.flatnonzero(tail <= floor)
+            if below.size:
+                decay = float(below[0]) * 1000.0 / sample_rate
+
+    return centroid, decay
+
+
+def classify_arrivals(
+    arrivals: List[Arrival],
+    *,
+    expected_delay_s: Optional[float] = None,
+    projectile_supersonic: Optional[bool] = None,
+    tolerance_ms: float = GEOMETRIC_DELAY_TOLERANCE_MS,
+) -> List[Arrival]:
+    """
+    Label arrivals as ballistic crack or muzzle blast, in place.
+
+    A suppressor acts only on the muzzle blast. Reporting the ballistic crack as
+    if it were the blast credits the suppressor with nothing it did, so getting
+    this wrong is a measurement error, not a presentation detail. The label is
+    therefore only applied when something actually establishes it, and the basis
+    is recorded alongside so a weak inference cannot be read as a strong one.
+
+    In descending order of strength:
+
+      geometric   The separation between two arrivals matches the Mach-cone
+                  delay computed from the recorded microphone distance and
+                  angle and the round's muzzle velocity. This identifies the
+                  crack outright.
+      subsonic    The round is known to be subsonic, so no crack exists and a
+                  single arrival must be the muzzle blast.
+      spectral    One arrival is both higher in centre frequency AND faster to
+                  decay than the other, which is what separates an N-wave from
+                  a blast. Requiring both indicators to agree is what keeps a
+                  reflection from being labelled a crack.
+      ordering    Nothing but the loudest-arrival heuristic was available.
+
+    Args:
+        arrivals: Arrivals in time order, with character already measured.
+        expected_delay_s: Crack-to-blast delay from geometry, if computable.
+                          See atmosphere.crack_blast_delay_s.
+        projectile_supersonic: True/False if known, None if not.
+        tolerance_ms: Window around `expected_delay_s` treated as a match.
+
+    Returns:
+        The same list, labelled.
+    """
+    for arrival in arrivals:
+        arrival.label = "unclassified"
+        arrival.basis = "none"
+        arrival.ambiguity = ""
+
+    if not arrivals:
+        return arrivals
+
+    # A subsonic round produces no crack, so whatever is there is blast.
+    if projectile_supersonic is False:
         loudest = max(range(len(arrivals)), key=lambda k: arrivals[k].peak_Pa)
-        for k, a in enumerate(arrivals):
-            if k == loudest:
-                a.label = "blast"
-            elif k < loudest:
-                a.label = "crack"
+        arrivals[loudest].label = "blast"
+        arrivals[loudest].basis = "subsonic"
+        for k, arrival in enumerate(arrivals):
+            if k != loudest:
+                arrival.ambiguity = (
+                    "the round is subsonic, so this is neither crack nor muzzle "
+                    "blast; it is most likely a reflection"
+                )
+        return arrivals
+
+    if len(arrivals) == 1:
+        arrivals[0].ambiguity = (
+            "only one arrival was found, and a single arrival cannot be shown to "
+            "be the muzzle blast rather than the ballistic crack without either "
+            "the shot geometry or a known subsonic round"
+        )
+        return arrivals
+
+    # Geometry: does any pair sit at the delay the Mach cone predicts?
+    if expected_delay_s is not None and math.isfinite(expected_delay_s):
+        tolerance_s = abs(tolerance_ms) / 1000.0
+        for i in range(len(arrivals) - 1):
+            for j in range(i + 1, len(arrivals)):
+                separation = arrivals[j].offset_s - arrivals[i].offset_s
+                if abs(separation - expected_delay_s) <= tolerance_s:
+                    arrivals[i].label = "crack"
+                    arrivals[i].basis = "geometric"
+                    arrivals[j].label = "blast"
+                    arrivals[j].basis = "geometric"
+                    for k, arrival in enumerate(arrivals):
+                        if k not in (i, j):
+                            arrival.ambiguity = (
+                                "arrived outside the crack/blast pair identified "
+                                "from geometry; most likely a reflection"
+                            )
+                    return arrivals
+
+    # Spectral character: both indicators must agree.
+    loudest = max(range(len(arrivals)), key=lambda k: arrivals[k].peak_Pa)
+    earlier = [k for k in range(len(arrivals)) if k < loudest]
+    if earlier:
+        candidate = earlier[-1]
+        a, b = arrivals[candidate], arrivals[loudest]
+        have_character = all(
+            math.isfinite(v) for v in (a.centroid_Hz, b.centroid_Hz, a.decay_ms, b.decay_ms)
+        )
+        decisive = (
+            have_character
+            and b.centroid_Hz > 0.0
+            and a.decay_ms > 0.0
+            and a.centroid_Hz >= CHARACTER_CENTROID_RATIO * b.centroid_Hz
+            and b.decay_ms >= CHARACTER_DECAY_RATIO * a.decay_ms
+        )
+        if decisive:
+            a.label, a.basis = "crack", "spectral"
+            b.label, b.basis = "blast", "spectral"
+        else:
+            a.label, a.basis = "crack", "ordering"
+            b.label, b.basis = "blast", "ordering"
+            if have_character:
+                a.ambiguity = (
+                    f"labelled from arrival order alone: this arrival is not both "
+                    f"{CHARACTER_CENTROID_RATIO:g}x higher in centre frequency and "
+                    f"{CHARACTER_DECAY_RATIO:g}x faster to decay than the loudest "
+                    f"one, so it may be a reflection rather than a ballistic crack"
+                )
+            else:
+                a.ambiguity = (
+                    "labelled from arrival order alone: the arrivals were too short "
+                    "to measure spectral character"
+                )
+        for k, arrival in enumerate(arrivals):
+            if k not in (candidate, loudest):
+                arrival.ambiguity = (
+                    "additional arrival beyond the crack/blast pair; most likely a "
+                    "reflection"
+                )
+    else:
+        arrivals[loudest].label = "blast"
+        arrivals[loudest].basis = "ordering"
+        for k, arrival in enumerate(arrivals):
+            if k != loudest:
+                arrival.ambiguity = (
+                    "arrived after the loudest arrival, so it is a reflection or "
+                    "reverberation rather than a ballistic crack"
+                )
+
     return arrivals
 
 
@@ -708,6 +944,146 @@ def detect_shots_adaptive(
         relative += step_dB
 
     return best
+
+
+# ---- Auto-trim ----
+
+# Context kept either side of the shot string. Long enough to carry the noise
+# floor the shots are measured against and the tail of the last shot's
+# reverberation, short enough that a ten-minute range recording collapses to the
+# part that holds the string.
+DEFAULT_TRIM_MARGIN_S: float = 1.0
+
+
+@dataclass
+class TrimSpan:
+    """The part of a recording that actually holds the shot string."""
+    start: int
+    end: int
+    sample_rate: int
+    n_shots: int = 0
+    original_samples: int = 0
+    applied: bool = False
+    reason: str = ""
+
+    @property
+    def start_s(self) -> float:
+        return self.start / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def end_s(self) -> float:
+        return self.end / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def duration_s(self) -> float:
+        return (self.end - self.start) / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def removed_s(self) -> float:
+        if not self.sample_rate:
+            return 0.0
+        return (self.original_samples - (self.end - self.start)) / self.sample_rate
+
+    def apply(self, signal: np.ndarray) -> np.ndarray:
+        """Slice a signal to this span. Returns the input unchanged if not applied."""
+        if not self.applied:
+            return np.asarray(signal)
+        return np.asarray(signal)[self.start:self.end]
+
+    def to_dict(self) -> dict:
+        return {
+            "applied": self.applied,
+            "start_sample": self.start,
+            "end_sample": self.end,
+            "start_s": round(self.start_s, 4),
+            "end_s": round(self.end_s, 4),
+            "duration_s": round(self.duration_s, 4),
+            "removed_s": round(self.removed_s, 4),
+            "n_shots": self.n_shots,
+            "reason": self.reason,
+        }
+
+    def summary(self) -> str:
+        if not self.applied:
+            return f"  Auto-trim not applied: {self.reason}"
+        return (
+            f"  Auto-trimmed to {self.start_s:.2f}-{self.end_s:.2f} s "
+            f"({self.duration_s:.2f} s holding {self.n_shots} shot(s); "
+            f"{self.removed_s:.2f} s of silence removed)"
+        )
+
+
+def find_shot_string_span(
+    shots: Sequence[ShotEvent],
+    n_samples: int,
+    sample_rate: int,
+    *,
+    margin_s: float = DEFAULT_TRIM_MARGIN_S,
+) -> TrimSpan:
+    """
+    Find the span of a recording that holds the shot string.
+
+    A range recording is mostly not shooting. Trimming to the string removes the
+    walk to the line, the conversation and the pack-up, which is what makes a
+    whole-session batch affordable and what stops a distant string in the next
+    bay from being detected as part of this one.
+
+    The span runs from the first shot's extraction window to the last shot's,
+    plus a margin either side. It never trims INSIDE a shot window, so no
+    detected event can lose part of its integration span to the trim.
+
+    Args:
+        shots: Detected shots. An empty list produces an unapplied span.
+        n_samples: Length of the recording in samples.
+        sample_rate: Sample rate in Hz.
+        margin_s: Context to keep either side of the string.
+
+    Returns:
+        TrimSpan. Check `.applied` before using it; `.reason` explains a refusal.
+    """
+    if sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+    if n_samples < 0:
+        raise ValueError(f"n_samples must be non-negative, got {n_samples}")
+
+    span = TrimSpan(
+        start=0, end=int(n_samples), sample_rate=int(sample_rate),
+        n_shots=len(shots), original_samples=int(n_samples),
+    )
+
+    if not shots:
+        span.reason = (
+            "no shots were detected, so there is no string to trim to and the "
+            "whole recording is kept"
+        )
+        return span
+
+    margin = max(0, int(round(abs(margin_s) * sample_rate)))
+    first = min(int(s.window_start) for s in shots)
+    last = max(int(s.window_end) for s in shots)
+
+    start = max(0, first - margin)
+    end = min(int(n_samples), last + margin)
+
+    if start >= end:
+        span.reason = (
+            "the detected shot windows do not lie inside the recording, so the "
+            "trim would be empty"
+        )
+        return span
+
+    if start == 0 and end == n_samples:
+        span.reason = (
+            "the shot string already spans the whole recording once the margin is "
+            "included, so there is nothing to remove"
+        )
+        return span
+
+    span.start, span.end, span.applied = start, end, True
+    span.reason = (
+        f"trimmed to the {len(shots)} detected shot(s) with a {abs(margin_s):g} s margin"
+    )
+    return span
 
 
 def get_shot_windows(

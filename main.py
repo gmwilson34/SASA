@@ -40,6 +40,7 @@ Author: Ridgeback Defense
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import csv
 import gc
@@ -53,6 +54,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -63,6 +65,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 from WavLoader import get_wav_info, load_wav, load_wav_chunk  # noqa: E402
 from calibration import (  # noqa: E402
+    dB_SPL_to_amplitude,
     Calibration,
     SignalQuality,
     amplitude_to_dB_SPL,
@@ -83,7 +86,16 @@ from metrics import (  # noqa: E402
     compute_insertion_loss,
     compute_shot_metrics,
 )
+from ahaah import VALIDATION_STATUS as AHAAH_STATUS, compute_ahaah_both  # noqa: E402
+from anomaly import review_shot_string  # noqa: E402
+from atmosphere import (  # noqa: E402
+    Atmosphere,
+    describe_atmospheric_effect,
+    normalise_insertion_loss_bands,
+)
 from bands import ThirdOctaveAnalyzer, band_insertion_loss  # noqa: E402
+from pairing import assess_comparability  # noqa: E402
+from stringstats import string_summary  # noqa: E402
 from STFT import STFTResult, analyze_stft, recommended_nperseg  # noqa: E402
 from weighting import weighting_settling_samples  # noqa: E402
 from provenance import (  # noqa: E402
@@ -94,7 +106,7 @@ from provenance import (  # noqa: E402
     make_provenance_block,
 )
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 SCHEMA_VERSION = "2.0"
 
@@ -132,6 +144,36 @@ SPECTROGRAM_DOWNSAMPLE = 40
 # inspected by zooming in; this is the span kept, relative to the peak.
 WAVEFORM_FULLRES_PRE_S = 0.010
 WAVEFORM_FULLRES_POST_S = 0.020
+
+# The waveform data artifact the interface plots from.
+#
+# It is a MIN/MAX ENVELOPE, not a subsampling. Taking every Nth sample of a
+# blast recording throws the peak away whenever the peak lands between two
+# kept samples, and at 280 samples per column that is almost every column --
+# so the picture would under-report exactly the thing being measured. Storing
+# the extreme of each column instead means the drawn envelope always contains
+# the true peak.
+#
+# A RESOLUTION PYRAMID, the way a map has zoom levels.
+#
+# One envelope is not enough. 2048 columns across a twelve-second string is
+# 5.9 ms per column, so zooming into a single blast just magnifies the same
+# columns and the picture stops gaining detail exactly where the operator
+# started looking closely. Each level here has four times the columns of the
+# one before, and the interface picks the coarsest level that still puts at
+# least one column in every pixel of the plot -- so detail appears as the zoom
+# goes in, and nothing larger than the screen is ever decoded.
+#
+# Three levels and no more. A fourth at 131072 columns took the file to 7 MB
+# and bought nothing: by then the visible span is inside a shot window, and the
+# per-shot envelope below is finer still. The pyramid only has to carry the eye
+# from the whole string down to one blast; from there the shot takes over.
+WAVEFORM_ENVELOPE_LEVELS = (2048, 8192, 32768)
+
+# Per shot, over its own window only. A 250 ms window at 48 kHz is 12000
+# samples, so 4096 columns is about three samples per column -- finer than any
+# display can resolve, and the level the deep zoom actually lands on.
+SHOT_ENVELOPE_COLUMNS = 4096
 
 # Formats matplotlib is known to write, used when matplotlib cannot be imported
 # during argument validation.
@@ -1252,6 +1294,25 @@ def aggregate_from_record(record: Dict[str, Any]) -> AggregateMetrics:
     )
 
 
+# Distance the per-band insertion loss is referred to when both strings recorded
+# their microphone distance. One metre is the standard reporting distance, and it
+# is short enough that absorption over the remaining path is small. The value is
+# always stated in the record, because when the two strings were shot in
+# different air the insertion loss genuinely depends on where it is quoted.
+NORMALISATION_DISTANCE_M: float = 1.0
+
+
+def _num_or_none(value: Any) -> Optional[float]:
+    """Coerce a metadata value to a float, or None when it was not recorded."""
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def compare_with_reference(
     reference_dir: Path,
     test_aggregate: AggregateMetrics,
@@ -1300,20 +1361,27 @@ def compare_with_reference(
             "of relative levels. It is valid only if both recordings used identical gain."
         )
 
+    # Is this pair the same experiment? Each objection that physics can price is
+    # priced, so the operator sees how many of the decibels below belong to the
+    # suppressor and how many belong to the setup having moved.
     ref_meta = reference.get("test_metadata") or {}
     test_meta = test_record.get("test_metadata") or {}
-    if ref_meta.get("configuration") == "suppressed":
-        warnings.append(
-            "The reference is recorded as 'suppressed'. Insertion loss is defined against an "
-            "UNSUPPRESSED reference; the sign of the result is probably inverted."
+    comparability = assess_comparability(
+        ref_meta, test_meta, ref_aggregate, test_aggregate,
+        reference_label=str(Path(reference_dir).name),
+        test_label=str((test_record.get("source") or {}).get("path") or "test"),
+    )
+    for objection in comparability.objections:
+        prefix = {
+            "blocking": "NOT COMPARABLE: ",
+            "material": "",
+            "advisory": "",
+        }.get(objection.severity, "")
+        amount = (
+            f" This accounts for {objection.quantified_dB:+.2f} dB of the difference."
+            if objection.quantified_dB is not None else ""
         )
-    for field_name in ("mic_distance_m", "mic_angle_deg", "mic_model"):
-        ref_value, test_value = ref_meta.get(field_name), test_meta.get(field_name)
-        if ref_value is not None and test_value is not None and ref_value != test_value:
-            warnings.append(
-                f"Reference and test differ in {field_name} ({ref_value} vs {test_value}); "
-                f"the difference in level is not attributable to the suppressor alone."
-            )
+        warnings.append(f"{prefix}{objection.message}{amount}")
 
     losses = compute_insertion_loss(ref_aggregate, test_aggregate)
 
@@ -1350,6 +1418,47 @@ def compare_with_reference(
     else:
         warnings.append("Per-band insertion loss needs band analysis in both runs; it was skipped.")
 
+    # ---- Refer both strings to a common distance before differencing ----
+    #
+    # The raw per-band figure above is what was measured. This is what the
+    # suppressor did, with the geometry and the weather taken back out. Both are
+    # reported: a corrected number that cannot be checked against the
+    # measurement it came from is not a measurement record.
+    normalised: Dict[str, Any] = {"valid": False, "refusal": "not attempted"}
+    if bands["insertion_loss_dB"]:
+        ref_peak_Pa = test_peak_Pa = None
+        if test_cal.get("calibrated"):
+            # Only meaningful in Pascals, so the linearity guard only runs when
+            # the levels are real sound pressure.
+            with contextlib.suppress(ValueError, OverflowError):
+                ref_peak_Pa = float(dB_SPL_to_amplitude(ref_aggregate.Lpeak_Z_max))
+                test_peak_Pa = float(dB_SPL_to_amplitude(test_aggregate.Lpeak_Z_max))
+
+        comparison_result = normalise_insertion_loss_bands(
+            np.asarray(bands["reference_dB"], dtype=float),
+            np.asarray(bands["test_dB"], dtype=float),
+            np.asarray(bands["frequencies_Hz"], dtype=float),
+            reference_atmosphere=Atmosphere.from_metadata(ref_meta),
+            test_atmosphere=Atmosphere.from_metadata(test_meta),
+            reference_distance_m=_num_or_none(ref_meta.get("mic_distance_m")),
+            test_distance_m=_num_or_none(test_meta.get("mic_distance_m")),
+            normalisation_distance_m=NORMALISATION_DISTANCE_M,
+            reference_peak_Pa=ref_peak_Pa,
+            test_peak_Pa=test_peak_Pa,
+        )
+        normalised = comparison_result.to_dict()
+        if comparison_result.valid:
+            say("")
+            for line in comparison_result.summary().splitlines():
+                say(line)
+        else:
+            warnings.append(
+                f"Insertion loss was NOT normalised to a common distance: "
+                f"{comparison_result.refusal} The per-band figures are as measured, "
+                f"so any difference in microphone position or weather between the "
+                f"two strings is still in them."
+            )
+
     return {
         "reference_dir": str(Path(reference_dir).resolve()),
         "reference_input": (reference.get("analysis") or {}).get("input_file", ""),
@@ -1359,6 +1468,8 @@ def compare_with_reference(
         "level_unit": test_cal["level_unit"],
         "metrics": [loss.to_dict() for loss in losses],
         "bands": bands,
+        "bands_normalised": normalised,
+        "comparability": comparability.to_dict(),
         "warnings": warnings,
     }
 
@@ -1366,7 +1477,16 @@ def compare_with_reference(
 def print_insertion_loss(comparison: Dict[str, Any]) -> None:
     """Print the deliverable: how much quieter the test configuration is."""
     unit = comparison.get("level_unit", "dB")
+    comparability = comparison.get("comparability") or {}
     say("")
+    if comparability and not comparability.get("comparable", True):
+        say("  INSERTION LOSS IS NOT VALID FOR THIS PAIR")
+        say("  The two strings are not the same experiment. The numbers below are")
+        say("  the arithmetic difference between them, which is not insertion loss:")
+        for objection in comparability.get("objections", []):
+            if objection.get("severity") == "blocking":
+                say(f"    - {objection['message']}")
+        say("")
     say("  Insertion loss (reference - test; positive means quieter)")
     say(f"    Reference: {comparison.get('reference_input', '(unknown)')}")
     say(f"    Shots:     {comparison.get('reference_n_shots')} reference / "
@@ -1385,6 +1505,10 @@ def print_insertion_loss(comparison: Dict[str, Any]) -> None:
         say(f"    Per-band IL: best {il[best]:+.1f} dB at {freqs[best]:.0f} Hz, "
             f"worst {il[worst]:+.1f} dB at {freqs[worst]:.0f} Hz "
             f"({len(il)} bands written to the record)")
+    unexplained = float(comparability.get("unexplained_dB") or 0.0)
+    if unexplained > 0.0:
+        say(f"    Of the difference above, {unexplained:.2f} dB is attributable to the "
+            f"two setups not matching, not to the suppressor.")
     for warn in comparison.get("warnings", []):
         say(f"    WARNING: {warn}")
 
@@ -1712,6 +1836,79 @@ def _run_pipeline(
         source_block["extracted_audio"] = str(wav_path)
         source_block["extracted_sha256"] = file_sha256(wav_path)
 
+    # ---- How the string behaved: first-round pop, drift, distribution ----
+    #
+    # Computed per level metric, because a suppressor can pop on peak and not on
+    # exposure, and because the with/without-first-round pair is the honest way
+    # to quote a suppressor that pops at all.
+    string_breakdown: Dict[str, Any] = {}
+    for level_name in ("Lpeak_Z", "Lpeak_A", "LAE"):
+        levels = [
+            float(getattr(m, level_name)) for m in shot_metrics
+            if m.valid and math.isfinite(getattr(m, level_name, float("nan")))
+        ]
+        if levels:
+            string_breakdown[level_name] = string_summary(levels, metric=level_name).to_dict()
+
+    headline = string_breakdown.get("Lpeak_Z")
+    if headline:
+        say("")
+        say(string_summary(
+            [float(m.Lpeak_Z) for m in shot_metrics
+             if m.valid and math.isfinite(m.Lpeak_Z)],
+            metric="Lpeak_Z",
+        ).summary())
+
+    # ---- Which shots do not belong to this string, and why ----
+    #
+    # Run AFTER the string breakdown so the review knows whether the first round
+    # popped: an established pop makes shot one an outlier by definition, and
+    # reporting it as a possible squib would send the technician after the one
+    # thing that was expected.
+    pop_established = bool(
+        ((string_breakdown.get("Lpeak_Z") or {}).get("first_round_pop") or {})
+        .get("established", False)
+    )
+    shot_review = review_shot_string(
+        shot_metrics, first_round_pop_established=pop_established
+    )
+    for line in shot_review.summary().splitlines():
+        say(line)
+    for flag in shot_review.flags_for_review():
+        logger.info("Shot %d: %s", flag.shot_number, flag.message)
+
+    # ---- The air the measurement was made in ----
+    #
+    # Recorded here whether or not it was used, so a later distance or
+    # atmosphere normalisation can state what it assumed, and so two sessions
+    # can be compared knowing whether the weather differed between them.
+    air = Atmosphere.from_metadata(metadata)
+
+    # What that air actually did to this measurement, band by band, and how much
+    # the answer would move if a condition were mis-recorded. At bench distance
+    # this is a fraction of a decibel; downrange it is the dominant term in the
+    # top bands, and the operator needs to be able to see which case they are in.
+    atmospheric_effect = describe_atmospheric_effect(
+        aggregate.band_frequencies,
+        atmosphere=air,
+        distance_m=_num_or_none(getattr(metadata, "mic_distance_m", None)),
+    )
+    if atmospheric_effect.absorption_dB.size:
+        say("")
+        for line in atmospheric_effect.summary().splitlines():
+            say(line)
+
+    ahaah_block = _ahaah_block(
+        analysis.get("pressure"), shots, shot_metrics, sample_rate,
+        calibrated=bool(calibration.calibrated),
+    )
+    if ahaah_block.get("attempted"):
+        say("")
+        say("  Auditory Risk Unit (AHAAH):")
+        say(f"    {ahaah_block.get('headline', 'unavailable')}")
+        for note in (ahaah_block.get("notes") or [])[:2]:
+            say(f"    {note}")
+
     record = {
         "schema_version": SCHEMA_VERSION,
         "software": record["software"],
@@ -1726,8 +1923,13 @@ def _run_pipeline(
             reference_dir=reference_dir, config_file=config_file,
         ),
         "test_metadata": record["test_metadata"],
+        "atmosphere": air.to_dict(),
+        "atmospheric_effect": atmospheric_effect.to_dict(),
+        "ahaah": ahaah_block,
         "shots": [s.to_dict() for s in shots],
         "per_shot_metrics": [m.to_dict() for m in shot_metrics],
+        "shot_review": shot_review.to_dict(),
+        "string_statistics": string_breakdown,
         "aggregate": aggregate.to_dict(),
         "artifacts": {},
         "validity": {
@@ -1737,6 +1939,8 @@ def _run_pipeline(
             "reasons": list(quality.errors) + ([] if shots else ["No shots were detected"]),
             "n_shots_detected": len(shots),
             "n_shots_valid": aggregate.n_valid,
+            "shots_to_exclude": shot_review.shots_to_exclude(),
+            "shots_to_review": shot_review.shots_to_review(),
         },
         "warnings": run_warnings,
         "insertion_loss": None,
@@ -1769,6 +1973,23 @@ def _run_pipeline(
         say(f"    metrics: {csv_path.name}")
     else:
         say("    metrics: not written (no shots detected)")
+
+    waveform_block = _waveform_envelope_block(
+        analysis.get("pressure"), shots, sample_rate,
+        level_unit=calibration.level_unit,
+    )
+    if waveform_block is not None:
+        waveform_path = out_dir / "waveform_envelope.json"
+        try:
+            write_json(waveform_path, waveform_block)
+            artifacts["waveform_envelope"] = waveform_path.name
+            say(f"    waveform: {waveform_path.name} "
+                f"({waveform_block['columns']} columns, "
+                f"{len(waveform_block['shots'])} shot window(s))")
+        except OSError as exc:
+            message = f"The waveform envelope could not be written: {exc}"
+            logger.warning(message)
+            run_warnings.append(message)
 
     if record["insertion_loss"]:
         il_path = save_insertion_loss_csv(out_dir / "insertion_loss.csv", record["insertion_loss"])
@@ -1846,6 +2067,194 @@ def _run_pipeline(
         artifacts=artifacts,
         record=record,
     )
+
+
+def _column_envelope(values: np.ndarray, columns: int) -> Tuple[List[float], List[float]]:
+    """
+    Reduce a signal to the minimum and maximum within each of `columns` spans.
+
+    This is the only honest way to draw a waveform smaller than its sample
+    count. Subsampling picks one sample per column and discards the rest, so a
+    transient shorter than the column -- which is what a muzzle blast IS at
+    this scale -- is kept only if it happens to land on the chosen sample. The
+    envelope keeps the extremes, so the drawn band always contains the peak
+    and the reader can trust the height of it.
+
+    Returns two lists of length min(columns, values.size), rounded to
+    millipascals: finer than any display can resolve and a third of the bytes
+    of full float precision.
+    """
+    n = int(values.size)
+    if n == 0:
+        return [], []
+    columns = max(1, min(int(columns), n))
+    edges = np.linspace(0, n, columns + 1).astype(np.int64)
+    # reduceat needs strictly increasing starts; the clamp above guarantees it.
+    starts = edges[:-1]
+    lo = np.minimum.reduceat(values, starts)
+    hi = np.maximum.reduceat(values, starts)
+    return ([round(float(v), 3) for v in lo], [round(float(v), 3) for v in hi])
+
+
+def _waveform_envelope_block(
+    pressure,
+    shots,
+    sample_rate: float,
+    *,
+    level_unit: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    The waveform, as data the interface can plot and interrogate.
+
+    Written alongside the PNG rather than instead of it: the PNG is what goes
+    into the printed report, and this is what the operator points at. Both are
+    drawn from the same samples, so they cannot disagree.
+
+    Emitted from the DATA stage, not the plotting stage, so `--no-plots` still
+    produces an interactive chart -- the flag turns off figure rendering, not
+    the measurement.
+
+    Returns None when there is no contiguous signal to reduce, which is the
+    chunked path for a long recording.
+    """
+    if pressure is None or getattr(pressure, "size", 0) == 0:
+        return None
+
+    levels: List[Dict[str, Any]] = []
+    for columns in WAVEFORM_ENVELOPE_LEVELS:
+        if levels and levels[-1]["columns"] >= int(pressure.size):
+            break            # the previous level already resolves every sample
+        lo, hi = _column_envelope(pressure, columns)
+        levels.append({"columns": len(lo), "lo": lo, "hi": hi})
+
+    block: Dict[str, Any] = {
+        "sample_rate_Hz": float(sample_rate),
+        "n_samples": int(pressure.size),
+        "duration_s": round(float(pressure.size) / float(sample_rate), 6),
+        "unit": "Pa",
+        "level_unit": level_unit,
+        "columns": levels[0]["columns"],
+        "levels": levels,
+        "shots": [],
+    }
+
+    # One higher-resolution envelope per shot window, so zooming into a blast
+    # resolves it instead of showing the same overview columns magnified.
+    for shot in shots or []:
+        start = int(getattr(shot, "window_start", 0))
+        stop = int(getattr(shot, "window_end", 0))
+        if stop <= start or start < 0 or stop > pressure.size:
+            continue
+        shot_lo, shot_hi = _column_envelope(pressure[start:stop], SHOT_ENVELOPE_COLUMNS)
+        block["shots"].append({
+            "shot_number": getattr(shot, "shot_number", None),
+            "t0_s": round(start / float(sample_rate), 6),
+            "t1_s": round(stop / float(sample_rate), 6),
+            "peak_time_s": round(float(getattr(shot, "index", start)) / float(sample_rate), 6),
+            "columns": len(shot_lo),
+            "lo": shot_lo,
+            "hi": shot_hi,
+        })
+    return block
+
+
+def _ahaah_block(
+    pressure,
+    shots,
+    shot_metrics,
+    sample_rate: float,
+    *,
+    calibrated: bool,
+) -> Dict[str, Any]:
+    """
+    Run the AHAAH model over the loudest valid shot and record what came back.
+
+    WHAT THIS IS FOR, GIVEN THAT IT NEVER RETURNS A NUMBER
+    ------------------------------------------------------
+    MIL-STD-1474E approves two impulse-noise metrics: the A-weighted energy
+    method, which SASA computes exactly, and the Auditory Risk Unit from ARL's
+    AHAAH model. Customers ask for the ARU. ahaah.py implements the model to
+    the limit of what ARL has published and then REFUSES to emit the number,
+    because four specifications the answer depends on are absent from the
+    public release and there is one reference case to test against -- see the
+    header of ahaah.py and docs/AHAAH-SPEC.md section 11.
+
+    Until this ran, none of that reached the operator: the module existed and
+    nothing called it, so the application was silent on a metric its customers
+    ask for by name. It now runs on every analysis and the record carries the
+    refusal, the reason, and the model's own diagnostics. A refusal that is
+    visible and argued is a deliverable. A number would not be.
+
+    The LOUDEST shot is the one submitted, because ARU is assessed per impulse
+    and the worst impulse is the one that governs.
+
+    Args:
+        pressure: the full calibrated pressure history, or None on the chunked
+            path where no contiguous array is retained.
+        shots: detected shot events, carrying their window bounds.
+        shot_metrics: per-shot metrics, for choosing the loudest.
+        sample_rate: sample rate of `pressure`, Hz.
+        calibrated: False produces the model's uncalibrated refusal rather than
+            a silent skip, so the reason is still on the record.
+
+    Returns:
+        A JSON-serialisable block. `attempted` is False when there was nothing
+        to submit, and then `reason` says which.
+    """
+    block: Dict[str, Any] = {
+        "attempted": False,
+        "validation_status": AHAAH_STATUS,
+        "reason": None,
+        "shot_number": None,
+        "headline": None,
+        "notes": [],
+        "unwarned": None,
+        "warned": None,
+    }
+
+    if pressure is None:
+        block["reason"] = ("The recording was analysed in chunks, so no contiguous "
+                           "pressure history was retained to submit.")
+        return block
+    if not shots or not shot_metrics:
+        block["reason"] = "No shots were detected."
+        return block
+
+    valid = [(m, s) for m, s in zip(shot_metrics, shots) if getattr(m, "valid", True)]
+    if not valid:
+        block["reason"] = "No valid shot to submit."
+        return block
+
+    metric, shot = max(
+        valid,
+        key=lambda pair: (pair[0].Lpeak_Z if math.isfinite(pair[0].Lpeak_Z) else -math.inf),
+    )
+    window = pressure[shot.window_start:shot.window_end]
+    if window.size == 0:
+        block["reason"] = "The loudest shot's window was empty."
+        return block
+
+    try:
+        unwarned, warned = compute_ahaah_both(
+            window, sample_rate,
+            calibrated=calibrated,
+            # 96 kHz is the model's own preference; refusing outright on a
+            # 48 kHz recording would replace the model's reasoned refusal with
+            # a gate, and the reasoned one is the more useful of the two.
+            allow_low_rate=True,
+        )
+    except Exception as err:                                   # noqa: BLE001
+        logger.warning("AHAAH did not run: %s", err)
+        block["reason"] = f"The model raised: {err}"
+        return block
+
+    block["attempted"] = True
+    block["shot_number"] = getattr(shot, "shot_number", None)
+    block["headline"] = unwarned.headline_label
+    block["notes"] = list(unwarned.notes)
+    block["unwarned"] = unwarned.to_dict()
+    block["warned"] = warned.to_dict()
+    return block
 
 
 def _settings_block(
@@ -2457,6 +2866,19 @@ def _generate_plots(
             )
             if stft is None:
                 raise RuntimeError("the recording is shorter than one FFT window")
+
+            # Emitted BEFORE the figure branches, deliberately. _plot_step
+            # swallows an exception from anything below it, so a matplotlib
+            # failure must not be able to take the data with it.
+            matrix = _spectrogram_matrix_block(stft)
+            if matrix:
+                matrix_path = out_dir / f"{key}_matrix.json"
+                try:
+                    write_json(matrix_path, matrix)
+                    artifacts[f"{key}_matrix"] = matrix_path.name
+                except OSError as exc:
+                    logger.warning("The %s matrix could not be written: %s", key, exc)
+
             if plotly_available and want_html:
                 path = out_dir / f"{key}_full.html"
                 if plot_module.save_interactive_spectrogram_html(
@@ -2571,6 +2993,48 @@ def _generate_plots(
                 )
                 del traces
                 gc.collect()
+
+        # The string as a population rather than an average: how the levels are
+        # distributed, and whether the first round left the group.
+        valid_peaks = [
+            float(m.Lpeak_Z) for m in shot_metrics
+            if m.valid and math.isfinite(m.Lpeak_Z)
+        ]
+        if len(valid_peaks) > 1:
+            with _plot_step("Level distribution figure", run_warnings):
+                save_optional(
+                    call("plot_level_distribution", valid_peaks,
+                         metric_label="Peak level, Z-weighted",
+                         label="This string", level_unit=level_unit),
+                    "level_distribution", "distribution",
+                )
+
+        pop_block = ((record.get("string_statistics") or {}).get("Lpeak_Z") or {}).get(
+            "first_round_pop"
+        )
+        if pop_block and not pop_block.get("refusal"):
+            with _plot_step("First-round pop figure", run_warnings):
+                ordered_peaks = [
+                    float(m.Lpeak_Z) for m in shot_metrics
+                    if m.valid and math.isfinite(m.Lpeak_Z)
+                ]
+                save_optional(
+                    call("plot_first_round_pop", ordered_peaks,
+                         pop=SimpleNamespace(**pop_block),
+                         metric_label="Peak level, Z-weighted",
+                         level_unit=level_unit),
+                    "first_round_pop", "first_round_pop",
+                )
+
+        # What the air took out of the signal on its way to the microphone.
+        effect_block = record.get("atmospheric_effect") or {}
+        if effect_block.get("absorption_dB"):
+            with _plot_step("Atmospheric absorption figure", run_warnings):
+                save_optional(
+                    call("plot_atmospheric_absorption", effect_block,
+                         level_unit=level_unit),
+                    "atmospheric_absorption", "atmosphere",
+                )
 
         comparison = record.get("insertion_loss")
         if comparison and (comparison.get("bands") or {}).get("insertion_loss_dB"):
@@ -2750,6 +3214,67 @@ def _thin_spectrogram(stft: STFTResult) -> STFTResult:
     stft.magnitude_dB = np.round(stft.magnitude_dB, 1).astype(np.float32)
     stft.time_s = stft.time_s.astype(np.float32)
     return stft
+
+
+def _spectrogram_matrix_block(stft: STFTResult) -> Dict[str, Any]:
+    """
+    The spectrogram as data the interface can read a level off, not a picture.
+
+    QUANTISED, AND LOSSLESSLY SO. _thin_spectrogram has already rounded the
+    matrix to 0.1 dB for display, so storing it as unsigned 16-bit counts of
+    0.1 dB reproduces the array Python plotted exactly -- there is no second
+    approximation here, only a smaller container for the same numbers.
+
+    Base64 of big-endian uint16 rather than a PNG. A PNG is smaller, but it
+    carries the measurement through colour management: a stray gAMA or iCCP
+    chunk, or a wide-gamut display, shifts the bytes a canvas reads back while
+    leaving the picture looking correct. A readout that is quietly wrong is the
+    one failure this application exists to avoid. JSON numbers would be honest
+    too and about five times larger.
+
+    65535 is reserved for a non-finite cell so silence and NaN stay
+    distinguishable from a real level.
+    """
+    magnitude = np.asarray(stft.magnitude_dB, dtype=np.float64)
+    finite = np.isfinite(magnitude)
+    if not finite.any():
+        return {}
+
+    step = 0.1
+    offset = float(np.floor(magnitude[finite].min() * 10.0) / 10.0)
+    counts = np.full(magnitude.shape, 65535, dtype=np.uint16)
+    scaled = np.round((magnitude[finite] - offset) / step)
+    counts[finite] = np.clip(scaled, 0, 65534).astype(np.uint16)
+
+    # Bin-major so a column of the display (one time frame) is a stride, and
+    # the browser can slice a frequency row without walking the whole array.
+    payload = base64.b64encode(counts.astype(">u2").tobytes()).decode("ascii")
+
+    return {
+        "schema": 1,
+        "weighting": stft.weighting,
+        "level_label": stft.level_label,
+        "calibrated": bool(stft.calibrated),
+        "sample_rate_Hz": float(stft.sample_rate),
+        "nperseg": int(stft.nperseg),
+        "noverlap": int(stft.noverlap),
+        "window": stft.window,
+        "enbw_Hz": round(float(stft.enbw_Hz), 4),
+        "frames": int(magnitude.shape[1]),
+        "bins": int(magnitude.shape[0]),
+        "time_s": [round(float(t), 6) for t in stft.time_s],
+        "frequencies_Hz": [round(float(f), 3) for f in stft.frequencies_Hz],
+        "quantisation": {
+            "offset_dB": offset,
+            "step_dB": step,
+            "dtype": "uint16",
+            "byte_order": "big",
+            "missing": 65535,
+        },
+        "magnitude_dB_b64": payload,
+        "min_dB": round(float(magnitude[finite].min()), 3),
+        "max_dB": round(float(magnitude[finite].max()), 3),
+    }
 
 
 def _round_for_display(values: np.ndarray, significant: int = 5) -> np.ndarray:
@@ -2984,6 +3509,10 @@ Exit codes: 0 ok, 1 error, 2 no shots detected, 3 measurement inadmissible.
     out = parser.add_argument_group("Output")
     out.add_argument("--output", "-o", type=Path, default=None, metavar="DIR",
                      help="Directory to create the run directory under.")
+    out.add_argument("--session", type=Path, default=None, metavar="DIR",
+                     help="Analyse every recording in DIR as one range session, "
+                          "then pair each suppressed string with its unsuppressed "
+                          "reference and report the session as a whole.")
     out.add_argument("--config", type=Path, default=None, metavar="FILE",
                      help="Load settings from JSON. Explicit flags override the file.")
     out.add_argument("--formats", type=str, default="png", metavar="LIST",
@@ -3215,18 +3744,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config = _config_from_args(args, typed, warnings)
 
         # ---- Resolve the input ----
-        if args.input is not None:
-            chosen = args.input
-        else:
-            chosen = _pick_file_interactively()
-            if chosen is None:
-                say("No file selected.")
-                return EXIT_ERROR
+        # A session names a directory rather than a file, so the single-file
+        # resolution (and its interactive picker) is skipped entirely.
+        if args.session is None:
+            if args.input is not None:
+                chosen = args.input
+            else:
+                chosen = _pick_file_interactively()
+                if chosen is None:
+                    say("No file selected.")
+                    return EXIT_ERROR
 
-        prepared = prepare_input(Path(chosen), warnings)
+            prepared = prepare_input(Path(chosen), warnings)
 
         # ---- Resolve the calibration up front, before any analysis time is spent ----
         calibration = resolve_calibration(config, presets=presets, warnings=warnings)
+
+        if args.session is not None:
+            return _run_session_cli(
+                args.session, config, calibration, warnings, output_base=args.output
+            )
 
         if args.save_preset:
             saved_to = save_profile(
@@ -3362,6 +3899,106 @@ def _final_status(results: Sequence[AnalysisResult]) -> int:
         return EXIT_ERROR
 
     return EXIT_OK
+
+
+def _run_session_cli(
+    directory: Path,
+    config: AnalysisConfig,
+    calibration: Calibration,
+    warnings: List[str],
+    output_base: Optional[Path] = None,
+) -> int:
+    """
+    Analyse a whole range session and report it as one.
+
+    Each recording carries its own metadata sidecar if it has one; the session
+    is then paired and summarised by session.py, which refuses to guess when two
+    references match a test equally well.
+    """
+    from session import discover_recordings, run_session, SessionError
+
+    try:
+        paths = discover_recordings(directory)
+    except SessionError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+    if not paths:
+        raise ConfigurationError(
+            f"No recordings found in {directory}. A session directory must hold at "
+            f"least one audio or video file."
+        )
+
+    say("")
+    say(f"  Session: {len(paths)} recording(s) in {directory}")
+    for path in paths:
+        say(f"    {path.name}")
+    say("")
+
+    # One directory for the whole session, with each recording's run beneath it,
+    # so a session is a single artefact that can be archived or handed over.
+    base = Path(output_base) if output_base else Path(directory)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    session_dir = base / f"session_{stamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    def analyse_one(path: Path) -> Dict[str, Any]:
+        """Run one recording, reusing the session's calibration and settings."""
+        prepared = prepare_input(path, warnings)
+        metadata = _metadata_from_sidecar(path) or TestMetadata()
+        result = analyze_file(
+            prepared.audio_path,
+            config,
+            output_base=session_dir,
+            metadata=metadata,
+            calibration=calibration,
+            original_path=prepared.original_path,
+            warnings=warnings,
+        )
+        return result.record
+
+    result = run_session(
+        paths,
+        analyse=analyse_one,
+        progress=lambda pct, message: progress(pct, message),
+    )
+
+    say("")
+    say("=" * 64)
+    for line in result.summary().splitlines():
+        say(line)
+    say("=" * 64)
+
+    record_path = session_dir / "session.json"
+    write_json(record_path, result.to_dict())
+    say(f"  Session record: {record_path}")
+    announce_output_dir(session_dir)
+
+    if result.failed:
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def _metadata_from_sidecar(path: Path) -> Optional[TestMetadata]:
+    """
+    Read a per-recording metadata sidecar, if one sits beside the audio.
+
+    A session is many recordings with DIFFERENT metadata - that is the whole
+    point, since one of them is the unsuppressed reference. So each file may
+    carry its own <name>.metadata.json, and a missing one is not an error.
+    """
+    for candidate in (
+        path.with_suffix(".metadata.json"),
+        path.with_name(path.stem + ".metadata.json"),
+        path.with_name(path.stem + ".json"),
+    ):
+        if candidate.is_file():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                return TestMetadata.from_dict(data)
+    return None
 
 
 def cli_main() -> None:

@@ -26,95 +26,120 @@ except ImportError:
     sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# The icon is the in-app mark, at icon scale: the same seven-bar spectrum as
+# #i-brand in ui/renderer/index.html, in the brand's blue, on the light
+# theme's surface.
+#
+# Light background on purpose: the application defaults to the light theme
+# because its output is printed, and an icon that contradicted the window it
+# opens would be the only dark thing in the product.
+#
+# The blue ramp is the mark's own colour and is deliberately NOT one of the
+# series colours from tokens.css — those six are reserved for identifying
+# traces in a plot, where a colour has to mean a specific weighting or role.
+# The surface, border and ink below ARE tokens and must not drift from them.
+# ---------------------------------------------------------------------------
+
+# Bright at the top of the mark, deep at the bottom.
+BRAND_GRADIENT = [
+    (0.00, (60, 150, 255)),
+    (1.00, (30, 100, 220)),
+]
+
+BG_SURFACE = (0xFF, 0xFF, 0xFF, 255)   # --bg-surface, light
+BORDER = (0xC8, 0xD1, 0xDE, 255)       # --border,     light
+INK = (0x0F, 0x14, 0x1A, 255)          # --text,       light
+
+# x, y, width, height in the 32-unit box of #i-brand, with its bar opacity.
+BRAND_BARS = [
+    (2, 14, 3, 8, 0.55),
+    (6, 10, 3, 16, 0.70),
+    (10, 6, 3, 24, 0.85),
+    (14, 2, 3, 28, 1.00),
+    (18, 4, 3, 24, 1.00),
+    (22, 8, 3, 16, 0.85),
+    (26, 12, 3, 8, 0.70),
+]
+
+
+def _gradient_colour(t: float) -> tuple:
+    """Sample BRAND_GRADIENT at t in [0, 1], linearly between stops."""
+    t = min(1.0, max(0.0, t))
+    for i in range(len(BRAND_GRADIENT) - 1):
+        t0, c0 = BRAND_GRADIENT[i]
+        t1, c1 = BRAND_GRADIENT[i + 1]
+        if t <= t1:
+            span = t1 - t0
+            f = 0.0 if span == 0 else (t - t0) / span
+            return tuple(int(round(a + (b - a) * f)) for a, b in zip(c0, c1))
+    return BRAND_GRADIENT[-1][1]
+
+
 def create_icon_image(size: int = 1024) -> Image.Image:
-    """Create a SASA-themed app icon."""
+    """The SASA app icon: the spectrum mark, in the brand blue, on paper."""
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Background: rounded rectangle with dark gradient
     margin = int(size * 0.03)
     radius = int(size * 0.18)
+    box = [margin, margin, size - margin, size - margin]
 
-    # Dark background
-    bg_color = (12, 12, 20, 255)
-    draw.rounded_rectangle(
-        [margin, margin, size - margin, size - margin],
-        radius=radius,
-        fill=bg_color,
-    )
+    draw.rounded_rectangle(box, radius=radius, fill=BG_SURFACE)
+    draw.rounded_rectangle(box, radius=radius, outline=BORDER,
+                           width=max(1, size // 192))
 
-    # Subtle border
-    draw.rounded_rectangle(
-        [margin, margin, size - margin, size - margin],
-        radius=radius,
-        outline=(30, 30, 50, 200),
-        width=max(1, size // 256),
-    )
+    # One vertical ramp across the whole mark, rendered full-bleed and then
+    # masked by the bars, so every bar samples the same ramp at its own height
+    # rather than repeating the ramp inside itself.
+    inner = size - 2 * margin
+    # The 32-unit box of #i-brand. Its bars only occupy y = 2..30 and
+    # x = 2..29 of that box, so the box is oversized relative to the ink and
+    # the placement below is chosen from where the BARS land, not where the
+    # box does: they run from 34 % to 88 % of the icon's height, under a
+    # wordmark that sits in the top sixth.
+    mark = int(inner * 0.68)
+    origin_x = (size - mark) // 2
+    origin_y = int(size * 0.29)
+    unit = mark / 32.0
 
-    # Draw spectral bars (like the SVG logo in the web UI)
-    bar_data = [
-        (0.10, 0.44, 0.25, 0.40),   # x_center_frac, y_top_frac, height_frac, opacity
-        (0.22, 0.31, 0.50, 0.55),
-        (0.34, 0.19, 0.75, 0.70),
-        (0.46, 0.06, 0.88, 0.90),
-        (0.58, 0.13, 0.75, 0.85),
-        (0.70, 0.25, 0.50, 0.70),
-        (0.82, 0.38, 0.25, 0.50),
-    ]
+    ramp = Image.new('RGBA', (1, mark))
+    for y in range(mark):
+        ramp.putpixel((0, y), _gradient_colour(y / max(1, mark - 1)) + (255,))
+    ramp = ramp.resize((mark, mark), Image.Resampling.BILINEAR)
 
-    bar_width = size * 0.085
-    base_y = size * 0.85  # Bottom of bars
+    mask = Image.new('L', (mark, mark), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    for x, y, w, h, opacity in BRAND_BARS:
+        left = x * unit
+        top = y * unit
+        mask_draw.rounded_rectangle(
+            [left, top, left + w * unit, top + h * unit],
+            radius=max(1, int(unit * 0.5)),
+            fill=int(round(255 * opacity)),
+        )
 
-    for x_frac, y_frac, h_frac, opacity in bar_data:
-        cx = size * x_frac
-        bar_height = size * h_frac * 0.7
-        top = base_y - bar_height
-        left = cx - bar_width / 2
-        right = cx + bar_width / 2
+    img.paste(ramp, (origin_x, origin_y), mask)
 
-        # Gradient from blue at bottom to bright blue/white at top
-        n_segments = max(1, int(bar_height / 2))
-        for i in range(n_segments):
-            frac = i / max(1, n_segments - 1)
-            y0 = base_y - (i / n_segments) * bar_height
-            y1 = base_y - ((i + 1) / n_segments) * bar_height
-
-            # Color: electric blue gradient
-            r = int(30 + frac * 30)
-            g = int(100 + frac * 50)
-            b = int(220 + frac * 35)
-            a = int(255 * opacity * (0.6 + 0.4 * frac))
-
-            bar_radius = max(1, int(bar_width * 0.15))
-            draw.rounded_rectangle(
-                [left, y1, right, y0],
-                radius=bar_radius,
-                fill=(r, g, b, a),
-            )
-
-    # Draw "SASA" text at top
-    try:
-        # Try system fonts
-        font_size = int(size * 0.11)
-        for font_name in ['SF Pro Display', 'Helvetica Neue', 'Arial', 'Segoe UI']:
-            try:
-                font = ImageFont.truetype(font_name, font_size)
-                break
-            except (OSError, IOError):
-                continue
-        else:
-            font = ImageFont.load_default()
-    except Exception:
+    # Wordmark. In the light theme's ink, so it reads on the white ground.
+    font = None
+    font_size = int(size * 0.135)
+    for font_name in ['SF Pro Display', 'HelveticaNeue', 'Helvetica Neue',
+                      'Arial Bold', 'Arial', 'Segoe UI']:
+        try:
+            font = ImageFont.truetype(font_name, font_size)
+            break
+        except (OSError, IOError):
+            continue
+    if font is None:
         font = ImageFont.load_default()
 
-    # SASA text
-    text = "SASA"
-    text_color = (232, 232, 239, 230)
+    text = 'SASA'
     bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_x = (size - text_width) // 2
-    text_y = int(size * 0.03)
-    draw.text((text_x, text_y), text, fill=text_color, font=font)
+    draw.text(
+        ((size - (bbox[2] - bbox[0])) // 2 - bbox[0], int(size * 0.115) - bbox[1]),
+        text, fill=INK, font=font,
+    )
 
     return img
 

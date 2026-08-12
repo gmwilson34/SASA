@@ -342,7 +342,6 @@ hr.rule {
   color: var(--text-2);
   text-align: left;
   cursor: pointer;
-  border-left: 3px solid transparent;
   transition: background var(--duration-fast) var(--ease),
               color var(--duration-fast) var(--ease);
 }
@@ -350,9 +349,13 @@ hr.rule {
 .nav-item:hover { background: var(--bg-sunken); color: var(--text); }
 .nav-item:active { background: var(--bg-inset); }
 
+/* The active marker is the signal rail drawn in ::before further down, not a
+   border. The 3px transparent border this used to colour was a leftover from
+   before the rail existed: it painted nothing, and it pushed every navigation
+   item 3px right of the panel's own inset, so the header brand could not line
+   up with the icons no matter what the header did. */
 .nav-item[aria-current="page"] {
   background: var(--accent-wash);
-  border-left-color: var(--accent);
   color: var(--accent);
   font-weight: var(--weight-semibold);
 }
@@ -528,7 +531,10 @@ hr.rule {
 }
 
 @media (max-width: 640px) {
-  .brand-sub { display: none; }
+  /* .brand-sub used to be hidden here. It is now sr-only at every width, and
+     display:none would take it out of the accessibility tree as well, which is
+     the one place it still has a job. */
+
   /* In the collapsed strip the footer would only be clipped by the
      horizontal scroll, so it is dropped rather than half-shown. */
   .sidebar-footer { display: none; }
@@ -1034,10 +1040,17 @@ hr.rule {
 .check-text .field-hint { margin: 0; }
 
 /* Field grids ------------------------------------------------------------- */
+/* 17rem, not 14rem. At 14rem this grid produced four columns of about 220px
+   in the test record, and at that width every hint under a field wrapped to
+   two or three lines — so no two rows in a grid of eighteen fields ever lined
+   up, and the form read as a wall. Three wider columns let most hints sit on
+   one line and the rows resolve. The row gap is a step larger than the column
+   gap for the same reason: it groups the grid into rows for the eye. */
 .field-grid {
   display: grid;
-  gap: var(--space-4);
-  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-5) var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  align-items: start;
 }
 
 .field-grid-3 {
@@ -2162,6 +2175,7 @@ hr.rule {
   flex: 0 0 auto;
 }
 
+.legend-swatch[data-shot-marker] { background: var(--shot-marker); }
 .legend-swatch[data-series="1"] { background: var(--series-1); }
 .legend-swatch[data-series="2"] { background: var(--series-2); }
 .legend-swatch[data-series="3"] { background: var(--series-3); }
@@ -2375,6 +2389,1772 @@ hr.rule {
    light theme already defined in tokens.css.
    ============================================================================ */
 
+/* ============================================================================
+   STRING ANALYSIS
+   Findings, explanatory notes, and the flags a technician must read before a
+   string is reported. Colour here is semantic only: a finding's tone is its
+   severity, never decoration.
+   ============================================================================ */
+
+/* A short explanation attached to a card, set apart from the measured values
+   it describes so the two are never read as the same kind of content. */
+.card-note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  max-width: 68ch;
+}
+
+/* A standalone statement about the measurement's validity. */
+.note {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+.note-info   { background: var(--info-wash);   border-color: var(--info-border);   border-left-color: var(--info);   color: var(--text); }
+.note-warn   { background: var(--warn-wash);   border-color: var(--warn-border);   border-left-color: var(--warn);   color: var(--text); }
+.note-danger { background: var(--danger-wash); border-color: var(--danger-border); border-left-color: var(--danger); color: var(--text); }
+.note-ok     { background: var(--ok-wash);     border-color: var(--ok-border);     border-left-color: var(--ok);     color: var(--text); }
+
+/* The list of reasons a shot, or a comparison, needs attention. */
+.finding-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.finding {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+}
+.finding[data-severity="exclude"],
+.finding[data-severity="blocking"] { border-left-color: var(--danger); background: var(--danger-wash); }
+.finding[data-severity="review"],
+.finding[data-severity="material"] { border-left-color: var(--warn);   background: var(--warn-wash); }
+.finding[data-severity="info"],
+.finding[data-severity="advisory"] { border-left-color: var(--info);   background: var(--info-wash); }
+
+/* The shot number, in the tabular monospace every measured value uses, so it
+   lines up down the list. */
+.finding-id {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  color: var(--text);
+  white-space: nowrap;
+  padding-top: 0.1em;
+}
+.finding-body { min-width: 0; }
+.finding-message {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+/* The quantity a finding is worth, when physics can price it. */
+.finding-amount {
+  display: inline-block;
+  margin-top: var(--space-1);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+/* Card titles in this panel carry a glyph. The base .icon rule is display:block
+   so icons sit alone in buttons; inside a heading it has to run inline with the
+   text, aligned to the baseline rather than riding high above it. */
+.card-title > .icon,
+.section-title > .icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.4em;
+  vertical-align: -0.12em;
+  color: var(--text-3);
+  flex: none;
+}
+
+/* A tab that is carrying flags earns the warning tone on its counter. */
+.tab-count[data-tone="warn"]   { background: var(--warn-wash);   color: var(--warn);   border-color: var(--warn-border); }
+.tab-count[data-tone="danger"] { background: var(--danger-wash); color: var(--danger); border-color: var(--danger-border); }
+
+
+/* ============================================================================
+   INSTRUMENT LAYER — the bespoke pass
+   Ridgeback Defense
+
+   Everything below refines the components already defined above rather than
+   replacing them, so the markup is unchanged and every rule still resolves to a
+   token from tokens.css.
+
+   The design idea is one sentence: this is a measuring instrument, so it should
+   read as machined parts fitted together, not as a web page. That means hairline
+   chrome, tight corners, recessed wells for data, and exactly one ornament —
+   the signal rail, which is the spectrum-bar motif from the SASA mark reduced to
+   a 3px bar. The rail marks the thing you are currently reading and appears
+   nowhere else, so it always carries meaning.
+   ============================================================================ */
+
+/* ---- Focus: one treatment, everywhere -------------------------------------
+   A single agreed ring means a keyboard user never has to work out what kind of
+   control they are on from how its focus looks. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: var(--focus-width) solid var(--accent);
+  outline-offset: var(--focus-offset);
+  border-radius: var(--radius-sm);
+}
+
+/* ============================================================================
+   SIDEBAR — the instrument's control panel
+   ============================================================================ */
+
+.sidebar {
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-3) var(--space-3);
+  background: linear-gradient(
+    180deg, var(--bg-surface) 0%, var(--bg-surface) 65%, var(--bg-inset) 100%);
+}
+
+/* Section labels sit on a hairline that runs to the panel edge, so the nav
+   reads as labelled groups of controls rather than an undifferentiated list. */
+.nav-section-label,
+.sidebar .nav-heading,
+.sidebar h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.nav-section-label::after,
+.sidebar .nav-heading::after,
+.sidebar h2::after {
+  content: "";
+  flex: 1;
+  height: var(--hairline);
+  background: var(--border-subtle);
+}
+
+/* Nav items: the active one carries the signal rail on its leading edge. The
+   rail is drawn at zero width and grows, so the transition reads as the control
+   engaging rather than as a colour change. */
+.nav-item {
+  position: relative;
+  border-radius: var(--radius);
+  transition: background-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+.nav-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: var(--rail);
+  height: 0;
+  border-radius: 0 var(--rail-radius) var(--rail-radius) 0;
+  background: var(--signal-gradient);
+  transform: translateY(-50%);
+  transition: height var(--duration) var(--ease);
+}
+.nav-item[aria-current="page"]::before { height: 62%; }
+
+.nav-item:hover:not([aria-current="page"]):not(:disabled) {
+  background: var(--bg-sunken);
+}
+.nav-item[aria-current="page"] {
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+.nav-item[aria-current="page"] .icon { color: var(--accent); }
+.nav-item:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* The count badge is a measured value, so it is set in the tabular monospace
+   every other number in the app uses. */
+.nav-badge {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-sunken);
+  border: var(--hairline) solid var(--border-subtle);
+  color: var(--text-2);
+}
+.nav-item[aria-current="page"] .nav-badge {
+  background: var(--bg-surface);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* Brand: the mark sits on its own plinth, separated from the controls below by
+   a hairline, the way a nameplate is separate from the panel it is fixed to. */
+.brand {
+  gap: var(--space-3);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+}
+.brand:hover { background: var(--bg-sunken); }
+.brand-name {
+  letter-spacing: var(--tracking-wide);
+  font-weight: var(--weight-bold);
+}
+
+/* ============================================================================
+   HEADER
+   ============================================================================ */
+
+.app-header {
+  background: var(--bg-surface);
+  border-bottom: var(--hairline) solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ============================================================================
+   CARDS — measurement panels
+   ============================================================================ */
+
+/* The card must NOT clip its own contents.
+   The base rule sets overflow:hidden so the header's fill meets the rounded
+   corner cleanly. The cost is that an absolutely-positioned tooltip inside a
+   card is cut off at the card's edge — measured on the Analyze view, the
+   configuration tooltip lost 136px of itself that way. Field help that cannot
+   be read is field help that is not there.
+
+   So the clipping is released, and the two things that needed it are handled
+   directly: the header and the last child round their own outer corners, and
+   the tone rail is inset past the radius so it never meets a curve. */
+.card {
+  position: relative;
+  border-radius: var(--radius-md);
+  border-color: var(--border);
+  overflow: visible;
+}
+.card > .card-header:first-child {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+.card > :last-child {
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+}
+
+/* Cards in a grid stretch to the tallest in their row. As a block container the
+   extra height lands as dead space BELOW the last child — measured at 93px on
+   the Settings view, which left the "Manage profiles" footer floating in the
+   middle of its card. As a column the body takes the slack and the footer stays
+   on the bottom edge where a footer belongs. */
+.card {
+  display: flex;
+  flex-direction: column;
+}
+.card > .card-body { flex: 1 1 auto; }
+.card > .card-footer { margin-top: auto; }
+
+/* A card that carries a semantic tone gets the rail on its leading edge, in the
+   tone's colour. Tone is set by the same data-tone attribute the pills use, so
+   there is one vocabulary for validity across the whole interface.
+
+   The rail stops short of the corners by the corner radius, which both keeps it
+   clear of the rounded edge and reads as a deliberate accent rather than a
+   border that failed to reach the end. */
+.card[data-tone]::before {
+  content: "";
+  position: absolute;
+  inset: var(--radius-md) auto var(--radius-md) 0;
+  width: var(--rail);
+  border-radius: 0 var(--rail-radius) var(--rail-radius) 0;
+  background: var(--border);
+}
+.card[data-tone="ok"]::before     { background: var(--ok); }
+.card[data-tone="warn"]::before   { background: var(--warn); }
+.card[data-tone="danger"]::before { background: var(--danger); }
+.card[data-tone="info"]::before   { background: var(--info); }
+.card[data-tone="accent"]::before { background: var(--accent); }
+
+.card-header {
+  padding: var(--panel-pad-tight) var(--panel-pad);
+  background: linear-gradient(180deg, var(--bg-surface), var(--bg-inset));
+  border-bottom: var(--hairline) solid var(--border-subtle);
+}
+.card-title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.005em;
+}
+
+/* An eyebrow above a card title names the CATEGORY of thing being measured,
+   so the title itself can stay short. */
+.card-eyebrow {
+  display: block;
+  margin-bottom: 2px;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.card-body { padding: var(--panel-pad); }
+
+/* A recessed well for dense data inside a card. Data sits BELOW the panel
+   surface; controls sit on it. */
+.card-well {
+  margin: calc(var(--panel-pad) * -1);
+  margin-top: var(--panel-pad);
+  padding: var(--panel-pad);
+  background: var(--bg-inset);
+  border-top: var(--hairline) solid var(--border-subtle);
+}
+
+.card-grid { gap: var(--space-4); }
+
+/* ============================================================================
+   METRIC TILES — the headline readouts
+   ============================================================================ */
+
+.metric-grid { gap: var(--space-3); }
+
+.metric-tile {
+  position: relative;
+  gap: 0;
+  padding: var(--space-4) var(--space-5) 0;
+  border-top-width: var(--hairline);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: box-shadow var(--duration-fast) var(--ease);
+}
+.metric-tile:hover { box-shadow: var(--shadow); }
+
+/* The validity rail moves from the top edge to the leading edge, so a row of
+   tiles reads as a column of readouts rather than a row of tabs. */
+.metric-tile[data-tone]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--rail);
+  background: var(--border);
+}
+.metric-tile[data-tone="ok"]::before     { background: var(--ok); }
+.metric-tile[data-tone="warn"]::before   { background: var(--warn); }
+.metric-tile[data-tone="danger"]::before { background: var(--danger); }
+.metric-tile[data-tone="info"]::before   { background: var(--info); }
+.metric-tile[data-tone="accent"]::before { background: var(--accent); }
+
+.metric-tile .metric-label,
+.metric-tile [data-slot="label"] {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* The value is the hero. Tabular figures and a tight negative tracking keep a
+   six-digit reading from sprawling, and the baseline stays put as digits change. */
+.metric-tile .metric-value,
+.metric-tile [data-slot="value"] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-metric);
+  font-weight: var(--weight-semibold);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin-top: var(--space-2);
+}
+
+/* The unit is subordinate to the number but must never be lost: an unlabelled
+   level is the failure this whole application exists to prevent. */
+.metric-tile .metric-unit,
+.metric-tile [data-slot="unit"] {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-wide);
+  color: var(--text-3);
+}
+
+/* The caption drops into a recessed strip at the foot of the tile, so the
+   dispersion figures read as an annotation on the value above them. */
+.metric-tile .metric-caption,
+.metric-tile [data-slot="caption"] {
+  display: block;
+  margin: var(--space-3) calc(var(--space-5) * -1) 0;
+  padding: var(--space-2) var(--space-5);
+  background: var(--bg-inset);
+  border-top: var(--hairline) solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+/* A tile with no value must not look like a tile with a value of nothing. */
+.metric-tile[data-state="empty"] .metric-value,
+.metric-tile[data-state="empty"] [data-slot="value"] { color: var(--text-3); }
+
+/* ============================================================================
+   INPUT GROUPS
+   ============================================================================ */
+
+/* A prefix that is an ICON is part of the field, not a separate control. The
+   base treatment gives it its own fill and a divider, which makes a search box
+   read as a two-segment control. A prefix that is TEXT — a unit like "m" or
+   "dB" — keeps the fill and divider, because there it is genuinely a distinct
+   piece of information sitting beside the value.
+   Selected on content with :has(), so neither case needs new markup. */
+.input-group > .input-prefix:has(.icon) {
+  background: transparent;
+  border-right-color: transparent;
+  color: var(--text-3);
+}
+.input-group:focus-within { border-color: var(--accent); }
+
+/* ============================================================================
+   TABS
+   ============================================================================ */
+
+.tabs {
+  gap: 2px;
+  border-bottom: var(--hairline) solid var(--border);
+}
+.tab {
+  position: relative;
+  border-radius: var(--radius) var(--radius) 0 0;
+  transition: background-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+.tab::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px 0;
+  height: var(--rail);
+  border-radius: var(--rail-radius) var(--rail-radius) 0 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transition: transform var(--duration) var(--ease);
+}
+.tab[aria-selected="true"]::after { transform: scaleX(1); }
+.tab[aria-selected="true"] { color: var(--accent); font-weight: var(--weight-semibold); }
+.tab:hover:not([aria-selected="true"]) { background: var(--bg-sunken); }
+
+.tab-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xs);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  border: var(--hairline) solid var(--border-subtle);
+  background: var(--bg-sunken);
+  color: var(--text-2);
+}
+
+/* ============================================================================
+   TABLES — measured values in columns
+   ============================================================================ */
+
+/* Table headers are NOT uppercased.
+   A column header is the one label that routinely carries a unit — "Band (Hz)",
+   "Pa/FS", "Rise time (µs)" — and uppercasing turns Hz into HZ and Pa into PA,
+   neither of which is a unit. Since a stylesheet cannot know which header holds
+   a unit, none of them are transformed; the header reads as a header from its
+   size, weight, tracking and colour instead, which is also the better
+   typography for a dense numeric table. Use `.caps` deliberately on a label you
+   know is unit-free. */
+.data-table thead th {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: none;
+  color: var(--text-3);
+  background: var(--bg-inset);
+  border-bottom: var(--hairline) solid var(--border);
+}
+
+/* Escape hatch: put this on any element whose text contains a unit and which
+   sits inside a container that uppercases. It wins on specificity by being
+   later in the cascade at equal weight. */
+.unit-exact { text-transform: none !important; }
+.data-table td.num,
+.data-table th.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.data-table tbody tr:hover { background: var(--bg-inset); }
+
+/* ============================================================================
+   FIGURES
+   ============================================================================ */
+
+.figure {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: var(--hairline) solid var(--border);
+  background: var(--bg-surface);
+}
+.figure-toolbar {
+  padding: var(--space-3) var(--panel-pad);
+  background: linear-gradient(180deg, var(--bg-surface), var(--bg-inset));
+  border-bottom: var(--hairline) solid var(--border-subtle);
+}
+/* The plot sits in a well: it is data, and data is recessed. */
+.figure-canvas {
+  padding: var(--space-3);
+  background: var(--bg-inset);
+}
+.figure-caption {
+  padding: var(--space-3) var(--panel-pad);
+  margin: 0;
+  border-top: var(--hairline) solid var(--border-subtle);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+.section-title {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* ============================================================================
+   PILLS
+   ============================================================================ */
+
+/* Pills state a verdict, and a verdict increasingly carries a measured value
+   with it ("pop established · +3.80 dB"). The base rule uppercases pill text,
+   which turns "dB" into "DB" — and "DB" is not a unit. Casing in a measured
+   quantity is part of the quantity, so pills are set in small caps by size and
+   weight rather than by transforming the letters. */
+.pill {
+  text-transform: none;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  border-width: var(--hairline);
+}
+/* The measured part of a pill, so it lines up with every other number. */
+.pill .mono,
+.pill [data-value] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+   VIEW HEADERS
+   ============================================================================ */
+
+.view-title {
+  letter-spacing: -0.02em;
+  font-weight: var(--weight-bold);
+}
+.view-subtitle { color: var(--text-3); }
+
+/* ============================================================================
+   NARROW LAYOUT
+   Below 1024px the sidebar becomes a horizontal bar. A rail on the LEADING edge
+   of an item only reads as "this one" when the items are stacked; laid out in a
+   row it becomes a stray tick between neighbours. So in the horizontal layout
+   the rail moves to the bottom edge and becomes an underline, which is the same
+   idea rotated and matches how the result tabs already mark their selection.
+   ============================================================================ */
+@media (max-width: 1023px) {
+  .nav-item::before {
+    inset: auto 0 0 0;
+    width: auto;
+    height: 0;
+    border-radius: var(--rail-radius) var(--rail-radius) 0 0;
+    transform: none;
+    transition: height var(--duration) var(--ease);
+  }
+  .nav-item[aria-current="page"]::before { height: var(--rail); }
+
+  /* The sidebar's own gradient is vertical; in a row it would read as a
+     top-to-bottom fade across a horizontal bar. */
+  .sidebar {
+    background: var(--bg-surface);
+    padding: var(--space-2) var(--gutter);
+  }
+}
+
+/* ============================================================================
+   REDUCED MOTION
+   The rail and tab-underline animations are the only motion added here, and
+   both are decorative. Remove them rather than shorten them.
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .nav-item::before,
+  .tab::after { transition: none; }
+}
+
+/* ============================================================================
+   BESPOKE LAYER — command surface, guided flow, menus, motion
+   Ridgeback Defense
+
+   Three ideas, in order of how much they change the day:
+
+   1. THE FLOW IS A ROUTE, NOT A PAGE. Setting up a measurement used to be one
+      1,900-line scroll: everything visible, nothing prioritised, and no way to
+      tell finished from untouched. It is now five stops on a rail, one at a
+      time, each stop reporting its own state. The operator is never asked to
+      hold the whole form in their head.
+
+   2. EVERY ACTION HAS A NAME. The command palette reaches all of them, which
+      is what stops the chrome from growing a button per feature. The header
+      keeps three controls; the palette keeps the rest.
+
+   3. MOTION IS EVIDENCE. Something moves only to show where it came from, or
+      that the machine is working. A MEASURED VALUE NEVER ANIMATES between two
+      numbers — a reading that visibly settles is a reading the operator
+      watched be wrong. Values fade in at their final value or not at all.
+   ============================================================================ */
+
+/* ---- Keycaps --------------------------------------------------------------
+   A key is a physical object, so it gets a physical edge: a heavier bottom
+   border reads as the moulded lip of a keycap at 11px, where a full 3D
+   treatment would just read as noise. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 1.5rem;
+  height: 1.25rem;
+  padding: 0 var(--space-1);
+  border: var(--hairline) solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.kbd .icon { width: 0.85em; height: 0.85em; }
+
+
+/* ============================================================================
+   HEADER — the command surface
+   ============================================================================ */
+
+.app-header { z-index: var(--z-nav); }
+
+/* Leading edge is identity, trailing edge is action. The search sits with the
+   other controls on the right rather than floating in the middle of the bar,
+   which is where it read as a third, unrelated thing. */
+.app-header-actions { flex-wrap: nowrap; }
+
+/* The lead block is one sidebar wide, so the header and the navigation share
+   an edge instead of the brand overhanging the rule by 250px. The header gives
+   up its left gutter — the block carries the sidebar's own 12px inset instead.
+   Two things are aligned inside it, to two different lines:
+
+     the COLLAPSE control to the navigation it collapses. Its glyph lands on
+     the same 24px as every nav icon below it (12px of panel inset + 12px of
+     item padding), so the control reads as belonging to that column.
+
+     the BRAND to the rule. Its box closes on the sidebar's right edge, with
+     the panel's own 12px inset holding the wordmark off the line. */
+.app-header { padding-left: 0; }
+
+.app-header-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  width: var(--sidebar-width);
+  min-width: 0;
+  padding-left: var(--space-3);
+  padding-right: 0;
+}
+
+/* Left-aligned inside a wider box rather than centred in a 32px square, so the
+   glyph — not the button's edge — is what lines up with the nav icons. */
+.app-header-lead #btn-sidebar-toggle {
+  width: auto;
+  justify-items: start;
+  /* .btn-icon reserves a 1px transparent border for its hover state, and a
+     border-box button counts it before the padding. Without this the glyph
+     lands at 25px against the navigation's 24px — one pixel, but a visible
+     one on a vertical edge two elements are supposed to share. */
+  padding-left: calc(var(--space-3) - 1px);
+  padding-right: var(--space-2);
+}
+
+.app-header-lead .brand {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  padding-inline: var(--space-3);
+}
+
+/* Collapsed, there is no long edge left to align to — a 60px rail cannot hold
+   a mark and a button — so the block reverts to its natural width. */
+:root[data-sidebar="rail"] .app-header-lead { width: auto; }
+
+
+/* Reads as a search field because that is what it does. It is a button, so it
+   never traps focus or swallows a keystroke meant for the page. */
+.cmdk-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 1 24rem;
+  min-width: 0;
+  height: var(--space-8);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease),
+              background-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+
+.cmdk-trigger:hover {
+  border-color: var(--border-input);
+  background: var(--bg-surface);
+  color: var(--text-2);
+}
+
+.cmdk-trigger .icon { flex: 0 0 auto; width: var(--space-4); height: var(--space-4); }
+
+.cmdk-trigger-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An icon-only segmented control: the theme is a three-way choice that has to
+   stay reachable, but its labels were eating a quarter of the header. */
+.segmented-icon .segmented-option span {
+  padding-inline: var(--space-2);
+  gap: 0;
+}
+
+.btn-icon-quiet { color: var(--text-3); }
+.btn-icon-sm {
+  width: var(--space-6);
+  height: var(--space-6);
+  min-width: 0;
+  min-height: 0;
+}
+.btn-icon-sm .icon { width: var(--space-4); height: var(--space-4); }
+
+
+/* ============================================================================
+   MENUS
+   A menu is a surface that arrives from its trigger, so it scales out of the
+   corner nearest that trigger rather than fading in from nowhere.
+   ============================================================================ */
+
+.menu-wrap { position: relative; display: inline-flex; }
+
+.menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  min-width: 15rem;
+  padding: var(--space-1);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  transform-origin: top left;
+  animation: menu-in var(--duration) var(--ease) both;
+}
+
+.menu-end { left: auto; right: 0; transform-origin: top right; }
+.menu[hidden] { display: none; }
+
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item > span { flex: 1 1 auto; min-width: 0; }
+.menu-item .icon { flex: 0 0 auto; width: var(--space-4); height: var(--space-4); color: var(--text-3); }
+
+.menu-item:hover,
+.menu-item[data-active="true"] {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+.menu-item:hover .icon,
+.menu-item[data-active="true"] .icon { color: var(--accent); }
+
+.menu-item:disabled { opacity: 0.45; cursor: not-allowed; }
+.menu-item:disabled:hover { background: none; color: var(--text-2); }
+
+.menu-sep {
+  height: var(--hairline);
+  margin: var(--space-1) var(--space-2);
+  background: var(--border-subtle);
+}
+
+
+/* ============================================================================
+   COMMAND PALETTE
+   ============================================================================ */
+
+.palette {
+  width: min(42rem, calc(100vw - var(--space-8)));
+  max-width: none;
+  max-height: min(30rem, calc(100vh - 20vh));
+  /* Pinned near the top rather than centred: the eye is already up here,
+     having just pressed the key, and a centred panel makes the list jump
+     as it grows and shrinks under the typing. */
+  margin: 12vh auto auto;
+  padding: 0;
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.palette::backdrop { background: var(--scrim); }
+
+.palette[open] { animation: palette-in var(--duration) var(--ease) both; }
+
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+.palette-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--hairline) solid var(--border-subtle);
+}
+
+.palette-field-icon { flex: 0 0 auto; width: var(--space-5); height: var(--space-5); color: var(--text-3); }
+
+.palette-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: none;
+  font-size: var(--text-md);
+  color: var(--text);
+  outline: none;
+}
+
+.palette-input::placeholder { color: var(--text-3); }
+
+.palette-results {
+  max-height: 21rem;
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.palette-list { display: flex; flex-direction: column; gap: 1px; }
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  cursor: pointer;
+  scroll-margin: var(--space-2);
+}
+
+.palette-item-icon { flex: 0 0 auto; width: var(--space-4); height: var(--space-4); color: var(--text-3); }
+
+.palette-item-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+
+.palette-item-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-item-hint {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-item-group {
+  flex: 0 0 auto;
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Selection is driven from the keyboard, so it is marked by fill rather than
+   by the focus ring — the ring stays on the input, where the typing goes. */
+.palette-item[aria-selected="true"] {
+  background: var(--accent-wash);
+  box-shadow: inset var(--rail) 0 0 0 var(--accent);
+}
+.palette-item[aria-selected="true"] .palette-item-name,
+.palette-item[aria-selected="true"] .palette-item-icon { color: var(--accent); }
+
+.palette-item:hover:not([aria-selected="true"]) { background: var(--bg-sunken); }
+
+/* An unavailable command stays listed and stays legible — its hint says why —
+   but it never looks like something that will do anything. */
+.palette-item[aria-disabled="true"] { cursor: not-allowed; }
+.palette-item[aria-disabled="true"] .palette-item-name { color: var(--text-3); }
+.palette-item[aria-disabled="true"] .palette-item-icon { opacity: 0.5; }
+
+.palette-empty {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.palette-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-top: var(--hairline) solid var(--border-subtle);
+  background: var(--bg-inset);
+  font-size: var(--text-2xs);
+  color: var(--text-3);
+}
+
+.palette-legend { display: inline-flex; align-items: center; gap: var(--space-1); }
+
+
+/* ============================================================================
+   THE GUIDED FLOW
+
+   Five stops. The rail is the only place that knows the whole route; each
+   panel only has to be one step's worth of work.
+   ============================================================================ */
+
+.flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.stepper {
+  padding: var(--space-4) var(--space-2) var(--space-3);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.stepper-list { display: flex; align-items: flex-start; }
+
+.stepper-item {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The connector runs from the previous disc's centre to this one's, trimmed
+   at both ends by the disc radius so it meets the edge and not the number. */
+.stepper-item + .stepper-item::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--space-2) + var(--step-node) / 2 - var(--step-connector) / 2);
+  right: 50%;
+  left: -50%;
+  height: var(--step-connector);
+  margin-inline: calc(var(--step-node) / 2 + var(--space-2));
+  border-radius: var(--step-connector);
+  background: var(--border);
+  transition: background-color var(--duration) var(--ease);
+}
+
+/* A connector belongs to the leg BEFORE it, so it is coloured by the step it
+   leaves, not the step it arrives at. Colouring it from the arriving step —
+   which is what this did first — claimed the whole route up to that point was
+   finished when only that one stop was. */
+.stepper-item[data-state="done"] + .stepper-item::before { background: var(--accent); }
+
+.stepper-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-1);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+}
+
+.stepper-node:hover { background: var(--bg-sunken); }
+
+.stepper-disc {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--step-node);
+  height: var(--step-node);
+  border: var(--step-connector) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  transition: background-color var(--duration) var(--ease),
+              border-color var(--duration) var(--ease),
+              color var(--duration) var(--ease);
+}
+
+/* Number and tick occupy the same cell, so swapping one for the other never
+   moves the disc or the label beneath it. */
+.stepper-disc > * { grid-area: 1 / 1; }
+.stepper-mark { width: var(--space-4); height: var(--space-4); opacity: 0; }
+.stepper-num { opacity: 1; }
+
+.stepper-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; width: 100%; }
+
+.stepper-name {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepper-status {
+  font-size: var(--text-2xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- states --
+   Weight follows attention: the CURRENT step is the only filled disc, because
+   it is the one thing the operator is being asked to look at. A completed step
+   is an outline and a tick — present, accounted for, and quieter than the work
+   in hand. Filling the completed discs instead (the first arrangement here)
+   made a satisfied step out-shout the active one. */
+.stepper-item[data-state="current"] .stepper-disc {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  box-shadow: 0 0 0 var(--rail) var(--accent-wash);
+}
+.stepper-item[data-state="current"] .stepper-name { color: var(--accent); }
+
+.stepper-item[data-state="done"] .stepper-disc {
+  border-color: var(--accent-border);
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+.stepper-item[data-state="done"] .stepper-mark { opacity: 1; }
+.stepper-item[data-state="done"] .stepper-num { opacity: 0; }
+.stepper-item[data-state="done"] .stepper-name { color: var(--text); }
+
+.stepper-item[data-state="blocked"] .stepper-disc {
+  border-color: var(--warn);
+  background: var(--warn-wash);
+  color: var(--warn);
+}
+.stepper-item[data-state="blocked"] .stepper-status { color: var(--warn); }
+
+/* -- panels -- */
+.flow-panels { position: relative; }
+
+.flow-step { display: none; }
+
+.flow-step[data-active="true"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.flow-step[data-active="true"] { animation: step-in var(--duration-slow) var(--ease) both; }
+.flow[data-dir="back"] .flow-step[data-active="true"] { animation-name: step-in-back; }
+
+@keyframes step-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes step-in-back {
+  from { opacity: 0; transform: translateX(-14px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.flow-step .card + .card { margin-top: 0; }
+
+.flow-step-head { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.flow-step-title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.01em;
+}
+
+/* -- the bar -- */
+.flow-bar {
+  position: sticky;
+  bottom: var(--space-4);
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: var(--step-bar-h);
+  padding: var(--space-3) var(--panel-pad);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.flow-bar-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.flow-bar-status[data-tone="warn"] { color: var(--warn); }
+.flow-bar-status[data-tone="ok"] { color: var(--ok); }
+
+/* The run controls, wherever they currently are. */
+.row-actions { display: inline-flex; align-items: center; gap: var(--space-2); }
+
+
+/* ============================================================================
+   REVIEW SHEET — the configuration, restated before it is committed
+   ============================================================================ */
+
+.review-list { display: flex; flex-direction: column; }
+
+.review-row {
+  display: grid;
+  grid-template-columns: var(--space-5) minmax(6rem, 11rem) minmax(0, 1fr) var(--space-6);
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: var(--hairline) solid var(--border-subtle);
+}
+
+.review-row:last-child { border-bottom: 0; }
+
+.review-row-state { align-self: center; color: var(--ok); }
+.review-row-state .icon { width: var(--space-4); height: var(--space-4); }
+.review-row-state[data-tone="warn"] { color: var(--warn); }
+.review-row-state[data-tone="info"] { color: var(--text-3); }
+
+.review-row-label { font-size: var(--text-sm); color: var(--text-3); }
+
+.review-row-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.review-row-edit { align-self: center; justify-self: end; opacity: 0; }
+.review-row:hover .review-row-edit,
+.review-row-edit:focus-visible { opacity: 1; }
+
+
+/* ============================================================================
+   SIDEBAR — rail mode
+   The labels are the first thing to go when the window is the constraint, and
+   the glyph plus its tooltip is enough once the route is learned.
+   ============================================================================ */
+
+@media (min-width: 1024px) {
+  .app-shell {
+    transition: grid-template-columns var(--duration-slow) var(--ease-inout);
+  }
+
+  :root[data-sidebar="rail"] .app-shell {
+    grid-template-columns: var(--sidebar-width-rail) minmax(0, 1fr);
+  }
+
+  :root[data-sidebar="rail"] .sidebar { padding-inline: var(--space-2); }
+
+  :root[data-sidebar="rail"] .sidebar-group-label,
+  :root[data-sidebar="rail"] .nav-section-label,
+  :root[data-sidebar="rail"] .sidebar-footer,
+  :root[data-sidebar="rail"] .nav-item > span:not(.nav-badge) { display: none; }
+
+  :root[data-sidebar="rail"] .nav-item {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  /* The count still has to be legible, so it becomes a corner badge rather
+     than disappearing with the label it used to sit beside. */
+  :root[data-sidebar="rail"] .nav-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+    margin: 0;
+    transform: translate(25%, -25%);
+  }
+}
+
+
+/* ============================================================================
+   MOTION
+   Entrances only, and only where the arrival carries information: a view you
+   navigated to, a panel you opened, a toast that appeared. Nothing loops,
+   nothing bounces, and no measured number is ever tweened.
+   ============================================================================ */
+
+.view:not([hidden]) { animation: view-in var(--duration-slow) var(--ease) both; }
+
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Cards inside a freshly revealed panel arrive in reading order. The cap at
+   eight keeps the last card in a long panel from waiting a third of a second
+   for its turn. */
+.tabpanel:not([hidden]) > *,
+.flow-step[data-active="true"] > .card {
+  animation: card-in var(--duration) var(--ease) both;
+}
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.tabpanel:not([hidden]) > *:nth-child(1),
+.flow-step[data-active="true"] > .card:nth-of-type(1) { animation-delay: 0ms; }
+.tabpanel:not([hidden]) > *:nth-child(2),
+.flow-step[data-active="true"] > .card:nth-of-type(2) { animation-delay: calc(var(--stagger) * 1); }
+.tabpanel:not([hidden]) > *:nth-child(3),
+.flow-step[data-active="true"] > .card:nth-of-type(3) { animation-delay: calc(var(--stagger) * 2); }
+.tabpanel:not([hidden]) > *:nth-child(4),
+.flow-step[data-active="true"] > .card:nth-of-type(4) { animation-delay: calc(var(--stagger) * 3); }
+.tabpanel:not([hidden]) > *:nth-child(n + 5),
+.flow-step[data-active="true"] > .card:nth-of-type(n + 5) { animation-delay: calc(var(--stagger) * 4); }
+
+/* A control answers a press. One pixel, because an instrument's keys have
+   travel measured in fractions of a millimetre, not in bounce. */
+.btn { transition: background-color var(--duration-fast) var(--ease),
+                   border-color var(--duration-fast) var(--ease),
+                   color var(--duration-fast) var(--ease),
+                   box-shadow var(--duration-fast) var(--ease),
+                   transform var(--duration-instant) var(--ease); }
+
+.btn:active:not(:disabled):not([aria-disabled="true"]) { transform: translateY(1px); }
+
+.btn-icon { transition: background-color var(--duration-fast) var(--ease),
+                        color var(--duration-fast) var(--ease),
+                        transform var(--duration-instant) var(--ease); }
+.btn-icon:active:not(:disabled) { transform: translateY(1px); }
+
+/* The indeterminate bar has to say "working" without claiming a fraction it
+   does not know. A travelling highlight does that; a filling bar would lie. */
+.progress[data-state="indeterminate"] .progress-fill {
+  background: linear-gradient(90deg,
+    var(--accent-wash) 0%, var(--accent) 45%, var(--accent) 55%, var(--accent-wash) 100%);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: progress-sweep 1.4s var(--ease-inout) infinite;
+}
+
+@keyframes progress-sweep {
+  from { background-position: -45% 0; }
+  to   { background-position: 145% 0; }
+}
+
+
+/* ============================================================================
+   INTERACTIVE CHARTS
+
+   Two canvases in one box. The lower one is the plot and is repainted only
+   when the data changes; the upper one carries the crosshair and the drag
+   selection and is repainted on every pointer move. Nothing here may capture
+   the pointer except the container, or the overlay would eat the events meant
+   to drive it.
+   ============================================================================ */
+
+.chart {
+  position: relative;
+  display: block;
+  width: 100%;
+  /* Without this a drag on a touch screen scrolls the page instead of
+     selecting a range. */
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.chart:focus-visible {
+  outline: var(--focus-width) solid var(--accent);
+  outline-offset: var(--focus-offset);
+  border-radius: var(--radius-sm);
+}
+
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.chart-readout {
+  position: absolute;
+  z-index: 1;
+  min-width: 11rem;
+  max-width: 18rem;
+  padding: var(--space-2) var(--space-3);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  /* No transition on position: the readout must arrive where the cursor is
+     NOW. A 100 ms ease would put the number a hundred milliseconds behind the
+     band it is labelling, which on a chart is simply a wrong reading. */
+}
+
+.chart-readout-head {
+  margin-bottom: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-bottom: var(--hairline) solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+
+.chart-readout-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+}
+
+.chart-readout-swatch {
+  flex: 0 0 auto;
+  align-self: center;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.chart-readout-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-readout-value {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+
+.chart-reset {
+  position: absolute;
+  top: var(--space-2);
+  right: calc(var(--space-8) + var(--space-2));
+  z-index: 2;
+}
+
+/* Quiet until the pointer is over the chart: an export button on every figure,
+   permanently lit, would be eight identical icons competing with the data. */
+.chart-save {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 2;
+  opacity: 0;
+  background: var(--bg-surface);
+  border: var(--hairline) solid var(--border);
+  transition: opacity var(--duration-fast) var(--ease),
+              background-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+
+.chart:hover .chart-save,
+.chart:focus-within .chart-save,
+.chart-save:focus-visible { opacity: 1; }
+
+.chart-hint {
+  margin-top: var(--space-1);
+  font-size: var(--text-2xs);
+  color: var(--text-3);
+  text-align: right;
+}
+
+/* A figure inside a card grid needs the whole row: a chart squeezed into one
+   column of a two-column grid has no horizontal resolution left to read. */
+.figure-span { grid-column: 1 / -1; }
+
+/* The record: four groups of the same kind of thing, in one card. Column
+   headings carry the grouping that four separate cards used to, at a fraction
+   of the chrome. */
+.record-columns {
+  display: grid;
+  gap: var(--space-6) var(--space-8);
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  align-items: start;
+}
+
+.record-column-title {
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: var(--hairline) solid var(--border-subtle);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Long opaque strings — a commit, a SHA-256 — must wrap inside their column
+   rather than force it wider and squeeze the other three. */
+.record-column .kv-list dd { overflow-wrap: anywhere; }
+
+
+/* ============================================================================
+   HISTORY — a row that says it opens
+
+   The row was a button with no outward sign of being one: no chevron, and a
+   hover that only moved a border colour. It now carries the same arrow the
+   command palette uses for "go here", which slides in under the cursor and
+   sits permanently for a keyboard user who has focused the row.
+   ============================================================================ */
+
+/* The glyph comes from the sprite in the row's own markup rather than from a
+   data: URI in this file, so it is the same chevron the rest of the interface
+   uses and it changes in one place. */
+.history-item-go {
+  justify-self: end;
+  width: var(--space-5);
+  height: var(--space-5);
+  color: var(--text-3);
+  opacity: 0;
+  transform: translateX(calc(var(--space-1) * -1));
+  transition: opacity var(--duration-fast) var(--ease),
+              transform var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+
+.history-item:hover .history-item-go,
+.history-item:focus-visible .history-item-go {
+  opacity: 1;
+  transform: none;
+  color: var(--accent);
+}
+
+.history-item {
+  /* One more column for the chevron. */
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(7rem, 1fr)) auto var(--space-5);
+}
+
+.history-item:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow);
+}
+
+
+/* ============================================================================
+   FIGURES — a saved plate, mounted
+
+   Figures are written once at analysis time in the light theme, because they
+   are the same images that go into the printed report. In the dark theme that
+   means the interface is displaying a light image, and the honest way to show
+   one is to mount it: give it its own plinth in the figure's own paper colour,
+   a hairline surround and a corner radius, so it reads as a print on a panel
+   instead of as a hole in the page. The canvas-drawn charts are theme-aware
+   and opt out.
+   ============================================================================ */
+
+.figure-canvas:has(img) {
+  background: var(--plot-plinth);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius);
+}
+
+.figure-canvas:has(canvas) {
+  background: var(--bg-inset);
+  border: 0;
+}
+
+
+/* ============================================================================
+   MEASUREMENT VALIDITY — the verdict is toned, the evidence is not
+
+   The verdict panel used to wash its whole area in the verdict's colour, which
+   meant eight checks — seven of them passing — sat inside a solid amber field
+   because one had a caution. Amber is the loudest thing in the interface and
+   it was being spent on evidence that mostly said "fine". The tone now marks
+   the verdict: a leading rail, a tinted head, and the checks on the ordinary
+   panel surface where their own green and amber glyphs can be read.
+   ============================================================================ */
+
+.validity-banner {
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-color: var(--border);
+  border-left-width: var(--rail);
+}
+
+.validity-banner[data-tone="ok"]     { border-left-color: var(--ok); }
+.validity-banner[data-tone="warn"]   { border-left-color: var(--warn); }
+.validity-banner[data-tone="danger"] { border-left-color: var(--danger); }
+.validity-banner[data-tone="info"]   { border-left-color: var(--info); }
+
+.validity-head {
+  gap: var(--space-3);
+  padding: var(--panel-pad);
+  border-bottom: var(--hairline) solid var(--border-subtle);
+}
+
+.validity-banner[data-tone="ok"]     .validity-head { background: var(--ok-wash); }
+.validity-banner[data-tone="warn"]   .validity-head { background: var(--warn-wash); }
+.validity-banner[data-tone="danger"] .validity-head { background: var(--danger-wash); }
+.validity-banner[data-tone="info"]   .validity-head { background: var(--info-wash); }
+
+.validity-banner .check-grid {
+  padding: var(--panel-pad);
+  background: var(--bg-surface);
+}
+
+/* A passing check needs the faintest container the layout allows — its green
+   glyph already says everything. Only the checks that want attention get a
+   fill, which is what makes them findable in a grid of eight. */
+.check-item[data-state="pass"] {
+  background: var(--bg-inset);
+  border-color: var(--border-subtle);
+}
+.check-item[data-state="warn"] { background: var(--warn-wash); }
+.check-item[data-state="fail"] { background: var(--danger-wash); }
+
+
+/* ============================================================================
+   FIELDS — how a value is asked for
+
+   The test record is eighteen fields in four columns. Two things were making
+   it read as a wall rather than as a form: every required field shouted the
+   word REQUIRED in red before the operator had touched anything, and the
+   hints under the inputs ran to one, two or three lines apiece, so no two
+   rows lined up and the eye had nothing to follow.
+   ============================================================================ */
+
+/* A required marker is a fact about the field, not an accusation. It stays
+   quiet until the operator has been past it and left it empty — at which
+   point it is a genuine reminder and is allowed to be loud. */
+.field-req {
+  color: var(--text-3);
+  font-weight: var(--weight-medium);
+}
+
+.field[data-outstanding="true"] .field-req {
+  color: var(--warn);
+  font-weight: var(--weight-semibold);
+}
+
+.field[data-outstanding="true"] > .input,
+.field[data-outstanding="true"] > .select,
+.field[data-outstanding="true"] > .input-group { border-color: var(--warn-border); }
+
+/* Guidance versus constraint, and the split is made by hand in the markup
+   rather than by a rule of thumb about length.
+     - A CONSTRAINT governs what may be typed ("Range 1-60 in.").
+     - A CONVENTION defines what the number means ("0 deg is downrange").
+       Getting this wrong corrupts the record silently, so it is never hidden.
+     - GUIDANCE is advice about how to take the measurement well. It is wanted
+       while that one field is being filled and is prose in the way of the next
+       input the rest of the time.
+   Only guidance collapses. It stays in the accessibility tree throughout —
+   collapsed, not display:none — so aria-describedby still resolves for a
+   screen reader reading the form in browse mode, and it opens on hover as
+   well as focus so it can be read without committing to the field. */
+#metadata-form .field-hint[data-detail="true"] {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height var(--duration) var(--ease),
+              opacity var(--duration-fast) var(--ease);
+}
+
+#metadata-form .field:focus-within .field-hint[data-detail="true"],
+#metadata-form .field:hover .field-hint[data-detail="true"] {
+  max-height: 8rem;
+  opacity: 1;
+}
+
+/* Each group states its own completion, so "11 missing" at the top of the
+   card resolves to somewhere to go. */
+.fieldset-count {
+  margin-left: auto;
+  padding: 1px var(--space-2);
+  border: var(--hairline) solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-3);
+}
+
+.fieldset-count[data-state="complete"] {
+  border-color: var(--ok-border);
+  background: var(--ok-wash);
+  color: var(--ok);
+}
+
+/* Deliberately neutral while there is work left, and only green when the group
+   is finished. A count of what remains is a fact, not a fault — painting it
+   amber alongside the amber on the rail and the amber on the step bar made a
+   form nobody had touched yet look like a form full of mistakes. */
+.fieldset-count[data-state="outstanding"] {
+  border-color: var(--border);
+  background: var(--bg-inset);
+  color: var(--text-3);
+}
+
+/* ============================================================================
+   NARROW LAYOUT — the flow
+   ============================================================================ */
+
+@media (max-width: 1023px) {
+  /* In the horizontal bar the footer is a stray line of version text sitting
+     among the navigation items. It belongs to the vertical panel. */
+  .sidebar-footer { display: none; }
+
+  /* The sidebar is a row here, so there is no rule to align to. The lead block
+     takes its natural width and picks up the page gutter, which is the inset
+     the horizontal nav uses. */
+  .app-header-lead {
+    width: auto;
+    padding-left: var(--gutter);
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 899px) {
+  .stepper-status { display: none; }
+  .stepper-name { font-size: var(--text-2xs); }
+
+  /* Back left, Continue right, reason underneath — the wrap must not let the
+     two buttons collapse together into an ambiguous pair. */
+  .flow-bar { flex-wrap: wrap; justify-content: space-between; }
+  .flow-bar-status { order: 3; flex-basis: 100%; text-align: left; }
+
+  .cmdk-trigger-text { display: none; }
+  .cmdk-trigger { flex: 0 0 auto; }
+}
+
+@media (max-width: 639px) {
+  .stepper-text { display: none; }
+  .stepper-node { padding-inline: 0; }
+  .review-row { grid-template-columns: var(--space-5) minmax(0, 1fr) var(--space-6); }
+  .review-row-value { grid-column: 2 / -1; }
+}
+
+
+/* ============================================================================
+   REDUCED MOTION — the second pass
+   The global rule in tokens.css collapses durations; these entrances also set
+   an opening opacity of 0, so they are removed outright rather than run
+   instantly, which would still flash.
+   ============================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  .view:not([hidden]),
+  .tabpanel:not([hidden]) > *,
+  .flow-step[data-active="true"],
+  .flow-step[data-active="true"] > .card,
+  .palette[open],
+  .menu { animation: none; }
+
+  .progress[data-state="indeterminate"] .progress-fill {
+    animation: none;
+    background: var(--accent);
+    background-size: 100% 100%;
+  }
+
+  .btn:active:not(:disabled),
+  .btn-icon:active:not(:disabled) { transform: none; }
+
+  .app-shell { transition: none; }
+}
+
+
 @media print {
   :root,
   :root[data-theme="light"],
@@ -2456,7 +4236,38 @@ hr.rule {
   .progress,
   .log,
   .empty-state,
-  .skeleton { display: none !important; }
+  .skeleton,
+  .stepper,
+  .flow-bar,
+  .palette,
+  .menu,
+  .cmdk-trigger,
+  .kbd,
+  .review-row-edit { display: none !important; }
+
+  /* On paper, the engine's figure, not the browser's.
+     The interactive charts are drawn on a canvas at screen resolution and at
+     the screen's aspect; the PNG beside them was rendered by matplotlib at
+     print resolution for exactly this purpose. So the canvas gives way to the
+     image when the page is printed, and the interactive chrome goes with it.
+     Both are drawn from the same samples, so they cannot disagree. */
+  .figure-canvas > canvas,
+  .chart,
+  .chart-hint,
+  .chart-readout,
+  .chart-reset,
+  .chart-save { display: none !important; }
+
+  #img-waveform[hidden] { display: block !important; }
+
+  /* On paper the flow is a record of what was configured, not a route to walk,
+     so every step prints, in order, with its own heading. */
+  .flow-step { display: block !important; animation: none !important; }
+  .flow-step + .flow-step { margin-top: var(--space-6); }
+
+  .view:not([hidden]),
+  .tabpanel:not([hidden]) > *,
+  .flow-step[data-active="true"] > .card { animation: none !important; }
 
   .app-shell { display: block; }
 

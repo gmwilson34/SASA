@@ -51,3 +51,6 @@ weighting_response.png
 *.stft_z.png
 *.stft_a.png
 *.stft_data.npz
+
+# graphify knowledge-graph output — generated, not source
+graphify-out/

@@ -62,12 +62,69 @@
   --radius-pill: 999px;
 
   /* ---- Motion --------------------------------------------------------- */
-  --ease: cubic-bezier(0.32, 0.72, 0, 1);
-  --duration-fast: 110ms;
-  --duration: 180ms;
+  /* Motion here is functional: it shows where a thing came from, or that the
+     machine is working. Nothing moves for delight alone, and NO MEASURED VALUE
+     IS EVER ANIMATED FROM A WRONG NUMBER TO A RIGHT ONE — a reading that
+     visibly settles is a reading the operator saw lie. Values fade; they do
+     not count. */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);       /* decelerate — the default */
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);        /* leaving the screen */
+  --ease-inout: cubic-bezier(0.65, 0, 0.35, 1); /* moving between two places */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1); /* a control answering a press */
 
-  --sidebar-width: 240px;
+  --duration-instant: 70ms;   /* state echo: hover, press */
+  --duration-fast: 110ms;     /* a control changing state */
+  --duration: 180ms;          /* an element arriving or leaving */
+  --duration-slow: 280ms;     /* a surface: panel, sheet, dialog */
+  --stagger: 32ms;            /* between siblings entering together */
+
+  /* ---- Elevation ------------------------------------------------------ */
+  /* Four planes. Anything that floats states which plane it is on, so two
+     floating things never argue about who is in front. */
+  --z-base: 0;
+  --z-sticky: 20;      /* sticky table headers, step footer bar */
+  --z-nav: 40;         /* app header, sidebar */
+  --z-dropdown: 60;    /* menus, comboboxes */
+  --z-overlay: 80;     /* dialog scrim + dialog */
+  --z-palette: 90;     /* the command palette sits above a dialog */
+  --z-toast: 100;      /* always last, always readable */
+
+  /* 208px, measured rather than chosen. The widest thing the panel has to
+     hold is 102px ("Ridgeback Defense" in the footer; the widest NAV item is
+     smaller still at ~90px including its icon, gap and count badge). At the
+     old 252px that left 126px of slack inside a 252px panel — half the
+     column was empty, and every pixel of it came out of the measurement
+     area. 208px keeps a comfortable margin on the longest label and returns
+     44px to the content. */
+  --sidebar-width: 208px;
+  --sidebar-width-rail: 60px;
   --content-max: 1440px;
+
+  /* ---- Instrument identity -------------------------------------------- */
+  /* The signal rail. A 3px bar that marks the active surface, and the one
+     ornament in the interface: it is the spectrum-bar motif from the SASA mark,
+     reduced to its smallest useful form. It appears on the active navigation
+     item, on the leading edge of a measurement panel, and nowhere else, so its
+     presence always means "this is the thing you are reading". */
+  --rail: 3px;
+  --rail-radius: 2px;
+
+  /* Panel geometry. An instrument reads as machined parts fitted together, so
+     the chrome is hairline and the corners are tight. */
+  --hairline: 1px;
+  --panel-pad: var(--space-5);
+  --panel-pad-tight: var(--space-4);
+
+  /* A focus ring thick enough to find and offset enough to read against a
+     hairline border. Defined once so every focusable element agrees. */
+  --focus-width: 2px;
+  --focus-offset: 2px;
+
+  /* Stepper geometry. The guided flow is the spine of the application, so its
+     dimensions are tokens rather than numbers buried in a rule. */
+  --step-node: 28px;         /* the numbered disc */
+  --step-connector: 2px;     /* the line between two discs */
+  --step-bar-h: 64px;        /* the sticky Back / Next bar */
 }
 
 /* ============================================================================
@@ -109,6 +166,9 @@
   --shadow-inset: inset 0 1px 2px rgba(15, 20, 26, 0.05);
 
   --plot-bg: #FFFFFF;
+  /* The plinth a saved figure is mounted on. See the dark theme for why this
+     is a token rather than just --bg-inset. */
+  --plot-plinth: #F7F9FB;
   --scrim: rgba(15, 20, 26, 0.42);
 }
 
@@ -150,6 +210,17 @@
   --shadow-inset: inset 0 1px 2px rgba(0, 0, 0, 0.35);
 
   --plot-bg: #0F1419;
+  /* Deliberately WHITE in the dark theme, and it is not an oversight.
+     plots.py renders saved figures in the light theme on purpose — they are
+     written once, at analysis time, and they end up in a printed report (see
+     plots.py, "LIGHT is the default theme. Saved figures go on paper"). So in
+     a dark room the interface is showing a light plate. Left on --bg-inset,
+     that plate floated in the dark panel as a hard white rectangle that read
+     as a rendering fault. Matched to the figure's own savefig facecolor
+     (#FFFFFF) it reads as what it is: a printed chart mounted on the panel.
+     Inverting the image instead was rejected outright — a filter that flips a
+     spectrogram's colormap changes what the measurement appears to say. */
+  --plot-plinth: #FFFFFF;
   --scrim: rgba(3, 6, 10, 0.62);
 }
 
@@ -188,6 +259,7 @@
     --shadow-inset: inset 0 1px 2px rgba(0, 0, 0, 0.35);
 
     --plot-bg: #0F1419;
+    --plot-plinth: #FFFFFF;
     --scrim: rgba(3, 6, 10, 0.62);
   }
 }
@@ -199,6 +271,18 @@
    deuteranopia-safe: the sequence never relies on a red/green distinction to
    separate adjacent series.
    ============================================================================ */
+/* The signal gradient: the six series colours in order, used only for the brand
+   mark and the active navigation rail. It is the one place in the interface
+   where colour is decorative, and it is decorative because it IS the product's
+   subject - a spectrum. */
+:root {
+  --signal-gradient: linear-gradient(
+    180deg,
+    var(--series-1) 0%, var(--series-3) 22%, var(--series-4) 45%,
+    var(--series-6) 68%, var(--series-2) 86%, var(--series-5) 100%
+  );
+}
+
 :root {
   --series-1: #14508C;  /* Z-weighted */
   --series-2: #B45309;  /* A-weighted */

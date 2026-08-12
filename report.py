@@ -926,8 +926,15 @@ td.field {{ width: 32%; color: {C['text_2']}; }}
         border: 1px solid {C['info_border']}; background: {C['info_wash']}; color: {C['text']}; }}
 .note.warn {{ border-color: {C['warn_border']}; background: {C['warn_wash']}; }}
 .note.danger {{ border-color: {C['danger_border']}; background: {C['danger_wash']}; }}
+.note.ok {{ border-color: {C['ok_border']}; background: {C['ok_wash']}; }}
 .note strong {{ color: {C['danger']}; }}
 .note.warn strong {{ color: {C['warn']}; }}
+.note.ok strong {{ color: {C['ok']}; }}
+
+/* A list of per-shot or per-comparison findings. Each item carries its own
+   severity flag, so the list is never colour alone. */
+.findings {{ margin: 10px 0 0; padding-left: 20px; }}
+.findings li {{ margin-bottom: 6px; line-height: 1.5; }}
 
 .flag {{ display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px;
         border-radius: 999px; border: 1px solid; margin-right: 4px; white-space: nowrap; }}
@@ -1344,6 +1351,7 @@ def _section_insertion_loss(metadata: Dict[str, Any], validity: ValidityReport) 
   {ref_note}
   {invalid_note}
   {caveats}
+  {_comparability_block(metadata)}
   <div class="tablewrap">
     <table>
       <caption>Insertion loss = reference level − test level. Positive values mean
@@ -1358,8 +1366,343 @@ def _section_insertion_loss(metadata: Dict[str, Any], validity: ValidityReport) 
     </table>
   </div>
   {band_table}
+  {_normalised_bands_block(metadata, validity)}
 </section>
 """
+
+
+_STRING_METRIC_LABELS = {
+    "Lpeak_Z": "Peak, Z-weighted",
+    "Lpeak_A": "Peak, A-weighted",
+    "LAE": "Sound exposure level",
+}
+
+
+def _section_string_behaviour(metadata: Dict[str, Any], validity: ValidityReport) -> str:
+    """
+    How the string behaved over its length, rather than what it averaged to.
+
+    A suppressor is bought on two numbers a single average hides: what the first
+    round out of a cold can costs, and whether the string held together at all.
+    Both are stated here, with the evidence for each, and both say plainly when
+    the measurement could not establish them.
+    """
+    breakdown = _map(metadata, "string_statistics")
+    review = _map(metadata, "shot_review")
+    unit = validity.level_unit
+
+    if not breakdown and not review:
+        return ""
+
+    # -- first-round pop --
+    headline = None
+    for key in ("Lpeak_Z", "Lpeak_A", "LAE"):
+        if isinstance(breakdown.get(key), dict):
+            headline = breakdown[key]
+            break
+    pop = _map(headline or {}, "first_round_pop")
+
+    if not pop:
+        pop_block = (
+            '<div class="note">First-round pop was not evaluated for this '
+            'measurement.</div>'
+        )
+    elif pop.get("refusal"):
+        pop_block = (
+            f'<div class="note warn"><strong>First-round pop: not measured.</strong> '
+            f'{_e(str(pop["refusal"]))}</div>'
+        )
+    elif pop.get("established"):
+        pop_block = f"""
+  <div class="note danger">
+    <strong>First-round pop established: {_e(_num(pop.get("observed_dB"), 2))} dB.</strong>
+    The first round measured {_e(_num(pop.get("first_shot_dB"), 1))} {_e(unit)} against
+    {_e(_num(pop.get("subsequent_mean_dB"), 1))} {_e(unit)} for the
+    {_e(_txt(pop.get("n_subsequent"), missing="—"))} rounds that followed. A further
+    shot from this string would have been expected between
+    {_e(_num(pop.get("prediction_lower_dB"), 1))} and
+    {_e(_num(pop.get("prediction_upper_dB"), 1))} {_e(unit)}; the first round fell
+    outside that interval (one-sided p = {_e(_num(pop.get("p_value"), 4))}).
+  </div>"""
+    elif pop.get("first_shot_quieter"):
+        pop_block = (
+            '<div class="note warn"><strong>The first round was QUIETER than the rest '
+            'of the string explains.</strong> That is not first-round pop; it points at '
+            'a squib, a misfire or a detection error, and the string should be '
+            'reviewed before this result is relied on.</div>'
+        )
+    else:
+        pop_block = f"""
+  <div class="note ok">
+    <strong>No first-round pop this measurement can resolve.</strong>
+    The first round measured {_e(_num(pop.get("first_shot_dB"), 1))} {_e(unit)}, inside
+    the {_e(_num(pop.get("prediction_lower_dB"), 1))} to
+    {_e(_num(pop.get("prediction_upper_dB"), 1))} {_e(unit)} interval a further shot
+    from this string would have been expected to fall in
+    (one-sided p = {_e(_num(pop.get("p_value"), 4))}). This is not proof that the
+    suppressor does not pop: it means any pop is smaller than the shot-to-shot
+    spread of this string.
+  </div>"""
+
+    single_string_caveat = ""
+    if pop and pop.get("basis") == "single-string" and not pop.get("refusal"):
+        single_string_caveat = (
+            '<div class="note">This is one first round, from one string. A first-round '
+            'pop figure that supports a published claim needs the first shot of several '
+            'strings, each fired into a can that has been allowed to purge.</div>'
+        )
+
+    # -- with and without the first round --
+    mean_rows = []
+    for key, label in _STRING_METRIC_LABELS.items():
+        stats = breakdown.get(key)
+        if not isinstance(stats, dict):
+            continue
+        mean_rows.append(
+            f'<tr><td>{_e(label)}</td>'
+            f'<td class="num">{_num(stats.get("energy_mean_dB"), 1)}</td>'
+            f'<td class="num">{_num(stats.get("energy_mean_excluding_first_dB"), 1)}</td>'
+            f'<td class="num"><strong>{_num(stats.get("first_round_cost_dB"), 2)}</strong></td>'
+            f'</tr>')
+
+    means_table = ""
+    if mean_rows:
+        means_table = f"""
+  <div class="tablewrap">
+    <table>
+      <caption>A suppressor that pops has two honest averages: the one a shooter
+      hears including the first round of the day, and the one they hear thereafter.
+      Quoting only the second is the commonest way a suppressor test flatters its
+      subject, so both are given. All levels in {_e(unit)}.</caption>
+      <thead><tr>
+        <th>Metric</th><th class="num">All shots</th>
+        <th class="num">Excluding first</th><th class="num">First-round cost</th>
+      </tr></thead>
+      <tbody>{''.join(mean_rows)}</tbody>
+    </table>
+  </div>"""
+
+    # -- distribution and drift --
+    spread_rows = []
+    if isinstance(headline, dict):
+        percentiles = headline.get("percentiles_dB") or {}
+        percentile_text = "  ".join(
+            f"p{k} {_num(v, 1)}" for k, v in
+            sorted(percentiles.items(), key=lambda kv: float(kv[0]))
+        ) if percentiles else "—"
+        trend = headline.get("trend_dB_per_shot")
+        if trend is None:
+            trend_text = "not tested (too few shots)"
+        elif headline.get("trend_established"):
+            trend_text = (
+                f'{_num(trend, 3)} dB per shot — <span class="flag warn">drift '
+                f'established</span> (p = {_num(headline.get("trend_p_value"), 3)})'
+            )
+        else:
+            trend_text = (
+                f'{_num(trend, 3)} dB per shot — no drift established '
+                f'(p = {_num(headline.get("trend_p_value"), 3)})'
+            )
+        for label, value in (
+            ("Spread", f'{_num(headline.get("min_dB"), 1)} to '
+                       f'{_num(headline.get("max_dB"), 1)} {unit} '
+                       f'(range {_num(headline.get("range_dB"), 2)} dB)'),
+            ("Standard deviation", f'{_num(headline.get("sd_dB"), 2)} dB'),
+            ("Percentiles", percentile_text),
+            ("Drift across the string", trend_text),
+        ):
+            spread_rows.append(
+                f'<tr><td class="field">{_e(label)}</td><td>{value}</td></tr>')
+
+    spread_table = ""
+    if spread_rows:
+        spread_table = f"""
+  <div class="tablewrap">
+    <table>
+      <caption>Distribution of the {_metric_label("Lpeak_Z")} across the string.
+      Drift is measured from the second shot onward, so first-round pop cannot be
+      read as a heating trend.</caption>
+      <thead><tr><th>Property</th><th>Value</th></tr></thead>
+      <tbody>{''.join(spread_rows)}</tbody>
+    </table>
+  </div>"""
+
+    # -- shots flagged for review --
+    flags = [f for f in _seq(review, "flags")
+             if isinstance(f, dict) and f.get("severity") in ("exclude", "review")]
+    if flags:
+        items = "".join(
+            f'<li><strong>Shot {_e(_txt(f.get("shot_number"), missing="?"))}</strong> '
+            f'<span class="flag {"fail" if f.get("severity") == "exclude" else "warn"}">'
+            f'{_e(str(f.get("severity")))}</span> {_e(str(f.get("message", "")))}</li>'
+            for f in flags
+        )
+        review_block = f"""
+  <h3>Shots flagged for review</h3>
+  <ul class="findings">{items}</ul>"""
+    else:
+        review_block = (
+            '<h3>Shots flagged for review</h3>'
+            '<div class="note ok">No shot departs from the string.</div>'
+        )
+
+    sensitivity = review.get("sensitivity")
+    sensitivity_block = (
+        f'<div class="note">{_e(str(sensitivity))}</div>' if sensitivity else ""
+    )
+
+    return f"""
+<section class="pagebreak">
+  <h2>String behaviour</h2>
+  <h3>First-round pop</h3>
+  {pop_block}
+  {single_string_caveat}
+  {means_table}
+  <h3>Distribution and drift</h3>
+  {spread_table}
+  {review_block}
+  {sensitivity_block}
+</section>
+"""
+
+
+def _comparability_block(metadata: Dict[str, Any]) -> str:
+    """
+    Whether the reference and test strings were the same experiment.
+
+    Insertion loss inherits every way in which they were not, so the objections
+    are stated with the number of decibels each one is worth wherever the physics
+    can price it.
+    """
+    comparability = _map(metadata, "insertion_loss", "comparability")
+    if not comparability:
+        return ""
+
+    objections = [o for o in _seq(comparability, "objections") if isinstance(o, dict)]
+    if not objections:
+        return ('<div class="note ok"><strong>The two strings describe the same '
+                'experiment.</strong> No objection was raised against this '
+                'comparison.</div>')
+
+    blocking = [o for o in objections if o.get("severity") == "blocking"]
+    header = ""
+    if blocking:
+        header = (
+            '<div class="note danger"><strong>This is not a valid insertion loss.</strong> '
+            'The two strings did not measure the same thing, so the difference between '
+            'them is not attributable to the suppressor. The figures below are the '
+            'arithmetic difference only.</div>'
+        )
+
+    rows = []
+    for objection in sorted(
+        objections,
+        key=lambda o: {"blocking": 0, "material": 1, "advisory": 2}.get(o.get("severity"), 3),
+    ):
+        severity = str(objection.get("severity", "advisory"))
+        flag_class = {"blocking": "fail", "material": "warn"}.get(severity, "")
+        amount = objection.get("quantified_dB")
+        amount_text = _num(amount, 2) if _is_num(amount) else "—"
+        correctable = "yes" if objection.get("correctable") else "no"
+        rows.append(
+            f'<tr><td><span class="flag {flag_class}">{_e(severity)}</span></td>'
+            f'<td>{_e(str(objection.get("message", "")))}</td>'
+            f'<td class="num">{amount_text}</td>'
+            f'<td>{correctable}</td></tr>')
+
+    unexplained = comparability.get("unexplained_dB")
+    total = ""
+    if _is_num(unexplained) and float(unexplained) > 0:
+        total = (
+            f'<div class="note warn"><strong>{_num(unexplained, 2)} dB of the reported '
+            f'reduction is attributable to the two setups not matching, not to the '
+            f'suppressor.</strong></div>')
+
+    return f"""
+  <h3>Is this a valid comparison?</h3>
+  {header}
+  {total}
+  <div class="tablewrap">
+    <table>
+      <caption>Every way in which the reference and test strings differed, and how
+      many decibels each difference is worth where the physics can price it.
+      "Correctable" means a stated correction exists; an uncorrectable difference
+      cannot be removed from the result at all.</caption>
+      <thead><tr>
+        <th>Severity</th><th>Objection</th><th class="num">Worth (dB)</th>
+        <th>Correctable</th>
+      </tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>
+  </div>"""
+
+
+def _normalised_bands_block(metadata: Dict[str, Any], validity: ValidityReport) -> str:
+    """Per-band insertion loss referred to a common distance and atmosphere."""
+    normalised = _map(metadata, "insertion_loss", "bands_normalised")
+    if not normalised:
+        return ""
+
+    if not normalised.get("valid"):
+        refusal = normalised.get("refusal") or "not attempted"
+        return (
+            f'<div class="note warn"><strong>Insertion loss was not normalised to a '
+            f'common distance.</strong> {_e(str(refusal))} The per-band figures above '
+            f'are as measured, so any difference in microphone position or weather '
+            f'between the two strings is still in them.</div>')
+
+    freqs = _seq(normalised, "frequencies_Hz")
+    raw = _seq(normalised, "raw_insertion_loss_dB")
+    norm = _seq(normalised, "insertion_loss_dB")
+    shift = _seq(normalised, "shift_dB")
+    if not (freqs and norm):
+        return ""
+
+    rows = []
+    for i, frequency in enumerate(freqs):
+        rows.append(
+            f'<tr><td class="num">{_num(frequency, 0)}</td>'
+            f'<td class="num">{_num(raw[i] if i < len(raw) else None, 1)}</td>'
+            f'<td class="num"><strong>{_num(norm[i], 1)}</strong></td>'
+            f'<td class="num">{_num(shift[i] if i < len(shift) else None, 2)}</td></tr>')
+
+    warnings = "".join(
+        f'<div class="note warn">{_e(str(w))}</div>'
+        for w in _seq(normalised, "warnings"))
+    assumptions = "".join(
+        f'<li>{_e(str(a))}</li>' for a in _seq(normalised, "assumptions"))
+    assumption_block = (
+        f'<p class="sub" style="font-size:13px">Assumptions: </p><ul class="findings">'
+        f'{assumptions}</ul>' if assumptions else "")
+
+    distance = normalised.get("normalisation_distance_m")
+    ref_d = normalised.get("reference_distance_m")
+    test_d = normalised.get("test_distance_m")
+
+    return f"""
+  <h3>Insertion loss referred to a common distance</h3>
+  <div class="note">
+    The reference was measured at {_e(_num(ref_d, 2))} m and the test at
+    {_e(_num(test_d, 2))} m. Both spectra have been referred to
+    {_e(_num(distance, 2))} m using free-field spherical spreading and each string's
+    own ISO 9613-1 atmospheric absorption, so the difference below is the suppressor
+    rather than the setup. The measured figures are retained alongside, because a
+    corrected number that cannot be checked against the measurement it came from is
+    not a measurement record.
+  </div>
+  {warnings}
+  <div class="tablewrap">
+    <table>
+      <caption>Per-band insertion loss as measured, and referred to
+      {_e(_num(distance, 2))} m. All levels in {_e(validity.level_unit)}.</caption>
+      <thead><tr>
+        <th class="num">Band (Hz)</th><th class="num">As measured</th>
+        <th class="num">At {_e(_num(distance, 2))} m</th><th class="num">Shift</th>
+      </tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>
+  </div>
+  {assumption_block}"""
 
 
 def _section_hazard(metadata: Dict[str, Any], validity: ValidityReport) -> str:
@@ -1716,6 +2059,7 @@ def generate_report(
         _section_conditions(metadata_dict),
         _section_results(metadata_dict, validity),
         _section_insertion_loss(metadata_dict, validity),
+        _section_string_behaviour(metadata_dict, validity),
         _section_hazard(metadata_dict, validity),
         _section_shots(metadata_dict, validity),
         _section_figures(figure_items, validity),
