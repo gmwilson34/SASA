@@ -750,14 +750,34 @@ analysis/
     ├── spectrogram_c_full.png         # C-weighted spectrogram (dB SPL)
     ├── spectrogram_c_full.html        # Interactive C-weighted spectrogram
     ├── bands_full.png                 # 1/3-octave band time-frequency heatmap
+    ├── waveform_envelope.json         # Min/max envelope pyramid, for the live waveform
+    ├── shot_levels.json               # LAF/LAS/LZF/LZS against time, per shot
+    ├── spectrogram_z_matrix.json      # The Z spectrogram as levels, not as a picture
+    ├── spectrogram_c_matrix.json      # The C spectrogram, likewise
+    ├── bands_matrix.json              # The band history as levels
     ├── shots/
     │   ├── shot_01_summary.png        # Multi-panel summary for shot 1
+    │   ├── shot_01_spectrogram_z.json # That shot's Z spectrogram, as levels
+    │   ├── shot_01_spectrogram_c.json # That shot's C spectrogram, as levels
     │   ├── shot_02_summary.png        # Multi-panel summary for shot 2
     │   └── ...
     ├── metrics_summary.csv            # Per-shot metrics table (spreadsheet-ready)
     ├── analysis_metadata.json         # Complete analysis results (machine-readable)
     └── config.json                    # Configuration used for this analysis
 ```
+
+The `.json` matrices are what the interface draws. Every figure in the results
+is a live chart built from these rather than from the `.png`, so a level can be
+read off it with the cursor, a range can be dragged out to zoom into, and the
+chart is re-rasterised at the resolution it is exported at — up to 3840 px for
+a single chart, or the whole set compiled onto one sheet with the conditions
+the measurement was made under. The `.png` files remain for the report and as
+the fallback when a matrix could not be written.
+
+Levels in the matrices are stored as unsigned 16-bit counts of 0.1 dB (the step
+and offset are declared in each file). For the spectrograms that is lossless —
+the display matrix was already rounded to 0.1 dB — and for the band history the
+rounding happens on write, so what is stored is exactly what the readout shows.
 
 ---
 

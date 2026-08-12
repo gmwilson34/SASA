@@ -105,8 +105,19 @@ from provenance import (  # noqa: E402
     file_sha256,
     make_provenance_block,
 )
+from provenance import __version__ as _PROVENANCE_VERSION  # noqa: E402
 
-__version__ = "2.1.2"
+# ONE version for the whole application, and provenance.py owns it.
+#
+# There used to be two constants. This one tracked the releases; the one in
+# provenance.py was left at 2.0.0, and it is the one that goes into every
+# record's software block -- so every analysis produced after 2.0.0 stated,
+# in its own provenance, that it had been produced by 2.0.0. A record whose
+# account of what made it is wrong is the failure this file exists to prevent.
+#
+# main imports provenance, so the constant lives there and is re-exported
+# here. tests/test_packaging.py holds it to pyproject.toml.
+__version__ = _PROVENANCE_VERSION
 
 SCHEMA_VERSION = "2.0"
 
@@ -2973,27 +2984,50 @@ def _generate_plots(
             gc.collect()
 
     # ---- 1/3-octave heatmap ----
-    if config.compute_bands and static_formats:
+    # No longer gated on static_formats: the heatmap is a live chart in the
+    # interface now, so the data has to be written even when nobody asked for a
+    # picture. The figure below it remains optional.
+    if config.compute_bands:
         with _plot_step("1/3-octave band heatmap", run_warnings):
             times, freqs, levels = _bands_for_display(
                 reader, config, calibration, sample_rate, total_frames, chunked
             )
             if times.size:
-                figure, _ = plot_module.plot_third_octave_heatmap(
-                    times, freqs, levels, shots=shots,
-                    title=f"1/3-Octave Band Levels: {wav_path.name}",
+                # Emitted BEFORE the figure branch: a matplotlib failure below
+                # must not be able to take the data with it.
+                matrix = _band_matrix_block(
+                    times, freqs, levels,
+                    level_unit=level_unit,
+                    time_weighting=config.band_time_weighting,
+                    hop_ms=config.band_hop_ms,
                 )
-                for path in plot_module.save_figure(
-                    figure, out_dir / "bands_full", formats=static_formats
-                ):
-                    artifacts.setdefault(f"bands_{path.suffix.lstrip('.')}", path.name)
-                plt.close(figure)
+                if matrix:
+                    matrix_path = out_dir / "bands_matrix.json"
+                    try:
+                        write_json(matrix_path, matrix)
+                        artifacts["bands_matrix"] = matrix_path.name
+                    except OSError as exc:
+                        logger.warning("The band matrix could not be written: %s", exc)
+
+                if static_formats:
+                    figure, _ = plot_module.plot_third_octave_heatmap(
+                        times, freqs, levels, shots=shots,
+                        title=f"1/3-Octave Band Levels: {wav_path.name}",
+                    )
+                    for path in plot_module.save_figure(
+                        figure, out_dir / "bands_full", formats=static_formats
+                    ):
+                        artifacts.setdefault(f"bands_{path.suffix.lstrip('.')}", path.name)
+                    plt.close(figure)
                 say("    1/3-octave bands")
             del times, freqs, levels
             gc.collect()
 
     # ---- Per-shot summaries ----
-    if config.save_per_shot_plots and shots and static_formats:
+    # As above, the data is no longer conditional on wanting a picture. Each
+    # shot's two spectrograms are written as their own file so the interface
+    # fetches only the shot being looked at, however long the string is.
+    if config.save_per_shot_plots and shots:
         shot_dir = out_dir / "shots"
         shot_dir.mkdir(exist_ok=True)
         produced = 0
@@ -3012,20 +3046,37 @@ def _generate_plots(
                 stft_c = analyze_stft(window, sample_rate, nperseg=shot_nperseg,
                                       noverlap=shot_noverlap, weighting="C",
                                       calibrated=calibration.calibrated)
-                figure = plot_module.create_shot_summary_figure(
-                    window_time, window, stft_z, stft_c, metric,
-                    title=f"Shot {shot.shot_number} Analysis ({level_unit})",
-                )
-                paths = plot_module.save_figure(
-                    figure, shot_dir / f"shot_{shot.shot_number:02d}_summary",
-                    formats=static_formats,
-                )
-                plt.close(figure)
-                if paths:
-                    artifacts.setdefault(
-                        f"shot_{shot.shot_number:02d}_summary",
-                        str(paths[0].relative_to(out_dir)),
+
+                for stft, suffix in ((stft_z, "z"), (stft_c, "c")):
+                    matrix = _spectrogram_matrix_block(stft)
+                    if not matrix:
+                        continue
+                    matrix["time_offset_s"] = round(shot.window_start / sample_rate, 6)
+                    name = f"shot_{shot.shot_number:02d}_spectrogram_{suffix}.json"
+                    try:
+                        write_json(shot_dir / name, matrix)
+                        artifacts[f"shot_{shot.shot_number:02d}_spectrogram_{suffix}"] = (
+                            f"shots/{name}"
+                        )
+                    except OSError as exc:
+                        logger.warning("The shot %s spectrogram could not be written: %s",
+                                       shot.shot_number, exc)
+
+                if static_formats:
+                    figure = plot_module.create_shot_summary_figure(
+                        window_time, window, stft_z, stft_c, metric,
+                        title=f"Shot {shot.shot_number} Analysis ({level_unit})",
                     )
+                    paths = plot_module.save_figure(
+                        figure, shot_dir / f"shot_{shot.shot_number:02d}_summary",
+                        formats=static_formats,
+                    )
+                    plt.close(figure)
+                    if paths:
+                        artifacts.setdefault(
+                            f"shot_{shot.shot_number:02d}_summary",
+                            str(paths[0].relative_to(out_dir)),
+                        )
                 produced += 1
                 del block, window, stft_z, stft_c
                 gc.collect()
@@ -3288,14 +3339,21 @@ def _thin_spectrogram(stft: STFTResult) -> STFTResult:
     return stft
 
 
-def _spectrogram_matrix_block(stft: STFTResult) -> Dict[str, Any]:
-    """
-    The spectrogram as data the interface can read a level off, not a picture.
+MATRIX_QUANTISATION_STEP_dB = 0.1
+MATRIX_MISSING_COUNT = 65535
 
-    QUANTISED, AND LOSSLESSLY SO. _thin_spectrogram has already rounded the
-    matrix to 0.1 dB for display, so storing it as unsigned 16-bit counts of
-    0.1 dB reproduces the array Python plotted exactly -- there is no second
-    approximation here, only a smaller container for the same numbers.
+
+def _quantised_matrix(matrix: np.ndarray) -> Dict[str, Any]:
+    """
+    A 2-D decibel array as data the interface can read a level off, not a picture.
+
+    Stored as unsigned 16-bit counts of 0.1 dB. For a spectrogram that is
+    LOSSLESS: _thin_spectrogram has already rounded the matrix to 0.1 dB for
+    display, so this reproduces the array Python plotted exactly. For an array
+    that has not been rounded -- the band-level history -- the rounding happens
+    here and is therefore visible in the output: what is stored is what the
+    readout shows, to a tenth of a decibel, and the step is declared in the
+    block so nothing downstream has to assume it.
 
     Base64 of big-endian uint16 rather than a PNG. A PNG is smaller, but it
     carries the measurement through colour management: a stray gAMA or iCCP
@@ -3306,24 +3364,48 @@ def _spectrogram_matrix_block(stft: STFTResult) -> Dict[str, Any]:
 
     65535 is reserved for a non-finite cell so silence and NaN stay
     distinguishable from a real level.
+
+    Bin-major (rows are frequency, columns are time) so one column of the
+    display is a stride, and the browser can slice a frequency row without
+    walking the whole array.
     """
-    magnitude = np.asarray(stft.magnitude_dB, dtype=np.float64)
-    finite = np.isfinite(magnitude)
-    if not finite.any():
+    values = np.asarray(matrix, dtype=np.float64)
+    finite = np.isfinite(values)
+    if values.ndim != 2 or not finite.any():
         return {}
 
-    step = 0.1
-    offset = float(np.floor(magnitude[finite].min() * 10.0) / 10.0)
-    counts = np.full(magnitude.shape, 65535, dtype=np.uint16)
-    scaled = np.round((magnitude[finite] - offset) / step)
-    counts[finite] = np.clip(scaled, 0, 65534).astype(np.uint16)
+    step = MATRIX_QUANTISATION_STEP_dB
+    offset = float(np.floor(values[finite].min() * 10.0) / 10.0)
+    counts = np.full(values.shape, MATRIX_MISSING_COUNT, dtype=np.uint16)
+    scaled = np.round((values[finite] - offset) / step)
+    counts[finite] = np.clip(scaled, 0, MATRIX_MISSING_COUNT - 1).astype(np.uint16)
 
-    # Bin-major so a column of the display (one time frame) is a stride, and
-    # the browser can slice a frequency row without walking the whole array.
-    payload = base64.b64encode(counts.astype(">u2").tobytes()).decode("ascii")
+    return {
+        "rows": int(values.shape[0]),
+        "columns": int(values.shape[1]),
+        "quantisation": {
+            "offset_dB": offset,
+            "step_dB": step,
+            "dtype": "uint16",
+            "byte_order": "big",
+            "missing": MATRIX_MISSING_COUNT,
+        },
+        "magnitude_dB_b64": base64.b64encode(counts.astype(">u2").tobytes()).decode("ascii"),
+        "min_dB": round(float(values[finite].min()), 3),
+        "max_dB": round(float(values[finite].max()), 3),
+    }
+
+
+def _spectrogram_matrix_block(stft: STFTResult) -> Dict[str, Any]:
+    """The spectrogram as readable data. See _quantised_matrix for the format."""
+    magnitude = np.asarray(stft.magnitude_dB, dtype=np.float64)
+    payload = _quantised_matrix(magnitude)
+    if not payload:
+        return {}
 
     return {
         "schema": 1,
+        "kind": "spectrogram",
         "weighting": stft.weighting,
         "level_label": stft.level_label,
         "calibrated": bool(stft.calibrated),
@@ -3336,16 +3418,55 @@ def _spectrogram_matrix_block(stft: STFTResult) -> Dict[str, Any]:
         "bins": int(magnitude.shape[0]),
         "time_s": [round(float(t), 6) for t in stft.time_s],
         "frequencies_Hz": [round(float(f), 3) for f in stft.frequencies_Hz],
-        "quantisation": {
-            "offset_dB": offset,
-            "step_dB": step,
-            "dtype": "uint16",
-            "byte_order": "big",
-            "missing": 65535,
-        },
-        "magnitude_dB_b64": payload,
-        "min_dB": round(float(magnitude[finite].min()), 3),
-        "max_dB": round(float(magnitude[finite].max()), 3),
+        **payload,
+    }
+
+
+def _band_matrix_block(
+    times: np.ndarray,
+    frequencies: np.ndarray,
+    levels: np.ndarray,
+    *,
+    level_unit: str,
+    time_weighting: str,
+    hop_ms: float,
+) -> Dict[str, Any]:
+    """
+    The one-third-octave band history as readable data.
+
+    This is the same picture as bands_full.png -- band level against time --
+    and it is the last figure in the results that existed only as an image. A
+    heatmap is exactly the plot an operator wants to interrogate: the question
+    is always WHICH band was loud and WHEN, and neither is answerable by
+    looking.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    levels = np.asarray(levels, dtype=np.float64)
+    if times.size == 0 or frequencies.size == 0 or levels.ndim != 2:
+        return {}
+    if levels.shape != (frequencies.size, times.size):
+        logger.warning(
+            "The band history is %s, expected (%d, %d); the heatmap block was not written",
+            levels.shape, frequencies.size, times.size,
+        )
+        return {}
+
+    payload = _quantised_matrix(levels)
+    if not payload:
+        return {}
+
+    return {
+        "schema": 1,
+        "kind": "bands",
+        "level_unit": level_unit,
+        "time_weighting": time_weighting,
+        "hop_ms": round(float(hop_ms), 4),
+        "frames": int(times.size),
+        "bins": int(frequencies.size),
+        "time_s": [round(float(t), 6) for t in times],
+        "frequencies_Hz": [round(float(f), 3) for f in frequencies],
+        **payload,
     }
 
 

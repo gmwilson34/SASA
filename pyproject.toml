@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sasa"
-version = "2.1.2"
+version = "2.2.0"
 description = "SASA — Shot Acoustic Spectral Analysis: Professional-grade acoustic analysis for gunshot recordings"
 readme = "README.md"
 license = {text = "Proprietary — Copyright © 2024-2026 Ridgeback Defense"}

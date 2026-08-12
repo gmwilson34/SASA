@@ -3350,13 +3350,12 @@ function renderSpectrogramPanel() {
 
   const selectedShot = shotSelect ? shotSelect.value : 'all';
   if (selectedShot !== 'all') {
-    const file = shotImageFor(Number(selectedShot));
-    const drawn = setFigure('img-spectrogram', file, 'shots',
+    // The engine's plate is the fallback only. The shot's own matrix is what
+    // this panel wants, and the weighting control now applies to it too.
+    setFigure('img-spectrogram', shotImageFor(Number(selectedShot)), 'shots',
       `Summary plot for shot ${selectedShot}, including its spectrograms.`);
-    setText($('caption-spectrogram'), drawn
-      ? `Shot ${selectedShot} summary. The engine renders per-shot spectrograms inside the shot summary figure, `
-        + `not as a separate weighted image; the weighting control above applies to the whole-recording view.`
-      : `No summary figure was produced for shot ${selectedShot}.`);
+    loadShotSpectrogram(Number(selectedShot), weighting, drawSpectrogramChart);
+    drawSpectrogramChart();
     return;
   }
 
@@ -3401,38 +3400,34 @@ function bandRange() {
 }
 
 function renderBandsPanel() {
-  const drawn = setFigure('img-bands', pickImage(['bands_full', 'bands']), null,
-    'Mean one-third-octave band exposure level against frequency.');
   const aggregate = state.results.aggregate;
   const frequencies = (aggregate && aggregate.band_frequencies_Hz) || [];
-  setText($('caption-bands'), drawn
-    ? `Energy-averaged over the ${aggregate ? aggregate.n_valid : 0} included shot(s); levels in ${levelUnit()}.`
-    : (frequencies.length > 0
-      ? 'No band figure was produced, but the band data below is from the record.'
-      : 'Band analysis was not performed for this recording.'));
 
   const tbody = $('bands-tbody');
-  if (!tbody) return;
-  tbody.textContent = '';
-  if (!aggregate || frequencies.length === 0) return;
-
-  const range = bandRange();
-  for (let i = 0; i < frequencies.length; i += 1) {
-    const frequency = frequencies[i];
-    if (frequency < range.low || frequency > range.high) continue;
-    const frag = fromTemplate('tpl-bands-row');
-    if (!frag) break;
-    const row = frag.firstElementChild;
-    row.dataset.band = String(frequency);
-    setRaw(slot(row, 'frequency'), fmtHz(frequency));
-    setRaw(slot(row, 'mean'), fmt(aggregate.band_exposure_mean_dB[i], 1));
-    setRaw(slot(row, 'std'), fmt(aggregate.band_exposure_std_dB[i], 1));
-    setRaw(slot(row, 'min'), fmt(aggregate.band_exposure_min_dB[i], 1));
-    setRaw(slot(row, 'max'), fmt(aggregate.band_exposure_max_dB[i], 1));
-    tbody.appendChild(row);
+  if (tbody) {
+    tbody.textContent = '';
+    const range = bandRange();
+    for (let i = 0; aggregate && i < frequencies.length; i += 1) {
+      const frequency = frequencies[i];
+      if (frequency < range.low || frequency > range.high) continue;
+      const frag = fromTemplate('tpl-bands-row');
+      if (!frag) break;
+      const row = frag.firstElementChild;
+      row.dataset.band = String(frequency);
+      setRaw(slot(row, 'frequency'), fmtHz(frequency));
+      setRaw(slot(row, 'mean'), fmt(aggregate.band_exposure_mean_dB[i], 1));
+      setRaw(slot(row, 'std'), fmt(aggregate.band_exposure_std_dB[i], 1));
+      setRaw(slot(row, 'min'), fmt(aggregate.band_exposure_min_dB[i], 1));
+      setRaw(slot(row, 'max'), fmt(aggregate.band_exposure_max_dB[i], 1));
+      tbody.appendChild(row);
+    }
   }
 
+  // Both charts are drawn whatever the table did. They used to sit behind the
+  // table's early return, so an analysis with no aggregate block left the
+  // panel blank even when the band history had been written.
   drawBandsChart();
+  loadBandMatrix();
 }
 
 /* ---- per-shot review ---------------------------------------------------- */
@@ -3665,18 +3660,22 @@ function renderShotsPanel() {
     }
   }
 
-  // Shot summary figure
-  const file = shot ? shotImageFor(shot.shot_number) : null;
-  const drawn = setFigure('img-shot-detail', file, 'shots',
-    shot ? `Summary plot for shot ${shot.shot_number}.` : 'No shot selected.');
-  setText($('caption-shot-detail'), drawn
-    ? `Shot ${shot.shot_number}: pressure history, Z- and C-weighted spectrograms and the derived metrics, in ${levelUnit()}.`
-    : (shot ? 'No summary figure was produced for this shot.' : 'No shot selected.'));
-
   drawShotBandChart();
 
   drawShotWaveChart();
   drawShotLevelsChart();
+
+  // The spectrogram is fetched per shot, so the load is kicked off here and
+  // the draw happens twice: once now (from cache, or as the fallback) and once
+  // when the matrix arrives.
+  if (shot) loadShotSpectrogram(shot.shot_number, shotSpectrogramWeighting(), drawShotSpectrogramChart);
+  drawShotSpectrogramChart();
+}
+
+/** Which weighting the shot card is showing. Z unless the operator changed it. */
+function shotSpectrogramWeighting() {
+  const select = $('shot-spectrogram-weighting');
+  return select && select.value ? select.value : 'Z';
 }
 
 function wireShotNav() {
@@ -4331,7 +4330,6 @@ function renderAtmospherePanel() {
 
 function drawBandsChart() {
   const canvas = $('bands-canvas');
-  const image = $('img-bands');
   if (!canvas) return;
   chartRegistry.set('bands-canvas', drawBandsChart);
 
@@ -4339,12 +4337,16 @@ function drawBandsChart() {
   const frequencies = aggregate.band_frequencies_Hz || [];
   const mean = aggregate.band_exposure_mean_dB || [];
   if (frequencies.length < 2 || mean.length !== frequencies.length) {
-    invalidateChart(canvas);
-    show(canvas, false);
-    show(image, true);
+    // No image to fall back to: the engine has no picture of mean band
+    // exposure. It used to fall back to bands_full.png, which is the band
+    // history — a different measurement under this chart's caption.
+    show(canvas, true);
+    chartMessage(canvas, 'No band exposure in this record');
+    setText($('caption-bands'), frequencies.length > 0
+      ? 'Band analysis produced no exposure summary for this recording.'
+      : 'Band analysis was not performed for this recording.');
     return;
   }
-  show(image, false);
   show(canvas, true);
 
   const palette = chartPalette();
@@ -4496,14 +4498,110 @@ function drawVariabilityChart() {
 }
 
 
+/**
+ * Every included shot on one time base, aligned on its own peak.
+ *
+ * A string that is behaving looks like one trace with a little scatter; a
+ * round that is not looks like itself. That comparison is the reason to fire a
+ * string rather than one shot, and it was previously only available as
+ * shot_overlay.png, which cannot be pointed at.
+ *
+ * Each trace is the column-wise EXTREME of that shot's min/max envelope --
+ * whichever of the two bounds is further from zero. Drawing both bounds for
+ * every shot would be twice the ink for the same information, and drawing a
+ * mean of them would draw a pressure nobody measured.
+ */
+function drawShotOverlayChart() {
+  const canvas = $('overlay-canvas');
+  const figure = $('figure-overlay');
+  if (!canvas) return;
+  chartRegistry.set('overlay-canvas', drawShotOverlayChart);
+
+  const envelope = currentEnvelope();
+  const included = new Set(includedShots().map(s => s.shot_number));
+  const windows = ((envelope && envelope.shots) || []).filter(w => included.has(w.shot_number)
+    && Array.isArray(w.lo) && Array.isArray(w.hi) && Math.min(w.lo.length, w.hi.length) > 1);
+
+  // Two is the fewest that can be compared. A frame around one trace claims a
+  // comparison that is not being made.
+  show(figure, windows.length >= 2);
+  if (windows.length < 2) return;
+
+  const reference = windows[0];
+  const columns = Math.min(reference.lo.length, reference.hi.length);
+  const step = (reference.t1_s - reference.t0_s) / Math.max(1, columns - 1);
+  if (!(step > 0)) { show(figure, false); return; }
+
+  // One shared x axis, in milliseconds from the peak. Every window is the same
+  // length by construction (the same pre/post setting produced all of them),
+  // so aligning is a whole-column shift; a window that somehow has a different
+  // column width is dropped rather than stretched onto this grid.
+  const originIndex = Math.round((reference.peak_time_s - reference.t0_s) / step);
+  const x = Array.from({ length: columns }, (_, i) => (i - originIndex) * step * 1000);
+
+  const palette = chartPalette();
+  const selected = currentShotNumber();
+  const series = [];
+  let dropped = 0;
+
+  for (const w of windows) {
+    const n = Math.min(w.lo.length, w.hi.length);
+    const ownStep = (w.t1_s - w.t0_s) / Math.max(1, n - 1);
+    if (!(ownStep > 0) || Math.abs(ownStep - step) > step * 0.01) { dropped += 1; continue; }
+
+    const shift = originIndex - Math.round((w.peak_time_s - w.t0_s) / ownStep);
+    const values = new Array(columns).fill(null);
+    for (let i = 0; i < n; i += 1) {
+      const target = i + shift;
+      if (target < 0 || target >= columns) continue;
+      const lo = w.lo[i];
+      const hi = w.hi[i];
+      if (!isNum(lo) || !isNum(hi)) continue;
+      values[target] = Math.abs(hi) >= Math.abs(lo) ? hi : lo;
+    }
+    const isSelected = w.shot_number === selected;
+    series.push({
+      label: `Shot ${w.shot_number}`,
+      color: isSelected ? palette.accent : palette.series[0],
+      kind: 'line',
+      alpha: isSelected ? 1 : 0.38,
+      width: isSelected ? 2.5 : 1.2,
+      values,
+    });
+  }
+
+  if (series.length < 2) { show(figure, false); return; }
+
+  // The selected shot is drawn last so it lies on top of the string.
+  series.sort((a, b) => Number(a.color === palette.accent) - Number(b.color === palette.accent));
+
+  const unit = (envelope && envelope.unit) || 'Pa';
+  drawXYChart(canvas, {
+    x,
+    xScale: 'linear',
+    xFormat: (t) => `${t.toFixed(Math.abs(t) >= 10 ? 0 : 1)} ms`,
+    xTitle: 'Time from the peak of each shot',
+    xNoun: 'overlay',
+    unit,
+    zeroLine: true,
+    series,
+  });
+
+  setText($('overlay-hint'), selected ? `Shot ${selected} highlighted` : '');
+  setRaw($('caption-overlay'),
+    `${series.length} included shot(s), aligned on their own peaks, in ${unit}. `
+    + `Each trace is the larger of that shot's two envelope bounds per column, `
+    + `${fmt(step * 1e6, 0)} µs each.`
+    + (dropped > 0 ? ` ${dropped} shot(s) were left out: their windows are a different length.` : ''));
+}
+
+
 /* ---------------------------------------------------------------------------
    THE SELECTED SHOT
 
-   Two of the six panels of the engine's summary plate, drawn from data so
-   they can be interrogated: the blast itself, and how its level develops.
-   The other four are already here as live components — the metric tiles, the
-   band chart — or are the two spectrograms, which the whole-recording
-   spectrogram covers.
+   The engine's six-panel summary plate, taken apart into live components: the
+   metric tiles, the band chart, the blast itself, how its level develops, and
+   the shot's own spectrogram. Nothing in the plate is now only a picture.
    --------------------------------------------------------------------------- */
 
 const shotLevelsCache = new Map();
@@ -4690,20 +4788,62 @@ function currentSpectrogram() {
   return spectrogramCache.get(`${dir}::${file}`) || null;
 }
 
+/**
+ * Paint one spectrogram matrix onto one canvas.
+ *
+ * Shared by the whole recording and by a single shot, which are the same
+ * picture over different spans and must not drift apart in how they colour or
+ * label a level.
+ *
+ * @returns {{vmin: number, vmax: number, unit: string}} what the scale ended up
+ *   being, so the caller can say so in its caption.
+ */
+function paintSpectrogram(canvas, payload, { timeShift = 0 } = {}) {
+  const q = payload.quantisation || {};
+  // The colour scale spans the top 70 dB. Anchoring it at the true minimum
+  // would spend most of the ramp on the noise floor and leave the blasts —
+  // the measurement — compressed into the last few shades.
+  const vmax = Math.ceil(payload.max_dB);
+  const vmin = Math.max(Math.floor(payload.min_dB), vmax - 70);
+  const unit = payload.calibrated ? 'dB SPL' : 'dB re FS';
+
+  drawHeatmapChart(canvas, {
+    matrix: payload.decoded,
+    frames: payload.frames,
+    bins: payload.bins,
+    time: timeShift ? payload.time_s.map(t => t + timeShift) : payload.time_s,
+    frequencies: payload.frequencies_Hz,
+    offset: q.offset_dB,
+    step: q.step_dB,
+    missing: q.missing,
+    vmin,
+    vmax,
+    unit,
+    xTitle: 'Time',
+    yTitle: 'Hz',
+  });
+
+  return { vmin, vmax, unit };
+}
+
 function drawSpectrogramChart() {
   const canvas = $('spectrogram-canvas');
   const image = $('img-spectrogram');
   if (!canvas) return;
   chartRegistry.set('spectrogram-canvas', drawSpectrogramChart);
 
-  const payload = currentSpectrogram();
   const shotSelect = $('spectrogram-shot');
-  const perShot = shotSelect && shotSelect.value !== 'all';
+  const shotNumber = shotSelect && shotSelect.value !== 'all' ? Number(shotSelect.value) : null;
+  const weighting = ($('spectrogram-weighting') || {}).value || 'Z';
 
-  // The per-shot spectrograms are separate figures the engine renders; only
-  // the full-recording matrix is emitted as data. Rather than pretend, the
-  // per-shot selection falls back to the engine's picture and says so.
-  if (!payload || perShot) {
+  // One shot and the whole recording are both data now. The per-shot matrices
+  // are separate files, fetched only for the shot being looked at, so a long
+  // string costs nothing until someone asks for a particular round.
+  const payload = shotNumber === null
+    ? currentSpectrogram()
+    : shotSpectrogram(shotNumber, weighting);
+
+  if (!payload) {
     invalidateChart(canvas);
     show(canvas, false);
     show(image, true);
@@ -4712,10 +4852,188 @@ function drawSpectrogramChart() {
   show(image, false);
   show(canvas, true);
 
+  const scale = paintSpectrogram(canvas, payload,
+    { timeShift: shotNumber === null ? 0 : (payload.time_offset_s || 0) });
+
+  setRaw($('caption-spectrogram'),
+    `${shotNumber === null ? 'Whole recording' : `Shot ${shotNumber}`}: `
+    + `${payload.weighting}-weighted, ${payload.nperseg}-point ${payload.window} window `
+    + `(${fmt(payload.enbw_Hz, 0)} Hz bins), ${payload.frames} frames. `
+    + `Colour scale ${scale.vmin} to ${scale.vmax} ${scale.unit}. `
+    + 'Point at the plot to read a level off it.');
+}
+
+
+/* ---------------------------------------------------------------------------
+   PER-SHOT SPECTROGRAM
+
+   The last figure in the results that existed only as a picture. It was two
+   panels of the engine's six-panel plate, and the question it answers — which
+   frequencies did THIS round put out, and when — is one you have to point at
+   something to ask.
+   --------------------------------------------------------------------------- */
+
+/** `${dir}::${file}` -> the parsed matrix, so paging through shots refetches nothing. */
+const shotSpectrogramCache = new Map();
+
+function shotSpectrogramArtifact(shotNumber, weighting) {
+  const artifacts = metaBlock('artifacts') || {};
+  const padded = String(shotNumber).padStart(2, '0');
+  return artifacts[`shot_${padded}_spectrogram_${String(weighting).toLowerCase()}`] || null;
+}
+
+/**
+ * Split "shots/shot_01_spectrogram_z.json" into the two things the read
+ * endpoint takes.
+ *
+ * It will not accept a path separator in `file` — a fixed name inside an
+ * already-validated directory is the whole point of that argument — so a
+ * per-shot artifact has to be handed over as a name plus a subdirectory.
+ */
+function artifactUrlForPath(dir, relative) {
+  const parts = String(relative).split('/');
+  const file = parts.pop();
+  return artifactUrl(dir, file, parts.join('/') || undefined);
+}
+
+/** The cached matrix for a shot, or null while it is still being fetched. */
+function shotSpectrogram(shotNumber, weighting) {
+  const dir = state.results.dir;
+  const file = shotSpectrogramArtifact(shotNumber, weighting);
+  if (!dir || !file) return null;
+  return shotSpectrogramCache.get(`${dir}::${file}`) || null;
+}
+
+function loadShotSpectrogram(shotNumber, weighting, redraw) {
+  const dir = state.results.dir;
+  const file = shotSpectrogramArtifact(shotNumber, weighting);
+  if (!dir || !file) { redraw(); return; }
+  const key = `${dir}::${file}`;
+  if (shotSpectrogramCache.has(key)) { redraw(); return; }
+  shotSpectrogramCache.set(key, null);
+
+  fetch(artifactUrlForPath(dir, file))
+    .then(r => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+    .then(payload => {
+      payload.decoded = decodeMatrix(payload.magnitude_dB_b64);
+      shotSpectrogramCache.set(key, payload);
+      redraw();
+    })
+    .catch(err => {
+      console.warn('shot spectrogram unavailable', err);
+      shotSpectrogramCache.set(key, false);
+      redraw();
+    });
+}
+
+function drawShotSpectrogramChart() {
+  const canvas = $('shot-spectrogram-canvas');
+  const image = $('img-shot-detail');
+  const figure = $('figure-shot-spectrogram');
+  if (!canvas) return;
+  chartRegistry.set('shot-spectrogram-canvas', drawShotSpectrogramChart);
+
+  const shot = currentShot();
+  const weighting = ($('shot-spectrogram-weighting') || {}).value || 'Z';
+  if (!shot) {
+    show(figure, false);
+    return;
+  }
+  show(figure, true);
+
+  const payload = shotSpectrogram(shot.shot_number, weighting);
+  if (!payload) {
+    // No matrix: fall back to the engine's plate rather than an empty frame,
+    // and say which shot it belongs to.
+    invalidateChart(canvas);
+    show(canvas, false);
+    const drawn = setFigure('img-shot-detail', shotImageFor(shot.shot_number), 'shots',
+      `Summary plot for shot ${shot.shot_number}.`);
+    show(image, drawn);
+    setText($('caption-shot-detail'), drawn
+      ? `Shot ${shot.shot_number}: the engine's summary plate. No spectrogram data was written for this shot.`
+      : `No spectrogram was produced for shot ${shot.shot_number}.`);
+    return;
+  }
+  show(image, false);
+  show(canvas, true);
+
+  const scale = paintSpectrogram(canvas, payload, { timeShift: payload.time_offset_s || 0 });
+  setRaw($('caption-shot-detail'),
+    `Shot ${shot.shot_number}: ${payload.weighting}-weighted, ${payload.nperseg}-point `
+    + `${payload.window} window (${fmt(payload.enbw_Hz, 0)} Hz bins), `
+    + `${payload.frames} frames across ${fmt((payload.time_s[payload.frames - 1] || 0) * 1000, 0)} ms. `
+    + `Colour scale ${scale.vmin} to ${scale.vmax} ${scale.unit}.`);
+  canvas.setAttribute('aria-label',
+    `Spectrogram of shot ${shot.shot_number}, ${payload.weighting}-weighted.`);
+}
+
+
+/* ---------------------------------------------------------------------------
+   BAND LEVEL THROUGH THE RECORDING
+
+   bands_matrix.json: the same picture as the engine's bands_full.png, as
+   numbers. The rows are one-third-octave centres, which are evenly spaced in
+   the log of frequency, so the axis is logarithmic and each row is read off
+   its own centre rather than an interpolated one.
+   --------------------------------------------------------------------------- */
+
+const bandMatrixCache = new Map();
+
+function loadBandMatrix() {
+  const dir = state.results.dir;
+  const file = (metaBlock('artifacts') || {}).bands_matrix;
+  if (!dir || !file) { drawBandHeatmapChart(); return; }
+  const key = `${dir}::${file}`;
+  if (bandMatrixCache.has(key)) { drawBandHeatmapChart(); return; }
+  bandMatrixCache.set(key, null);
+
+  fetch(artifactUrl(dir, file))
+    .then(r => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+    .then(payload => {
+      payload.decoded = decodeMatrix(payload.magnitude_dB_b64);
+      bandMatrixCache.set(key, payload);
+      drawBandHeatmapChart();
+    })
+    .catch(err => {
+      console.warn('band matrix unavailable', err);
+      bandMatrixCache.set(key, false);
+      drawBandHeatmapChart();
+    });
+}
+
+function currentBandMatrix() {
+  const dir = state.results.dir;
+  const file = (metaBlock('artifacts') || {}).bands_matrix;
+  if (!dir || !file) return null;
+  return bandMatrixCache.get(`${dir}::${file}`) || null;
+}
+
+function drawBandHeatmapChart() {
+  const canvas = $('band-heatmap-canvas');
+  const image = $('img-band-heatmap');
+  const figure = $('figure-band-heatmap');
+  if (!canvas) return;
+  chartRegistry.set('band-heatmap-canvas', drawBandHeatmapChart);
+
+  const payload = currentBandMatrix();
+  if (!payload) {
+    invalidateChart(canvas);
+    show(canvas, false);
+    const drawn = setFigure('img-band-heatmap', pickImage(['bands_full', 'bands']), null,
+      'One-third-octave band levels against time.');
+    show(image, drawn);
+    show(figure, drawn);
+    setText($('caption-band-heatmap'), drawn
+      ? "The engine's band heatmap. No band history data was written for this analysis."
+      : '');
+    return;
+  }
+  show(image, false);
+  show(canvas, true);
+  show(figure, true);
+
   const q = payload.quantisation || {};
-  // The colour scale spans the top 70 dB. Anchoring it at the true minimum
-  // would spend most of the ramp on the noise floor and leave the blasts —
-  // the measurement — compressed into the last few shades.
   const vmax = Math.ceil(payload.max_dB);
   const vmin = Math.max(Math.floor(payload.min_dB), vmax - 70);
 
@@ -4725,21 +5043,22 @@ function drawSpectrogramChart() {
     bins: payload.bins,
     time: payload.time_s,
     frequencies: payload.frequencies_Hz,
+    yScale: 'log',
     offset: q.offset_dB,
     step: q.step_dB,
     missing: q.missing,
     vmin,
     vmax,
-    unit: payload.calibrated ? 'dB SPL' : 'dB re FS',
+    unit: payload.level_unit || levelUnit(),
     xTitle: 'Time',
     yTitle: 'Hz',
   });
 
-  setRaw($('caption-spectrogram'),
-    `${payload.weighting}-weighted, ${payload.nperseg}-point ${payload.window} window `
-    + `(${fmt(payload.enbw_Hz, 0)} Hz bins), ${payload.frames} frames. `
-    + `Colour scale ${vmin} to ${vmax} ${payload.calibrated ? 'dB SPL' : 'dB re FS'}. `
-    + 'Point at the plot to read a level off it.');
+  setRaw($('caption-band-heatmap'),
+    `${payload.bins} one-third-octave bands, ${payload.time_weighting} time weighting, `
+    + `${fmt(payload.hop_ms, 0)} ms hop, ${payload.frames} frames. `
+    + `Colour scale ${vmin} to ${vmax} ${payload.level_unit || levelUnit()}. `
+    + 'Point at the plot to read a band and a level off it.');
 }
 
 
@@ -4775,8 +5094,9 @@ function resetChartState() {
   const jump = $('waveform-jump');
   if (jump) jump.value = '';
   for (const id of ['waveform-canvas', 'spectrogram-canvas', 'bands-canvas',
-    'distribution-canvas', 'variability-canvas', 'absorption-canvas',
-    'shot-band-canvas', 'shot-wave-canvas', 'shot-levels-canvas']) {
+    'band-heatmap-canvas', 'distribution-canvas', 'variability-canvas',
+    'absorption-canvas', 'overlay-canvas', 'shot-band-canvas', 'shot-wave-canvas',
+    'shot-levels-canvas', 'shot-spectrogram-canvas']) {
     const canvas = $(id);
     if (!canvas) continue;
     const record = chartState.get(canvas);
@@ -5105,6 +5425,7 @@ function renderStringPanel() {
 
   drawDistributionChart();
   drawVariabilityChart();
+  drawShotOverlayChart();
 }
 
 function renderResults() {
@@ -5139,7 +5460,7 @@ function renderResults() {
 
   const actionable = status === 'loaded';
   ['btn-results-print', 'btn-results-csv', 'btn-results-folder', 'btn-results-copy-path',
-   'btn-results-menu']
+   'btn-results-sheet', 'btn-results-menu']
     .forEach(id => setDisabled($(id), !actionable));
 
   if (status !== 'loaded') return;
@@ -5187,6 +5508,9 @@ function wireResultsActions() {
     const ok = await copyText(sha);
     toast({ title: ok ? 'Input hash copied' : 'Copy failed', text: ok ? sha : '', tone: ok ? 'ok' : 'danger' });
   });
+
+  const sheet = $('btn-results-sheet');
+  if (sheet) sheet.addEventListener('click', () => exportAnalysisSheet());
 
   const folder = $('btn-results-folder');
   if (folder) folder.addEventListener('click', async () => {
@@ -5236,6 +5560,13 @@ function wireResultsActions() {
   });
   const spectrogramShot = $('spectrogram-shot');
   if (spectrogramShot) spectrogramShot.addEventListener('change', () => commit());
+
+  const shotWeighting = $('shot-spectrogram-weighting');
+  if (shotWeighting) shotWeighting.addEventListener('change', () => {
+    const shot = currentShot();
+    if (shot) loadShotSpectrogram(shot.shot_number, shotWeighting.value, drawShotSpectrogramChart);
+    drawShotSpectrogramChart();
+  });
 
   const overviewOpen = $('btn-overview-open');
   if (overviewOpen) overviewOpen.addEventListener('click', () => {
@@ -5363,7 +5694,11 @@ function prepareCanvas(canvas) {
     canvas.dataset.aspect = String(h / w);
   }
   const host = canvas.parentElement || canvas;
-  const width = Math.floor(host.clientWidth || 0);
+  // exportWidth overrides the layout. A chart inside a hidden tab panel has no
+  // layout at all -- clientWidth is 0 and it cannot draw -- which is exactly
+  // the state every chart except one is in while the analysis sheet is being
+  // compiled. Given a width, the same drawing code runs with no layout at all.
+  const width = Math.floor(Number(canvas.dataset.exportWidth) || host.clientWidth || 0);
   if (width <= 0) return null;
   const height = Math.round(width * Number(canvas.dataset.aspect));
   // An export re-runs the SAME drawing code at a higher pixel ratio rather
@@ -5940,7 +6275,11 @@ function drawXYChart(canvas, spec) {
     }
 
     ctx.strokeStyle = s.color;
-    ctx.lineWidth = s.kind === 'area' ? 1.5 : 2;
+    // alpha and width are honoured on lines too, not only on bands: an overlay
+    // of a whole string is unreadable if every trace is fully opaque and the
+    // one being pointed at cannot be made heavier than the rest.
+    ctx.globalAlpha = isNum(s.alpha) ? s.alpha : 1;
+    ctx.lineWidth = isNum(s.width) ? s.width : (s.kind === 'area' ? 1.5 : 2);
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     ctx.beginPath();
@@ -5957,6 +6296,7 @@ function drawXYChart(canvas, spec) {
       prevY = y;
     }
     ctx.stroke();
+    ctx.globalAlpha = 1;
     ctx.lineWidth = 1;
   }
 
@@ -6068,7 +6408,16 @@ function drawHeatmapChart(canvas, spec) {
   if (!frames || !bins || !spec.matrix) { chartMessage(canvas, 'No spectrogram data'); return; }
 
   const record = chartRecord(canvas);
-  record.spec = { ...spec, frequencies: spec.time, unit: spec.unit || 'dB', series: [] };
+  // `frequencies` is the shared name for the INTERACTIVE axis, which on a
+  // heatmap is time. The real frequency of each row is kept under rowHz so the
+  // readout can name the row it is reading rather than interpolating one.
+  record.spec = {
+    ...spec,
+    frequencies: spec.time,
+    rowHz: spec.frequencies,
+    unit: spec.unit || 'dB',
+    series: [],
+  };
   let view = record.view;
   if (!view || view.i1 > frames - 1 || view.i1 - view.i0 < 1) {
     view = { i0: 0, i1: frames - 1 };
@@ -6116,17 +6465,47 @@ function drawHeatmapChart(canvas, spec) {
   ctx.imageSmoothingEnabled = true;
 
   // ---- axes ----
+  // An STFT's bins are evenly spaced in frequency and a one-third-octave
+  // filter bank's centres are evenly spaced in the LOG of it. Both paint their
+  // rows at equal height, so the axis has to follow the spacing of the data or
+  // the labels stop describing the rows they sit beside: on a band heatmap a
+  // linear axis puts "20 kHz" halfway up a plot whose middle row is 630 Hz.
+  const logY = spec.yScale === 'log';
   const f0 = spec.frequencies[0];
   const f1 = spec.frequencies[spec.frequencies.length - 1];
-  const yOf = (hz) => pad.top + plotH - ((hz - f0) / Math.max(1e-9, f1 - f0)) * plotH;
+
+  // The axis runs over the EDGES of the painted rows, not their centres.
+  //
+  // Every row is drawn the same height, so row r covers the strip from r/bins
+  // to (r+1)/bins of the plot and its centre sits at (r+0.5)/bins. An axis
+  // mapped from the first centre to the last instead puts frequencies[r] at
+  // r/(bins-1) -- half a row out at both ends, which on a one-third-octave
+  // axis is half a band. Extending by half a step at each end puts every
+  // label exactly on the middle of the row it names. plots.py does the same
+  // thing for the matplotlib figures, in _centers_to_edges.
+  const lf0 = Math.log10(Math.max(1e-6, f0));
+  const lf1 = Math.log10(Math.max(1e-6, f1));
+  const halfLog = (lf1 - lf0) / Math.max(1, 2 * (bins - 1));
+  const halfLin = (f1 - f0) / Math.max(1, 2 * (bins - 1));
+  const edgeLo = logY ? lf0 - halfLog : f0 - halfLin;
+  const edgeHi = logY ? lf1 + halfLog : f1 + halfLin;
+  const yOf = logY
+    ? (hz) => pad.top + plotH
+      - ((Math.log10(Math.max(1e-6, hz)) - edgeLo) / Math.max(1e-9, edgeHi - edgeLo)) * plotH
+    : (hz) => pad.top + plotH - ((hz - edgeLo) / Math.max(1e-9, edgeHi - edgeLo)) * plotH;
   ctx.font = `11px ${palette.mono}`;
   ctx.fillStyle = palette.muted;
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (const hz of linearTicks(f0, f1, 5)) {
+  const tickLo = logY ? Math.pow(10, edgeLo) : edgeLo;
+  const tickHi = logY ? Math.pow(10, edgeHi) : edgeHi;
+  for (const hz of logY ? logTicks(tickLo, tickHi) : linearTicks(tickLo, tickHi, 5)) {
     const y = yOf(hz);
     if (y < pad.top - 1 || y > pad.top + plotH + 1) continue;
-    ctx.fillText(hz >= 1000 ? `${Math.round(hz / 1000)}k` : String(Math.round(hz)), pad.left - 8, y);
+    ctx.fillText(logY
+      ? axisHz(hz)
+      : (hz >= 1000 ? `${Math.round(hz / 1000)}k` : String(Math.round(hz))),
+    pad.left - 8, y);
   }
 
   const t0 = spec.time[view.i0];
@@ -6423,6 +6802,298 @@ function exportChart(canvas) {
   }, 'image/png');
 }
 
+/* ---------------------------------------------------------------------------
+   THE COMPILED ANALYSIS SHEET
+
+   Every live chart, at export resolution, on one sheet with the conditions it
+   was measured under. The charts are re-run at the sheet's pixel density
+   rather than screen-grabbed, so the saved file has real detail in it: the
+   axis labels, the hairlines and the spectrogram are all rasterised at the
+   size they are saved at.
+
+   Charts in a hidden tab panel have no layout and cannot draw, which is every
+   chart but one at any moment. They are given a width explicitly instead --
+   see prepareCanvas -- so nothing has to be shown to the operator, moved, or
+   flashed on screen to be included.
+   --------------------------------------------------------------------------- */
+
+/** The sheet's page geometry, in CSS pixels; the pixel density is applied on top. */
+const SHEET = {
+  width: 1120,
+  margin: 44,
+  targetPx: 3072,      // the saved width, unless a very tall sheet forces less
+  maxEdgePx: 16384,    // browsers stop producing a bitmap somewhere past this
+  maxAreaPx: 80e6,
+};
+
+/** Which charts go on the sheet, in the order the results present them. */
+const SHEET_FIGURES = [
+  ['waveform-canvas', 'The recording'],
+  ['spectrogram-canvas', 'Spectrogram'],
+  ['bands-canvas', 'Mean band exposure'],
+  ['band-heatmap-canvas', 'Band level through the recording'],
+  ['shot-wave-canvas', 'The selected shot, sample by sample'],
+  ['shot-levels-canvas', 'The selected shot: how the level develops'],
+  ['shot-spectrogram-canvas', 'The selected shot, by frequency'],
+  ['shot-band-canvas', 'The selected shot, by band'],
+  ['distribution-canvas', 'Level distribution'],
+  ['variability-canvas', 'Shot-to-shot behaviour'],
+  ['overlay-canvas', 'Every shot, overlaid'],
+  ['absorption-canvas', 'What the air took out'],
+  ['compare-band-canvas', 'Insertion loss'],
+];
+
+/** The caption the interface is showing under a chart, if it has one. */
+function captionFor(canvas) {
+  const figure = canvas.closest('figure');
+  const caption = figure ? figure.querySelector('.figure-caption') : null;
+  const text = caption ? caption.textContent.trim() : '';
+  return text === '—' ? '' : text;
+}
+
+/** Wrap text to a width, in the context's current font. Returns the lines. */
+function wrapText(ctx, text, maxWidth) {
+  const lines = [];
+  let line = '';
+  for (const word of String(text).split(/\s+/)) {
+    if (!word) continue;
+    const candidate = line ? `${line} ${word}` : word;
+    if (line && ctx.measureText(candidate).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/** The conditions the measurement was made under, as label/value pairs. */
+function sheetHeaderRows() {
+  const meta = metaBlock('test_metadata');
+  const source = metaBlock('source');
+  const calibration = metaBlock('calibration');
+  const software = metaBlock('software');
+  const analysis = metaBlock('analysis');
+  const rows = [
+    ['Test', meta.test_id || '—'],
+    ['Configuration', meta.configuration || '—'],
+    ['Weapon', [meta.weapon, meta.ammunition].filter(Boolean).join(' · ') || '—'],
+    ['Suppressor', meta.suppressor || '—'],
+    ['Microphone', [meta.mic_model,
+      isNum(meta.mic_distance_m) ? `${fmt(meta.mic_distance_m, 2)} m` : null,
+      isNum(meta.mic_angle_deg) ? `${fmt(meta.mic_angle_deg, 0)}°` : null,
+    ].filter(Boolean).join(' · ') || '—'],
+    ['Conditions', [
+      isNum(meta.temperature_C) ? `${fmt(meta.temperature_C, 1)} °C` : null,
+      isNum(meta.humidity_pct) ? `${fmt(meta.humidity_pct, 0)} % RH` : null,
+      isNum(meta.pressure_kPa) ? `${fmt(meta.pressure_kPa, 1)} kPa` : null,
+    ].filter(Boolean).join(' · ') || '—'],
+    ['Recording', source.path ? String(source.path).split(/[\\/]/).pop() : '—'],
+    // The calibration state decides what every number on this sheet means, so
+    // it is stated on the sheet rather than left to the axis labels.
+    ['Levels', calibration.calibrated
+      ? `${calibration.level_unit || 'dB SPL'} — calibrated${calibration.method ? ` (${calibration.method})` : ''}`
+      : `${calibration.level_unit || 'dB re FS'} — NOT calibrated, relative only`],
+    ['Analysed', [analysis.timestamp || '—',
+      software.version ? `SASA ${software.version}` : null].filter(Boolean).join(' · ')],
+  ];
+  if (source.sha256) rows.push(['Recording SHA-256', String(source.sha256)]);
+  return rows;
+}
+
+function exportAnalysisSheet() {
+  const inner = SHEET.width - SHEET.margin * 2;
+
+  // Draw every candidate once at the sheet's width before deciding what goes
+  // on it. Most of them are in a tab the operator has not opened, so they have
+  // never been drawn and have nothing to report about themselves; without this
+  // pass, saving a sheet straight after loading an analysis would produce a
+  // sheet of the one tab that happened to be visible.
+  const figures = [];
+  for (const [id, title] of SHEET_FIGURES) {
+    const canvas = $(id);
+    const draw = canvas && chartRegistry.get(id);
+    if (!draw) continue;
+
+    canvas.dataset.exportWidth = String(inner);
+    try {
+      draw();
+    } catch (err) {
+      console.error('sheet probe failed', id, err);
+    }
+    delete canvas.dataset.exportWidth;
+
+    if (canvas.hidden) continue;
+    const figure = canvas.closest('figure');
+    if (figure && figure.hidden) continue;
+    // No spec means the chart has never drawn anything, or has been
+    // invalidated and is showing a message. Compare lives in another view
+    // entirely, so its canvas is not hidden and would otherwise contribute an
+    // empty frame that reads, on a sheet of real measurements, as one.
+    if (!chartRecord(canvas).spec) continue;
+
+    const aspect = Number(canvas.dataset.aspect)
+      || (Number(canvas.getAttribute('height')) / Number(canvas.getAttribute('width')))
+      || 0.32;
+    figures.push({ canvas, title, aspect });
+  }
+
+  if (figures.length === 0) {
+    toast({ title: 'Nothing to compile', text: 'No chart is currently drawn.', tone: 'warn' });
+    return;
+  }
+
+  const headerRows = sheetHeaderRows();
+  const headerH = 78 + headerRows.length * 19 + 18;
+
+  // Lay the page out in CSS pixels first, so the height is known before any
+  // pixels are committed and the density can be chosen to fit.
+  const blocks = figures.map(f => {
+    const chartH = Math.round(inner * f.aspect);
+    return { ...f, chartH, caption: captionFor(f.canvas) };
+  });
+
+  const probe = document.createElement('canvas').getContext('2d');
+  probe.font = '12px system-ui, sans-serif';
+  let cssH = headerH;
+  for (const block of blocks) {
+    block.captionLines = block.caption ? wrapText(probe, block.caption, inner) : [];
+    block.y = cssH + 24;
+    cssH = block.y + block.chartH + 6 + block.captionLines.length * 16 + 26;
+  }
+  cssH += 34;   // footer
+
+  const scale = Math.min(
+    SHEET.targetPx / SHEET.width,
+    SHEET.maxEdgePx / cssH,
+    Math.sqrt(SHEET.maxAreaPx / (SHEET.width * cssH)),
+  );
+
+  const sheet = document.createElement('canvas');
+  sheet.width = Math.round(SHEET.width * scale);
+  sheet.height = Math.round(cssH * scale);
+  const ctx = sheet.getContext('2d');
+  if (!ctx) {
+    toast({ title: 'Sheet not saved', text: 'This browser refused a canvas that size.', tone: 'danger' });
+    return;
+  }
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+
+  const palette = chartPalette();
+  // --bg-surface, the same paper the cards are on, so a sheet saved from the
+  // dark theme is dark around charts that are themselves dark. (There is no
+  // --surface-1 in tokens.css; this asked for one and only produced a page at
+  // all because of a hardcoded white fallback, which is not how this file is
+  // allowed to choose a colour.)
+  const paper = cssVar('--bg-surface');
+  if (!paper || !palette.text) {
+    // Refuse rather than substitute a colour of our own: every other chart in
+    // this file stops when tokens.css has not resolved, and a sheet on an
+    // invented background is not the document the operator asked for.
+    toast({ title: 'Sheet not saved', text: 'The theme did not resolve.', tone: 'danger' });
+    return;
+  }
+  ctx.fillStyle = paper;
+  ctx.fillRect(0, 0, SHEET.width, cssH);
+
+  // ---- header ----
+  const left = SHEET.margin;
+  ctx.fillStyle = palette.text;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '600 22px system-ui, sans-serif';
+  ctx.fillText('SASA — Analysis sheet', left, 46);
+  ctx.font = `12px ${palette.mono}`;
+  ctx.fillStyle = palette.muted;
+  let y = 74;
+  for (const [label, value] of headerRows) {
+    ctx.fillStyle = palette.muted;
+    ctx.fillText(label, left, y);
+    ctx.fillStyle = palette.text;
+    ctx.fillText(String(value), left + 150, y);
+    y += 19;
+  }
+  ctx.strokeStyle = palette.axis;
+  ctx.lineWidth = 1 / scale;
+  ctx.beginPath();
+  ctx.moveTo(left, y + 4);
+  ctx.lineTo(SHEET.width - SHEET.margin, y + 4);
+  ctx.stroke();
+
+  // ---- figures ----
+  for (const block of blocks) {
+    const canvas = block.canvas;
+    const draw = chartRegistry.get(canvas.id);
+    const record = chartRecord(canvas);
+    const cursor = record.cursor;
+    record.cursor = null;                       // the crosshair is not the figure
+    canvas.dataset.exportWidth = String(inner);
+    canvas.dataset.exportScale = String(scale);
+    let drawn = false;
+    try {
+      draw();
+      drawn = canvas.width > 0 && canvas.height > 0;
+    } catch (err) {
+      console.error('sheet redraw failed', canvas.id, err);
+    }
+    delete canvas.dataset.exportWidth;
+    delete canvas.dataset.exportScale;
+    record.cursor = cursor;
+
+    ctx.fillStyle = palette.text;
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillText(block.title, left, block.y - 8);
+
+    if (drawn) ctx.drawImage(canvas, left, block.y, inner, block.chartH);
+
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillStyle = palette.muted;
+    let captionY = block.y + block.chartH + 16;
+    for (const line of block.captionLines) {
+      ctx.fillText(line, left, captionY);
+      captionY += 16;
+    }
+  }
+
+  // ---- footer ----
+  ctx.font = `11px ${palette.mono}`;
+  ctx.fillStyle = palette.muted;
+  ctx.fillText(
+    `${blocks.length} figure(s) · compiled from the live charts at ${sheet.width} × ${sheet.height} px`,
+    left, cssH - 16);
+
+  // Put every chart back at its own layout size -- all of them, not only the
+  // ones that made the sheet: the probe pass above touched every candidate.
+  redrawCharts();
+
+  if (typeof sheet.toBlob !== 'function') return;
+  sheet.toBlob((blob) => {
+    if (!blob) {
+      toast({
+        title: 'Sheet not saved',
+        text: 'The browser could not produce a bitmap that large.',
+        tone: 'danger',
+      });
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'sasa-analysis-sheet.png';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast({
+      title: 'Analysis sheet saved',
+      text: `${blocks.length} figures at ${sheet.width} × ${sheet.height} pixels.`,
+      tone: 'ok',
+    });
+  }, 'image/png');
+}
+
 /** Whether this chart is showing less than all of its data. */
 function chartIsZoomed(record) {
   if (!record) return false;
@@ -6451,9 +7122,19 @@ function chartValuesAt(record, index) {
     const y = clamp(record.cursorY === undefined ? g.pad.top : record.cursorY,
       g.pad.top, g.pad.top + g.plotH);
     const fraction = 1 - (y - g.pad.top) / g.plotH;
-    const row = clamp(Math.round(fraction * (bins - 1)), 0, bins - 1);
+    // floor(fraction * bins), not round(fraction * (bins - 1)): the rows are
+    // painted as equal strips, and this is the exact inverse of that. The
+    // rounded form addressed the row whose CENTRE was nearest, which is a
+    // different row from the one under the cursor for half of every strip.
+    const row = clamp(Math.floor(fraction * bins), 0, bins - 1);
     const raw = spec.matrix[row * frames + index];
-    const hz = f0 + (f1 - f0) * (row / Math.max(1, bins - 1));
+    // The row's own frequency, not one interpolated between the ends: on a
+    // one-third-octave heatmap the rows are geometrically spaced and the
+    // interpolated value names the wrong band for all but the two extremes.
+    const rows = spec.rowHz;
+    const hz = Array.isArray(rows) && isNum(rows[row])
+      ? rows[row]
+      : f0 + (f1 - f0) * (row / Math.max(1, bins - 1));
     if (raw === spec.missing) {
       return [{ label: fmtHz(hz), color: cssVar('--text-3'), text: 'no value' }];
     }
@@ -8278,6 +8959,8 @@ function paletteCommands() {
     }
     add({ group: 'Results', name: 'Export metrics as CSV', hint: 'Per-shot values', icon: 'i-download',
           run: () => downloadMetricsCsv() });
+    add({ group: 'Results', name: 'Save analysis sheet', hint: 'Every chart, one high-resolution PNG',
+          icon: 'i-download', run: () => exportAnalysisSheet() });
 
     // Individual shots, so a long string is navigable by number instead of by
     // clicking along the strip. Capped at what a search can usefully rank.

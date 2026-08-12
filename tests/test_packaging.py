@@ -114,6 +114,28 @@ def test_console_script_target_is_importable_and_callable():
     )
 
 
+def test_one_version_and_it_is_the_one_in_pyproject():
+    """
+    A record states which version produced it. That claim has to be true.
+
+    provenance.py kept its own constant and it went stale at 2.0.0 while
+    releases went out as 2.1.x, so every analysis in between named the wrong
+    producer in its own software block -- invisible in the interface, wrong in
+    the archive. main.py now re-exports provenance's constant, and this holds
+    both to the version that is actually packaged and shipped.
+    """
+    import main
+    import provenance
+
+    declared = pyproject()["project"]["version"]
+    assert provenance.__version__ == declared, (
+        f"provenance.__version__ is {provenance.__version__}, pyproject says {declared}"
+    )
+    assert main.__version__ == provenance.__version__, (
+        "main.py has gone back to keeping its own version constant"
+    )
+
+
 def test_spec_ships_every_module_the_installer_does():
     """
     The frozen app and the wheel must agree on what SASA consists of.

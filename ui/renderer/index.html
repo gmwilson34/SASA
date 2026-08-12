@@ -1497,6 +1497,10 @@
             </button>
             <div class="menu menu-end" id="results-menu" role="menu"
                  aria-labelledby="btn-results-menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" id="btn-results-sheet">
+                <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>
+                <span>Save analysis sheet (PNG)</span>
+              </button>
               <button type="button" class="menu-item" role="menuitem" id="btn-results-print">
                 <svg class="icon" aria-hidden="true"><use href="#i-print"/></svg>
                 <span>Print report</span>
@@ -1764,13 +1768,31 @@
                 <div class="figure-canvas">
                   <canvas id="bands-canvas" width="960" height="320" role="img"
                           aria-label="Mean one-third-octave band exposure against frequency."></canvas>
-                  <img id="img-bands" alt="Mean one-third-octave band exposure level against frequency." hidden />
                 </div>
                 <div class="figure-legend">
                   <span class="legend-item"><span class="legend-swatch" data-series="4"></span>Mean band exposure</span>
                   <span class="legend-item"><span class="legend-swatch" data-series="2"></span>A-weighted</span>
                 </div>
                 <p class="figure-caption" id="caption-bands">—</p>
+              </figure>
+
+              <!-- Band level against time. The chart above answers "which
+                   bands", this one answers "which band, and when" — and that
+                   is a question you have to point at something to ask. -->
+              <figure class="figure" id="figure-band-heatmap">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">
+                    <svg class="icon" aria-hidden="true"><use href="#i-bands"/></svg>
+                    Band level through the recording
+                  </span>
+                </figcaption>
+                <div class="figure-canvas">
+                  <canvas id="band-heatmap-canvas" width="960" height="360" role="img"
+                          aria-label="One-third-octave band level against time and frequency."></canvas>
+                  <img id="img-band-heatmap"
+                       alt="One-third-octave band levels against time." hidden />
+                </div>
+                <p class="figure-caption" id="caption-band-heatmap">—</p>
               </figure>
 
               <div class="table-scroll" tabindex="0" role="region" aria-label="Band exposure table, scrollable">
@@ -1885,13 +1907,22 @@
                 <p class="figure-caption" id="caption-shot-levels">—</p>
               </figure>
 
-              <figure class="figure">
+              <figure class="figure" id="figure-shot-spectrogram">
                 <figcaption class="figure-toolbar">
-                  <span class="section-title">Shot summary plate</span>
-                  <span class="row-end field-hint">The engine's six-panel figure, as it appears in the report.</span>
+                  <span class="section-title">
+                    <svg class="icon" aria-hidden="true"><use href="#i-spectrogram"/></svg>
+                    What frequencies this shot put out
+                  </span>
+                  <label class="field-label row-end" for="shot-spectrogram-weighting">Weighting</label>
+                  <select class="select" id="shot-spectrogram-weighting">
+                    <option value="Z" selected>Z — unweighted</option>
+                    <option value="C">C-weighted</option>
+                  </select>
                 </figcaption>
                 <div class="figure-canvas">
-                  <img id="img-shot-detail" alt="Summary plot for the selected shot." />
+                  <canvas id="shot-spectrogram-canvas" width="960" height="320" role="img"
+                          aria-label="Spectrogram of the selected shot: level against time and frequency."></canvas>
+                  <img id="img-shot-detail" alt="Summary plot for the selected shot." hidden />
                 </div>
                 <p class="figure-caption" id="caption-shot-detail">—</p>
               </figure>
@@ -2011,6 +2042,23 @@
                     <span class="legend-item"><span class="legend-swatch" data-series="4"></span>Mean ± 1 sigma</span>
                   </div>
                   <p class="figure-caption" id="caption-variability">—</p>
+              </figure>
+
+              <!-- Every shot on one time base. A string that is consistent
+                   looks like one trace; a shot that is not looks like itself. -->
+              <figure class="figure" id="figure-overlay">
+                  <figcaption class="figure-toolbar">
+                    <span class="section-title">
+                      <svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg>
+                      Every shot, overlaid
+                    </span>
+                    <span class="row-end field-hint" id="overlay-hint"></span>
+                  </figcaption>
+                  <div class="figure-canvas">
+                    <canvas id="overlay-canvas" width="960" height="300" role="img"
+                            aria-label="Every included shot's pressure history on one time base."></canvas>
+                  </div>
+                  <p class="figure-caption" id="caption-overlay">—</p>
               </figure>
 
               <section class="card" id="card-drift" aria-labelledby="string-drift-title">

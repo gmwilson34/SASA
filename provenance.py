@@ -40,7 +40,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-__version__ = "2.0.0"
+# The version of SASA, for the whole application: main.py re-exports this one
+# rather than keeping its own. See the note there -- this constant was stale by
+# two releases and every record it stamped named the wrong producer.
+__version__ = "2.2.0"
 
 # Fields required for a measurement record that another lab could reproduce.
 REQUIRED_FOR_DEFENSIBLE: tuple[str, ...] = (
