@@ -1974,9 +1974,22 @@ def _run_pipeline(
     else:
         say("    metrics: not written (no shots detected)")
 
+    levels_block = _shot_levels_block(shot_metrics, level_unit=calibration.level_unit)
+    if levels_block is not None:
+        levels_path = out_dir / "shot_levels.json"
+        try:
+            write_json(levels_path, levels_block)
+            artifacts["shot_levels"] = levels_path.name
+            say(f"    levels:   {levels_path.name} ({len(levels_block['shots'])} shot(s))")
+        except OSError as exc:
+            message = f"The shot level curves could not be written: {exc}"
+            logger.warning(message)
+            run_warnings.append(message)
+
     waveform_block = _waveform_envelope_block(
         analysis.get("pressure"), shots, sample_rate,
         level_unit=calibration.level_unit,
+        calibrated=bool(calibration.calibrated),
     )
     if waveform_block is not None:
         waveform_path = out_dir / "waveform_envelope.json"
@@ -2080,9 +2093,11 @@ def _column_envelope(values: np.ndarray, columns: int) -> Tuple[List[float], Lis
     envelope keeps the extremes, so the drawn band always contains the peak
     and the reader can trust the height of it.
 
-    Returns two lists of length min(columns, values.size), rounded to
-    millipascals: finer than any display can resolve and a third of the bytes
-    of full float precision.
+    Rounded to a RELATIVE precision, not to a fixed number of decimals. A
+    fixed 3 dp is millipascals on a calibrated recording that peaks near 60 Pa
+    -- finer than any display resolves -- and a catastrophe on an uncalibrated
+    one that peaks near 0.75 full scale, where it rounds the entire noise floor
+    to zero and draws a flat line where the signal is.
     """
     n = int(values.size)
     if n == 0:
@@ -2093,7 +2108,13 @@ def _column_envelope(values: np.ndarray, columns: int) -> Tuple[List[float], Lis
     starts = edges[:-1]
     lo = np.minimum.reduceat(values, starts)
     hi = np.maximum.reduceat(values, starts)
-    return ([round(float(v), 3) for v in lo], [round(float(v), 3) for v in hi])
+
+    # Five decimal digits below the peak: about 0.001 % of full deflection,
+    # which no display can resolve, whatever the units happen to be.
+    peak = float(max(abs(float(lo.min())), abs(float(hi.max())), 1e-12))
+    digits = max(0, 5 - int(math.floor(math.log10(peak))) - 1)
+    digits = min(digits, 12)
+    return ([round(float(v), digits) for v in lo], [round(float(v), digits) for v in hi])
 
 
 def _waveform_envelope_block(
@@ -2102,6 +2123,7 @@ def _waveform_envelope_block(
     sample_rate: float,
     *,
     level_unit: str,
+    calibrated: bool,
 ) -> Optional[Dict[str, Any]]:
     """
     The waveform, as data the interface can plot and interrogate.
@@ -2131,7 +2153,13 @@ def _waveform_envelope_block(
         "sample_rate_Hz": float(sample_rate),
         "n_samples": int(pressure.size),
         "duration_s": round(float(pressure.size) / float(sample_rate), 6),
-        "unit": "Pa",
+        # Calibration.to_pascals is a PASS-THROUGH when the chain was never
+        # calibrated -- its own docstring says so -- and the result is in
+        # full-scale units. Labelling that axis "Pa" would put an absolute
+        # pressure on a relative measurement, which is the one thing this
+        # application exists not to do.
+        "unit": "Pa" if calibrated else "FS",
+        "calibrated": bool(calibrated),
         "level_unit": level_unit,
         "columns": levels[0]["columns"],
         "levels": levels,
@@ -2156,6 +2184,50 @@ def _waveform_envelope_block(
             "hi": shot_hi,
         })
     return block
+
+
+def _shot_levels_block(shot_metrics, *, level_unit: str) -> Optional[Dict[str, Any]]:
+    """
+    The time-weighted level curves for each shot, as data.
+
+    These are the LAF/LAS/LZF/LZS histories that the per-shot summary figure
+    draws in its top-right panel. They exist on ShotMetrics already and were
+    simply never serialised, so the one panel of that figure that shows how a
+    shot DEVELOPS -- the rise, the plateau, the decay the suppressor actually
+    changes -- was available only as a picture.
+
+    They are cheap: the hop is one millisecond, so a 250 ms window is 250
+    points per curve, and eight shots of four curves is a few thousand numbers.
+
+    Written to its own file rather than into analysis_metadata.json because the
+    history endpoint re-serialises every record it lists, and this would be
+    paid on every visit to the History view for no benefit there.
+    """
+    shots: List[Dict[str, Any]] = []
+    for metric in shot_metrics or []:
+        times = np.asarray(getattr(metric, "time_s", []), dtype=float).ravel()
+        if times.size == 0:
+            continue
+        curves: Dict[str, Any] = {}
+        for name in ("LAF", "LAS", "LZF", "LZS"):
+            values = np.asarray(getattr(metric, name, []), dtype=float).ravel()
+            if values.size != times.size:
+                continue
+            # -inf is what a silent sample gives; JSON has no word for it, and
+            # null is the honest translation.
+            curves[name] = [None if not math.isfinite(v) else round(float(v), 2)
+                            for v in values]
+        if not curves:
+            continue
+        shots.append({
+            "shot_number": getattr(metric, "shot_number", None),
+            "time_s": [round(float(t), 5) for t in times],
+            "curves": curves,
+        })
+
+    if not shots:
+        return None
+    return {"level_unit": level_unit, "shots": shots}
 
 
 def _ahaah_block(

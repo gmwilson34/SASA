@@ -1372,14 +1372,14 @@
                 </h3>
               </div>
               <div class="card-header-actions">
-                <span class="pill" id="review-pill" data-tone="warn">
+                <span class="pill" id="config-review-pill" data-tone="warn">
                   <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
-                  <span id="review-pill-text">Incomplete</span>
+                  <span id="config-review-pill-text">Incomplete</span>
                 </span>
               </div>
             </div>
             <div class="card-body">
-              <ul class="review-list" id="review-list"></ul>
+              <ul class="review-list" id="config-review-list"></ul>
             </div>
           </div>
 
@@ -1848,9 +1848,47 @@
                 </div>
               </figure>
 
+              <!-- The selected shot, as data rather than as a plate. The
+                   engine's six-panel summary figure is still written for the
+                   report; these are the two panels of it that answer a
+                   question you have to point at something to ask. -->
+              <figure class="figure" id="figure-shot-wave">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">
+                    <svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg>
+                    This shot, sample by sample
+                  </span>
+                </figcaption>
+                <div class="figure-canvas">
+                  <canvas id="shot-wave-canvas" width="960" height="260" role="img"
+                          aria-label="Pressure against time for the selected shot."></canvas>
+                </div>
+                <p class="figure-caption" id="caption-shot-wave">—</p>
+              </figure>
+
+              <figure class="figure" id="figure-shot-levels">
+                <figcaption class="figure-toolbar">
+                  <span class="section-title">
+                    <svg class="icon" aria-hidden="true"><use href="#i-trend"/></svg>
+                    How the level develops
+                  </span>
+                </figcaption>
+                <div class="figure-canvas">
+                  <canvas id="shot-levels-canvas" width="960" height="260" role="img"
+                          aria-label="Time-weighted levels against time for the selected shot."></canvas>
+                </div>
+                <div class="figure-legend">
+                  <span class="legend-item"><span class="legend-swatch" data-series="2"></span>A-weighted, fast</span>
+                  <span class="legend-item"><span class="legend-swatch" data-series="3"></span>A-weighted, slow</span>
+                  <span class="legend-item"><span class="legend-swatch" data-series="1"></span>Z-weighted, fast</span>
+                </div>
+                <p class="figure-caption" id="caption-shot-levels">—</p>
+              </figure>
+
               <figure class="figure">
                 <figcaption class="figure-toolbar">
-                  <span class="section-title">Shot summary plot</span>
+                  <span class="section-title">Shot summary plate</span>
+                  <span class="row-end field-hint">The engine's six-panel figure, as it appears in the report.</span>
                 </figcaption>
                 <div class="figure-canvas">
                   <img id="img-shot-detail" alt="Summary plot for the selected shot." />

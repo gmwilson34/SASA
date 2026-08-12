@@ -1129,7 +1129,13 @@ function wireKeyboard() {
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
 
     if (ev.key === 'Escape') {
+      // Whatever is on top goes first. Without this, dismissing the palette or
+      // a dialog during a run ALSO cancelled the run — one keystroke, two
+      // actions, and the destructive one invisible behind the other.
       if (state.ui.menu) { ev.preventDefault(); closeMenu({ restoreFocus: true }); return; }
+      const palette = $('palette');
+      if (palette && palette.open) return;
+      if (qsa('dialog[open]').length > 0) return;
       if (state.run.status === 'running' || state.run.status === 'starting') {
         ev.preventDefault();
         cancelRun();
@@ -1138,6 +1144,8 @@ function wireKeyboard() {
     }
 
     if (isTypingTarget(ev.target)) return;
+    // A modal is modal. R, X, [ and ] were still driving the page behind it.
+    if (qsa('dialog[open]').length > 0) return;
 
     switch (ev.key) {
       case '1': setView('analyze'); break;
@@ -2735,6 +2743,7 @@ function setFigure(imgId, file, sub, altText) {
 
 async function loadResults(dir, { navigate = true } = {}) {
   if (!dir) return;
+  resetChartState();
   state.results.status = 'loading';
   state.results.error = null;
   state.results.dir = dir;
@@ -2781,9 +2790,18 @@ async function loadResults(dir, { navigate = true } = {}) {
   const list = Array.isArray(saved[state.results.dir]) ? saved[state.results.dir] : [];
   state.results.rejected = new Set(list);
 
-  // A tone calibration only yields its Pa/FS once the backend has derived it.
+  // A tone calibration only yields its Pa/FS once the backend has derived it,
+  // and ONLY the run the operator just started may write it back into the
+  // Analyze form. Opening an archived analysis from History, or loading one
+  // into Compare, used to overwrite the live calibration with that record's
+  // factor — so the next run would be scaled by a number that came from a
+  // different microphone on a different day, and the form would show it as
+  // this session's calibration.
   const calibration = payload.metadata.calibration || {};
-  if (calibration.method && String(calibration.method).toLowerCase().includes('tone')) {
+  const isOwnRun = Boolean(state.run.outputDir)
+    && (state.results.dir === state.run.outputDir);
+  if (isOwnRun && calibration.method
+      && String(calibration.method).toLowerCase().includes('tone')) {
     state.calibration.derivedPaPerFS = isNum(calibration.Pa_per_FS) ? calibration.Pa_per_FS : null;
     state.calibration.derivedResidual = isNum(calibration.residual_dB) ? calibration.residual_dB : null;
   }
@@ -3656,6 +3674,9 @@ function renderShotsPanel() {
     : (shot ? 'No summary figure was produced for this shot.' : 'No shot selected.'));
 
   drawShotBandChart();
+
+  drawShotWaveChart();
+  drawShotLevelsChart();
 }
 
 function wireShotNav() {
@@ -4318,6 +4339,7 @@ function drawBandsChart() {
   const frequencies = aggregate.band_frequencies_Hz || [];
   const mean = aggregate.band_exposure_mean_dB || [];
   if (frequencies.length < 2 || mean.length !== frequencies.length) {
+    invalidateChart(canvas);
     show(canvas, false);
     show(image, true);
     return;
@@ -4385,6 +4407,7 @@ function drawDistributionChart() {
   const values = includedShots().map(s => s[key]).filter(isNum);
 
   if (values.length < 2) {
+    invalidateChart(canvas);
     show(canvas, false);
     show(image, true);
     return;
@@ -4474,6 +4497,154 @@ function drawVariabilityChart() {
 
 
 /* ---------------------------------------------------------------------------
+   THE SELECTED SHOT
+
+   Two of the six panels of the engine's summary plate, drawn from data so
+   they can be interrogated: the blast itself, and how its level develops.
+   The other four are already here as live components — the metric tiles, the
+   band chart — or are the two spectrograms, which the whole-recording
+   spectrogram covers.
+   --------------------------------------------------------------------------- */
+
+const shotLevelsCache = new Map();
+
+function loadShotLevels() {
+  const dir = state.results.dir;
+  const file = (metaBlock('artifacts') || {}).shot_levels;
+  if (!dir || !file) return;
+  const key = `${dir}::${file}`;
+  if (shotLevelsCache.has(key)) { drawShotLevelsChart(); return; }
+  shotLevelsCache.set(key, null);
+  fetch(artifactUrl(dir, file))
+    .then(r => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+    .then(payload => { shotLevelsCache.set(key, payload); drawShotLevelsChart(); })
+    .catch(err => {
+      console.warn('shot level curves unavailable', err);
+      shotLevelsCache.set(key, false);
+      drawShotLevelsChart();
+    });
+}
+
+function currentShotLevels() {
+  const dir = state.results.dir;
+  const file = (metaBlock('artifacts') || {}).shot_levels;
+  if (!dir || !file) return null;
+  return shotLevelsCache.get(`${dir}::${file}`) || null;
+}
+
+/** The selected shot's own window, at the envelope's finest resolution. */
+function drawShotWaveChart() {
+  const canvas = $('shot-wave-canvas');
+  const figure = $('figure-shot-wave');
+  if (!canvas) return;
+  chartRegistry.set('shot-wave-canvas', drawShotWaveChart);
+
+  const envelope = currentEnvelope();
+  const shot = currentShot();
+  const window_ = envelope && shot
+    ? (envelope.shots || []).find(s => s.shot_number === shot.shot_number)
+    : null;
+
+  // Hidden rather than empty when there is no envelope for this shot: a figure
+  // frame around nothing is a claim that something should be there.
+  show(figure, Boolean(window_));
+  if (!window_) return;
+
+  const columns = Math.min(window_.lo.length, window_.hi.length);
+  if (columns < 2) { show(figure, false); return; }
+  const step = (window_.t1_s - window_.t0_s) / Math.max(1, columns - 1);
+  const times = Array.from({ length: columns }, (_, i) => (i * step) * 1000);
+
+  const palette = chartPalette();
+  drawXYChart(canvas, {
+    x: times,
+    xScale: 'linear',
+    xFormat: (t) => `${t.toFixed(t > 100 ? 0 : 1)} ms`,
+    xTitle: 'Time from the start of the window',
+    xNoun: 'window',
+    unit: envelope.unit || 'Pa',
+    zeroLine: true,
+    series: [{
+      label: 'Pressure',
+      color: palette.series[0],
+      kind: 'band',
+      lower: window_.lo,
+      upper: window_.hi,
+      alpha: 0.9,
+    }],
+    markers: [{
+      x: (window_.peak_time_s - window_.t0_s) * 1000,
+      label: 'peak',
+    }],
+  });
+
+  const peak = [...window_.hi, ...window_.lo].reduce(
+    (a, v) => (isNum(v) && Math.abs(v) > a ? Math.abs(v) : a), 0);
+  // The unit comes from the record. An uncalibrated recording is in full-scale
+  // units and saying "Pa" over it would be an absolute claim about a relative
+  // measurement — the same mistake the axis label already avoids.
+  const unit = envelope.unit || 'Pa';
+  setRaw($('caption-shot-wave'),
+    `Shot ${shot.shot_number}: ${fmt((window_.t1_s - window_.t0_s) * 1000, 0)} ms window, `
+    + `peak ${fmt(peak, 2)} ${unit}, ${columns} columns at ${fmt(step * 1e6, 0)} µs each.`);
+  canvas.setAttribute('aria-label', `Pressure against time for shot ${shot.shot_number}.`);
+}
+
+/** LAF / LAS / LZF against time, for the selected shot. */
+function drawShotLevelsChart() {
+  const canvas = $('shot-levels-canvas');
+  const figure = $('figure-shot-levels');
+  if (!canvas) return;
+  chartRegistry.set('shot-levels-canvas', drawShotLevelsChart);
+
+  const payload = currentShotLevels();
+  const shot = currentShot();
+  const entry = payload && shot
+    ? (payload.shots || []).find(s => s.shot_number === shot.shot_number)
+    : null;
+
+  show(figure, Boolean(entry));
+  if (!entry) return;
+
+  const palette = chartPalette();
+  const curves = entry.curves || {};
+  const series = [
+    ['LAF', 'A-weighted, fast', palette.series[1]],
+    ['LAS', 'A-weighted, slow', palette.series[2]],
+    ['LZF', 'Z-weighted, fast', palette.series[0]],
+  ].filter(([key]) => Array.isArray(curves[key]) && curves[key].some(isNum))
+    .map(([key, label, color]) => ({ label, color, kind: 'line', values: curves[key] }));
+
+  if (series.length === 0) { show(figure, false); return; }
+
+  drawXYChart(canvas, {
+    x: entry.time_s.map(t => t * 1000),
+    xScale: 'linear',
+    xFormat: (t) => `${t.toFixed(t > 100 ? 0 : 1)} ms`,
+    xTitle: 'Time from the start of the window',
+    xNoun: 'window',
+    unit: payload.level_unit || levelUnit(),
+    series,
+  });
+
+  const peakOf = (key) => {
+    const values = (curves[key] || []).filter(isNum);
+    return values.length ? Math.max(...values) : null;
+  };
+  const laf = peakOf('LAF');
+  const las = peakOf('LAS');
+  setRaw($('caption-shot-levels'),
+    `Shot ${shot.shot_number}, ${entry.time_s.length} points at 1 ms. `
+    + (laf === null ? '' : `LAFmax ${fmt(laf, 1)} ${payload.level_unit}. `)
+    + (las === null ? '' : `LASmax ${fmt(las, 1)} ${payload.level_unit}. `)
+    + 'Fast and slow are the standard 125 ms and 1 s exponential averages; '
+    + 'the gap between them is how impulsive the event is.');
+  canvas.setAttribute('aria-label',
+    `Time-weighted levels against time for shot ${shot.shot_number}.`);
+}
+
+
+/* ---------------------------------------------------------------------------
    SPECTROGRAM
 
    Read from spectrogram_{z,c}_matrix.json, which holds the same 0.1 dB values
@@ -4533,6 +4704,7 @@ function drawSpectrogramChart() {
   // the full-recording matrix is emitted as data. Rather than pretend, the
   // per-shot selection falls back to the engine's picture and says so.
   if (!payload || perShot) {
+    invalidateChart(canvas);
     show(canvas, false);
     show(image, true);
     return;
@@ -4587,6 +4759,38 @@ function drawSpectrogramChart() {
 
 /** dir -> the parsed envelope, so switching tabs does not refetch it. */
 const waveformCache = new Map();
+
+/**
+ * Forget everything that describes the analysis being replaced.
+ *
+ * These are module-level, and every one of them outlived the measurement it
+ * belonged to: opening a second analysis kept the first one's zoom, the first
+ * one's selected shot, and — while the new envelope was still being fetched —
+ * the first one's WAVEFORM, painted under the new analysis's heading. A chart
+ * showing the wrong recording is the worst failure this interface has.
+ */
+function resetChartState() {
+  waveformRange = null;
+  waveformFocus = '';
+  const jump = $('waveform-jump');
+  if (jump) jump.value = '';
+  for (const id of ['waveform-canvas', 'spectrogram-canvas', 'bands-canvas',
+    'distribution-canvas', 'variability-canvas', 'absorption-canvas',
+    'shot-band-canvas', 'shot-wave-canvas', 'shot-levels-canvas']) {
+    const canvas = $(id);
+    if (!canvas) continue;
+    const record = chartState.get(canvas);
+    if (!record) continue;
+    record.view = null;
+    record.spec = null;
+    record.geom = null;
+    record.cursor = null;
+    record.drag = null;
+    record.focusKey = null;
+    if (record.readout) show(record.readout, false);
+    if (record.reset) show(record.reset, false);
+  }
+}
 
 function loadWaveformEnvelope() {
   const dir = state.results.dir;
@@ -4656,6 +4860,7 @@ function drawWaveformChart() {
   // No envelope on this record — an analysis from an older build, or the
   // chunked path. Fall back to the engine's PNG rather than an empty box.
   if (!envelope) {
+    invalidateChart(canvas);
     show(canvas, false);
     show(image, true);
     show(jump, false);
@@ -4704,8 +4909,17 @@ function drawWaveformChart() {
   // there — the selector chooses the STARTING window, not a fixed one.
   const fallback0 = focused ? focused.t0_s : 0;
   const fallback1 = focused ? focused.t1_s : (envelope.duration_s || 1);
-  const window0 = waveformRange ? Math.max(waveformRange.t0, fallback0) : fallback0;
-  const window1 = waveformRange ? Math.min(waveformRange.t1, fallback1) : fallback1;
+  let window0 = waveformRange ? Math.max(waveformRange.t0, fallback0) : fallback0;
+  let window1 = waveformRange ? Math.min(waveformRange.t1, fallback1) : fallback1;
+  // A range that no longer overlaps the signal — a zoom carried into a shorter
+  // recording, or a shot at the very end — inverts, and every slice below then
+  // collapses to a single column and reports "No waveform data" for a
+  // recording that has plenty. Fall back to the whole window instead.
+  if (!(window1 > window0)) {
+    waveformRange = null;
+    window0 = fallback0;
+    window1 = fallback1;
+  }
 
   const inside = (focused && window0 >= focused.t0_s && window1 <= focused.t1_s)
     ? focused
@@ -4787,7 +5001,7 @@ function drawWaveformChart() {
   const resolution = (t1 - t0) / Math.max(1, columns - 1);
   setRaw($('caption-waveform'),
     `${brief ? `${fmt((t1 - t0) * 1000, 1)} ms` : `${fmt(t1 - t0, 2)} s`} shown, `
-    + `peak ${fmt(peak, 2)} Pa. ${columns} columns at `
+    + `peak ${fmt(peak, 2)} ${envelope.unit || 'Pa'}. ${columns} columns at `
     + `${resolution < 1e-3 ? `${fmt(resolution * 1e6, 0)} µs` : `${fmt(resolution * 1e3, 2)} ms`} each, `
     + `drawn from ${sourceLabel}. Each column is the extremes of its span, so the band always contains the true peak.`);
   canvas.setAttribute('aria-label', focused
@@ -4934,6 +5148,7 @@ function renderResults() {
   renderHeadlineMetrics();
   renderOverview();
   loadWaveformEnvelope();
+  loadShotLevels();
   loadSpectrogramMatrix($('spectrogram-weighting') ? $('spectrogram-weighting').value : 'Z');
   renderSpectrogramPanel();
   renderBandsPanel();
@@ -5004,6 +5219,14 @@ function wireResultsActions() {
 
   const details = $('btn-validity-details');
   if (details) details.addEventListener('click', () => openDialog($('modal-validity'), { opener: details }));
+
+  const distributionMetric = $('distribution-metric');
+  if (distributionMetric) distributionMetric.addEventListener('change', () => {
+    // One control, two charts: the distribution and the drift plot are the
+    // same measurement seen two ways and must never show different metrics.
+    drawDistributionChart();
+    drawVariabilityChart();
+  });
 
   const weighting = $('spectrogram-weighting');
   if (weighting) weighting.addEventListener('change', () => {
@@ -5163,7 +5386,34 @@ function prepareCanvas(canvas) {
   return { ctx, width, height };
 }
 
+/**
+ * Forget the draw this canvas is no longer showing.
+ *
+ * Hiding a canvas or painting a message over it does NOT remove the .chart
+ * shell that owns the pointer listeners, the overlay and the floating
+ * readout. Left behind, the crosshair goes on resolving pointer positions
+ * through the previous draw's geometry and printing the previous shot's
+ * levels over a chart that says it has no data — an authoritative number
+ * belonging to a different measurement, which is the one failure this
+ * application exists to prevent.
+ */
+function invalidateChart(canvas) {
+  const record = chartState.get(canvas);
+  if (!record) return;
+  record.spec = null;
+  record.geom = null;
+  record.cursor = null;
+  record.drag = null;
+  if (record.readout) show(record.readout, false);
+  if (record.reset) show(record.reset, false);
+  if (record.overlay) {
+    const ctx = record.overlay.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, record.overlay.width, record.overlay.height);
+  }
+}
+
 function chartMessage(canvas, message) {
+  invalidateChart(canvas);
   const surface = prepareCanvas(canvas);
   if (!surface) return;
   const { ctx, width, height } = surface;
@@ -5238,6 +5488,9 @@ function drawBandedChart(canvas, spec) {
   const series = allSeries.map(s => ({ ...s, values: s.values.slice(view.i0, view.i1 + 1) }));
   const values = series.flatMap(s => s.values).filter(isNum);
   if (values.length === 0) {
+    // record.spec has already been replaced above; returning here without
+    // clearing it would pair the NEW series with the PREVIOUS draw's
+    // geometry. chartMessage invalidates both.
     chartMessage(canvas, 'No band data in the selected range');
     return;
   }
@@ -5545,6 +5798,7 @@ function drawXYChart(canvas, spec) {
 
   const yPool = series.flatMap(s => [...(s.values || []), ...(s.lower || []), ...(s.upper || [])])
     .filter(isNum);
+  // Same as above: spec is already the new one, geom is still the old one.
   if (yPool.length === 0) { chartMessage(canvas, 'No data in the selected range'); return; }
 
   ctx.fillStyle = palette.surface;
@@ -6053,8 +6307,24 @@ function wireChartPointer(canvas, record) {
     }
   });
 
+  // A drag interrupted by the system — a phone call, a gesture the browser
+  // decides is a scroll — fires pointercancel and NOT pointerup, so without
+  // this the selection rectangle and the crosshair stay on screen for ever.
+  shell.addEventListener('pointercancel', (ev) => {
+    if (!record.drag) return;
+    record.drag = null;
+    if (shell.hasPointerCapture && shell.hasPointerCapture(ev.pointerId)) {
+      shell.releasePointerCapture(ev.pointerId);
+    }
+    record.cursor = null;
+    drawChartOverlay(canvas);
+  });
+
   shell.addEventListener('dblclick', () => {
-    if (!record.view) return;
+    // chartIsZoomed, not record.view: a chart that owns its own zoom (the
+    // waveform keeps a time window) has no index view, so double-click was
+    // dead on the one chart people zoom most.
+    if (!chartIsZoomed(record)) return;
     record.view = null;
     if (record.spec && typeof record.spec.onReset === 'function') record.spec.onReset();
     redrawChart(canvas);
@@ -6202,12 +6472,19 @@ function chartValuesAt(record, index) {
       const lower = (s.lower || [])[index];
       const upper = (s.upper || [])[index];
       if (isNum(lower) && isNum(upper)) {
-        out.push({ label: s.label, color: s.color, value: upper, pair: [lower, upper] });
+        out.push({ label: s.label, color: s.color, value: upper, pair: [lower, upper],
+          unit: s.unit, signed: s.signed });
       }
       continue;
     }
     const value = (s.values || [])[index];
-    if (isNum(value)) out.push({ label: s.label, color: s.color, value });
+    // unit and signed are per-series: one chart can legitimately carry a
+    // DIFFERENCE and the two ABSOLUTE levels it was computed from, and those
+    // are not the same quantity. Reading "+126.5 dB" off a reference level
+    // states a change where there is a measurement.
+    if (isNum(value)) {
+      out.push({ label: s.label, color: s.color, value, unit: s.unit, signed: s.signed });
+    }
   }
   return out;
 }
@@ -6223,8 +6500,15 @@ function announceChartRange(canvas, record) {
 function announceChartCursor(canvas, record) {
   const spec = record.spec;
   if (!spec || record.cursor === null) return;
-  const parts = chartValuesAt(record, record.cursor)
-    .map(entry => `${entry.label} ${fmt(entry.value, 1)} ${spec.unit || 'dB'}`);
+  const digits = readoutDigits(record.geom);
+  const parts = chartValuesAt(record, record.cursor).map((entry) => {
+    const unit = entry.unit || spec.unit || 'dB';
+    const signed = entry.signed === undefined ? Boolean(spec.zeroLine) : Boolean(entry.signed);
+    if (entry.pair) {
+      return `${entry.label} ${fmt(entry.pair[0], digits)} to ${fmt(entry.pair[1], digits)} ${unit}`;
+    }
+    return `${entry.label} ${signed ? fmtSigned(entry.value, digits) : fmt(entry.value, digits)} ${unit}`;
+  });
   announce(`${xLabelAt(record, record.cursor)}: ${parts.join(', ') || 'no value'}`);
 }
 
@@ -6299,7 +6583,13 @@ function drawChartOverlay(canvas) {
   const entries = chartValuesAt(record, index);
   const yOf = (v) => g.pad.top + g.plotH - ((v - g.lo) / (g.hi - g.lo)) * g.plotH;
   for (const entry of entries) {
-    const y = yOf(entry.value);
+    // On a heatmap the y axis is FREQUENCY and the value is a LEVEL, so the
+    // value cannot be placed on it — it was landing on the floor of the plot
+    // every time. The mark belongs at the cell the pointer is over.
+    const y = g.heatmap
+      ? clamp(record.cursorY === undefined ? g.pad.top : record.cursorY,
+        g.pad.top, g.pad.top + g.plotH)
+      : yOf(entry.value);
     ctx.beginPath();
     ctx.arc(x, y, 3.5, 0, Math.PI * 2);
     ctx.fillStyle = entry.color;
@@ -6361,10 +6651,11 @@ function renderChartReadout(record, index, entries, x) {
     // for a 40 dB band chart and useless on an absorption curve whose whole
     // span is half a decibel — every reading there would print as "0.0".
     const digits = readoutDigits(record.geom);
+    const unit = entry.unit || spec.unit || 'dB';
+    const signed = entry.signed === undefined ? Boolean(spec.zeroLine) : Boolean(entry.signed);
     value.textContent = entry.pair
-      ? `${fmt(entry.pair[0], digits)} to ${fmt(entry.pair[1], digits)} ${spec.unit || 'dB'}`
-      : `${spec.zeroLine ? fmtSigned(entry.value, digits) : fmt(entry.value, digits)} `
-        + `${spec.unit || 'dB'}`;
+      ? `${fmt(entry.pair[0], digits)} to ${fmt(entry.pair[1], digits)} ${unit}`
+      : `${signed ? fmtSigned(entry.value, digits) : fmt(entry.value, digits)} ${unit}`;
     row.appendChild(value);
 
     readout.appendChild(row);
@@ -6960,6 +7251,18 @@ function renderCompare() {
     : 'Per-band insertion loss is unavailable: at least one record has no band analysis.');
 }
 
+/** The level unit both compared records are in, or null if they disagree. */
+function compareLevelUnit() {
+  const units = ['ref', 'test']
+    .map(side => ((state.compare[side] || {}).metadata || {}))
+    .map(meta => ((meta.calibration || {}).level_unit) || null)
+    .filter(Boolean);
+  if (units.length === 2 && units[0] === units[1]) return units[0];
+  // Two records in different units cannot be differenced at all; the comparison
+  // is refused upstream, so this only has to avoid asserting one of them.
+  return 'dB';
+}
+
 function drawCompareBandChart() {
   const canvas = $('compare-band-canvas');
   if (!canvas) return;
@@ -6977,9 +7280,16 @@ function drawCompareBandChart() {
     unit: 'dB',
     zeroLine: true,
     series: [
-      { label: 'Insertion loss', color: palette.series[0], kind: 'bar', values: bands.il },
-      { label: 'Reference', color: palette.series[4], kind: 'line', values: bands.reference },
-      { label: 'Test', color: palette.series[5], kind: 'line', values: bands.test },
+      // The bars are a DIFFERENCE and carry a sign. The two lines are the
+      // ABSOLUTE levels it was computed from: they are not a change, and they
+      // are in whatever unit the records are in, which is "dB re FS" when the
+      // pair was measured uncalibrated.
+      { label: 'Insertion loss', color: palette.series[0], kind: 'bar',
+        values: bands.il, unit: 'dB', signed: true },
+      { label: 'Reference', color: palette.series[4], kind: 'line',
+        values: bands.reference, unit: compareLevelUnit(), signed: false },
+      { label: 'Test', color: palette.series[5], kind: 'line',
+        values: bands.test, unit: compareLevelUnit(), signed: false },
     ],
   });
   canvas.setAttribute('aria-label',
@@ -7751,7 +8061,7 @@ function reviewRows() {
 }
 
 function renderReviewSheet() {
-  const list = $('review-list');
+  const list = $('config-review-list');
   if (!list) return;
   list.textContent = '';
 
@@ -7781,10 +8091,10 @@ function renderReviewSheet() {
   }
 
   const outstanding = detailedBlockers().length;
-  const pill = $('review-pill');
+  const pill = $('config-review-pill');
   if (pill) {
     setTone(pill, outstanding === 0 ? 'ok' : 'warn');
-    setRaw($('review-pill-text'), outstanding === 0 ? 'Ready' : `${outstanding} outstanding`);
+    setRaw($('config-review-pill-text'), outstanding === 0 ? 'Ready' : `${outstanding} outstanding`);
   }
 }
 
@@ -7828,7 +8138,7 @@ function wireFlow() {
   }
 
   // The review sheet's pencils walk back to the step that owns the row.
-  const list = $('review-list');
+  const list = $('config-review-list');
   if (list) {
     list.addEventListener('click', (ev) => {
       const button = ev.target.closest('[data-step]');
@@ -7985,7 +8295,14 @@ function paletteCommands() {
   add({ group: 'Setup', name: 'Calibration profiles', hint: 'Saved sensitivity chains', icon: 'i-mic',
         run: () => openProfiles(null) });
   add({ group: 'Setup', name: 'Restore default settings', hint: 'Detection and analysis only', icon: 'i-restore',
-        run: () => { applySettings(SETTING_DEFAULTS); persistSettings(); commit(); } });
+        run: () => {
+          applySettings(SETTING_DEFAULTS);
+          // The defaults are valid by construction, so any error still shown
+          // against these controls is about a value that no longer exists.
+          for (const id of Object.keys(SETTING_DEFAULTS)) setFieldError(id, null);
+          persistSettings();
+          commit();
+        } });
 
   add({ group: 'View', name: 'Light theme', icon: 'i-sun', run: () => applyTheme('light') });
   add({ group: 'View', name: 'Dark theme', icon: 'i-moon', run: () => applyTheme('dark') });
