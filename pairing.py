@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from atmosphere import Atmosphere, geometric_spreading_dB
+from textutil import count
 
 # ---- Severities ----
 
@@ -498,7 +499,7 @@ def _check_session(ref: Any, test: Any, out: List[Objection]) -> None:
             code="different_day",
             severity=ADVISORY if gap <= 1 else MATERIAL,
             message=(
-                f"the two strings were recorded {gap} day(s) apart "
+                f"the two strings were recorded {count(gap, 'day')} apart "
                 f"({ref_date.isoformat()} and {test_date.isoformat()}). The chain was "
                 f"re-rigged in between, so the calibration must be shown to hold "
                 f"across both"
@@ -541,7 +542,7 @@ def _check_strings(
                 code=f"{label}_short",
                 severity=MATERIAL,
                 message=(
-                    f"the {label} string has only {n_valid} valid shot(s), below the "
+                    f"the {label} string has only {count(n_valid, 'valid shot')}, below the "
                     f"{MIN_SHOTS_PER_STRING} needed for a string mean whose confidence "
                     f"interval is narrower than ordinary shot-to-shot spread"
                 ),

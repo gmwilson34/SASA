@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+from textutil import count
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ def load_wav_chunk(
     if channel is not None and not (0 <= channel < n_channels):
         raise ValueError(
             f"channel {channel} is out of range for {wav_path.name}, "
-            f"which has {n_channels} channel(s) (0-{n_channels - 1})"
+            f"which has {count(n_channels, 'channel')} (0-{n_channels - 1})"
         )
     start_frame = max(0, int(start_frame))
     stop_frame = min(start_frame + int(n_frames), total_frames)
@@ -133,7 +134,7 @@ def load_wav(
         if not (0 <= channel < data.shape[1]):
             raise ValueError(
                 f"channel {channel} is out of range for {wav_path.name}, "
-                f"which has {data.shape[1]} channel(s) (0-{data.shape[1] - 1})"
+                f"which has {count(data.shape[1], 'channel')} (0-{data.shape[1] - 1})"
             )
         picked = data[:, channel]
         time_s = np.arange(picked.shape[0], dtype=np.float64) / float(sr)

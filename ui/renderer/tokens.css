@@ -271,17 +271,14 @@
    deuteranopia-safe: the sequence never relies on a red/green distinction to
    separate adjacent series.
    ============================================================================ */
-/* The signal gradient: the six series colours in order, used only for the brand
-   mark and the active navigation rail. It is the one place in the interface
-   where colour is decorative, and it is decorative because it IS the product's
-   subject - a spectrum. */
-:root {
-  --signal-gradient: linear-gradient(
-    180deg,
-    var(--series-1) 0%, var(--series-3) 22%, var(--series-4) 45%,
-    var(--series-6) 68%, var(--series-2) 86%, var(--series-5) 100%
-  );
-}
+/* There is deliberately no decorative gradient token here.
+   A "signal gradient" ran the six series colours down the active navigation
+   rail, on the argument that a spectrum is the product's subject. In use it
+   was a rainbow stripe in the chrome, and it broke the rule at the top of this
+   file: the six series colours MEAN Z-weighted, A-weighted, C-weighted, band,
+   reference and test. Spending them on furniture teaches an operator that a
+   coloured element need not mean anything, which is the one lesson an
+   instrument must not teach. Chrome is accent or nothing. */
 
 :root {
   --series-1: #14508C;  /* Z-weighted */

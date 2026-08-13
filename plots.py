@@ -64,6 +64,7 @@ from calibration import P_REF
 from shot_detect import ShotEvent
 from metrics import ShotMetrics
 from STFT import STFTResult
+from textutil import count
 
 try:  # provenance.py owns the version string; never duplicate it
     from provenance import __version__ as _SASA_VERSION
@@ -1528,7 +1529,7 @@ def plot_shot_overlay(
     _mono_ticks(ax)
 
     verdict_key = 'danger' if n_out else 'ok'
-    verdict = (f'{n_out} outlier shot(s) > {outlier_threshold_dB:.0f} dB from median'
+    verdict = (f'{count(n_out, "outlier shot")} > {outlier_threshold_dB:.0f} dB from median'
                if n_out else
                f'all shots within {outlier_threshold_dB:.0f} dB of the median peak')
     ax.text(0.985, 0.03, f' {"!" if n_out else "OK"}  {verdict} ',
@@ -1638,16 +1639,29 @@ def plot_measurement_quality(
         f'peak {peak_dB:.1f} {unit}' if peak_dB is not None else 'below full scale',
     ))
 
-    if clipped_n is None:
+    # Clipping has two causes and only one of them is at the rail. A limiter
+    # flat-tops the waveform below full scale, which leaves clipped_samples at
+    # zero and the measurement just as ruined, so the ceiling scan is read
+    # first: reporting "0 samples / no samples at full scale" over a limited
+    # recording is the reassurance this figure exists to withhold.
+    ceiling_clipped = bool(_q(quality_dict, 'ceiling_clipped', False))
+    if ceiling_clipped:
+        ceiling_dB = _q(quality_dict, 'ceiling_dBFS')
+        ceiling_n = _q(quality_dict, 'ceiling_samples', 0)
+        clip_status = 'danger'
+        clip_val = f'{int(ceiling_n or 0)} samples'
+        clip_note = (f'flat-topped at {ceiling_dB:.1f} dBFS, below full scale'
+                     if ceiling_dB is not None else 'flat-topped below full scale')
+    elif clipped_n is None:
         clip_status, clip_val, clip_note = 'info', '--', 'not assessed'
     elif int(clipped_n) == 0:
-        clip_status, clip_val, clip_note = 'ok', '0 samples', 'no samples at full scale'
+        clip_status, clip_val, clip_note = 'ok', '0 samples', 'no flat top, at the rail or below'
     else:
         ratio = float(clip_ratio) if clip_ratio is not None else float('nan')
         clip_status = 'danger'
         clip_val = f'{int(clipped_n)} samples'
-        clip_note = (f'{int(clipped_runs or 0)} run(s), {ratio * 100:.4f}% of record'
-                     if np.isfinite(ratio) else f'{int(clipped_runs or 0)} run(s)')
+        clip_note = (f'{count(int(clipped_runs or 0), "run")}, {ratio * 100:.4f}% of record'
+                     if np.isfinite(ratio) else count(int(clipped_runs or 0), 'run'))
     rows.append(('Clipping', clip_val, clip_status, clip_note))
 
     rows.append((
@@ -1850,7 +1864,7 @@ def plot_band_insertion_loss_ci(
         f'{test_label[:22]:<22s} n = {n_tst}',
         f'Mean per-band       {float(np.nanmean(il)) if n else float("nan"):+7.1f} dB',
         f'Bands within scatter {n_inconclusive:>3d} of {n:<3d}',
-        f'~{expected_false:.1f} band(s) read established by chance',
+        f'~{expected_false:.1f} bands read established by chance',
     ]
     ax.text(0.985, 0.03, '\n'.join(box_lines), transform=ax.transAxes,
             ha='right', va='bottom', fontsize=FONT_XS, family='monospace',

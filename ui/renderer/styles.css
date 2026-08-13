@@ -861,6 +861,24 @@ hr.rule {
   font-variant-numeric: tabular-nums;
 }
 
+/* The browser's own spinner is suppressed. Every numeric field on this page is
+   a measured quantity with its own unit chip on the trailing edge, and the
+   spinner appears on hover INSIDE that chip, overlapping it and shifting the
+   value the operator is reading. A spinner is also the wrong affordance here:
+   there is no natural step between 100.4 kPa and 100.5 kPa on a barometer.
+   Arrow keys still increment, which is the accessible path and the only one
+   anyone used. */
+.input[type="number"]::-webkit-outer-spin-button,
+.input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+.input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 /* A read-only field showing a value SASA computed for the operator. */
 .input-computed {
   background: var(--bg-inset);
@@ -1369,6 +1387,21 @@ hr.rule {
   grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
 }
 
+/* Settings holds exactly four cards, so it is laid out as two columns rather
+   than left to auto-fit. At three columns the fourth card sat alone under a
+   two-thirds-wide hole, which reads as a card that failed to load. Two columns
+   make a closed 2x2 block at any width that can hold it, and one column below
+   that. The cards are also given a floor so a short one (Appearance, one
+   field) does not look like a mistake beside a long one. */
+.settings-grid {
+  /* 22rem, so two columns still fit the ~768px content area left at a 1024px
+     window. At 24rem they needed 784px and dropped to one column on the most
+     common laptop width. */
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  max-width: 68rem;
+}
+.settings-grid > .card { min-height: 14rem; }
+
 
 /* ============================================================================
    10  METRIC TILES
@@ -1381,6 +1414,11 @@ hr.rule {
   gap: var(--space-3);
   grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
 }
+
+/* Anything in a metric grid that is prose rather than a reading: it takes the
+   full width instead of standing in a tile's place looking like a tile that
+   failed to render. */
+.metric-grid > .grid-span { grid-column: 1 / -1; }
 
 .metric-tile {
   display: flex;
@@ -2578,7 +2616,12 @@ hr.rule {
   width: var(--rail);
   height: 0;
   border-radius: 0 var(--rail-radius) var(--rail-radius) 0;
-  background: var(--signal-gradient);
+  /* One colour, the accent. This used to run the six series colours as a
+     gradient — a rainbow stripe beside "Analyze". On an instrument a colour
+     means something, and those six mean Z-weighted, A-weighted, C-weighted,
+     band, reference and test; spending them as decoration on a navigation
+     item teaches the operator that they are decoration. */
+  background: var(--accent);
   transform: translateY(-50%);
   transition: height var(--duration) var(--ease);
 }
@@ -3427,11 +3470,18 @@ hr.rule {
   transition: background-color var(--duration) var(--ease);
 }
 
-/* A connector belongs to the leg BEFORE it, so it is coloured by the step it
-   leaves, not the step it arrives at. Colouring it from the arriving step —
-   which is what this did first — claimed the whole route up to that point was
-   finished when only that one stop was. */
-.stepper-item[data-state="done"] + .stepper-item::before { background: var(--accent); }
+/* The connector is the ROUTE, and a route is continuous or it is not a route.
+   It is filled only where every stop before it is complete — data-reached,
+   set by renderStepper().
+
+   Two earlier rules both failed for the same reason. Colouring it from the
+   arriving step claimed the whole route up to that point was finished when
+   only one stop was. Colouring it from the leaving step was true per-leg and
+   painted a disconnected blue segment in the middle of a grey rail — a step 4
+   finished before steps 2 and 3 lit the leg from 4 to 5 and nothing else,
+   which every reader took for a rendering fault. The disc already says whether
+   a stop is done; the rail says how far the route is clear. */
+.stepper-item[data-reached="true"]::before { background: var(--accent); }
 
 .stepper-node {
   display: flex;

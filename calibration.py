@@ -67,6 +67,43 @@ CLIP_TOLERANCE: float = 1e-4
 # rather than a single sample that happened to land on the rail.
 CLIP_RUN_SAMPLES: int = 2
 
+# ---- Ceiling (limiter / AGC) clipping ------------------------------------
+#
+# Clipping does NOT have to happen at digital full scale. Phone and camera
+# recorders, field recorders with AGC, and anything that has been through a
+# broadcast limiter flat-top the waveform at whatever ceiling the limiter was
+# set to, and the file then arrives with comfortable-looking headroom. The
+# rail test above sees nothing; the measurement is still ruined, because the
+# peak is understated and rise time, crest factor and kurtosis are computed
+# from a plateau that the microphone never saw.
+#
+# The signature is the same one ahaah._detect_clipping() looks for in a
+# calibrated pressure history: several samples in a row pinned at the
+# waveform's OWN extreme. These constants set what "pinned" and "several" mean.
+
+# How close to the extreme counts as sitting on it, as a fraction of the
+# extreme. 1e-4 is ~1.5 LSB at 16-bit and ~1700 LSB at 24-bit, so it absorbs
+# a limiter's own dither without merging genuinely distinct sample values.
+CEILING_TOLERANCE: float = 1e-4
+
+# Consecutive at-ceiling samples that make a plateau. Three rather than the
+# rail test's two: a rail is a hard boundary a signal can only touch, but a
+# waveform's own maximum is by definition attained, and at high sample rates
+# a rounded peak can put two samples within tolerance of it by curvature
+# alone. Three in a row is flat-topping.
+CEILING_RUN_SAMPLES: int = 3
+
+# Distinct plateaus required before ceiling clipping is declared. One plateau
+# anywhere in a recording is not evidence; a limiter that engaged once will
+# engage on every shot in the string.
+CEILING_MIN_RUNS: int = 2
+
+# A waveform whose peak is less than this above its RMS is periodic (a square
+# wave is 0 dB, a sine 3 dB) rather than impulsive, and its flat top is its
+# shape rather than damage. Real gunshot recordings sit above 15 dB even
+# across a whole file of mostly silence.
+CEILING_MIN_CREST_dB: float = 6.0
+
 
 def _validate_positive_finite(value: float, name: str) -> float:
     """
@@ -460,6 +497,11 @@ class SignalQuality:
     nyquist_Hz: float
     sample_rate_adequate: bool
 
+    # Flat-topping below full scale. Kept separate from clipped_samples so the
+    # two causes stay distinguishable in the record: one is a converter that
+    # ran out of range, the other is a limiter that was left switched on.
+    ceiling: "CeilingClipping" = field(default_factory=lambda: CeilingClipping())
+
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
@@ -470,7 +512,8 @@ class SignalQuality:
 
     @property
     def is_clipped(self) -> bool:
-        return self.clipped_runs > 0
+        """True for either cause: the digital rail, or a limiter below it."""
+        return self.clipped_runs > 0 or self.ceiling.detected
 
     def summary(self) -> str:
         """Human-readable QA summary."""
@@ -486,6 +529,8 @@ class SignalQuality:
                 f"  CLIPPING:      {self.clipped_samples} samples in {self.clipped_runs} runs "
                 f"({self.clipping_ratio*100:.4f}%)"
             )
+        if self.ceiling.detected:
+            lines.append(f"  LIMITER:       {self.ceiling.describe()}")
         for e in self.errors:
             lines.append(f"  ERROR:   {e}")
         for w in self.warnings:
@@ -501,6 +546,10 @@ class SignalQuality:
             "clipped_runs": self.clipped_runs,
             "clipping_ratio": self.clipping_ratio,
             "is_clipped": self.is_clipped,
+            "ceiling_clipped": self.ceiling.detected,
+            "ceiling_dBFS": round(self.ceiling.ceiling_dBFS, 2) if self.ceiling.detected else None,
+            "ceiling_samples": self.ceiling.samples,
+            "ceiling_runs": self.ceiling.runs,
             "dc_offset_FS": self.dc_offset_FS,
             "dc_offset_dB": round(self.dc_offset_dB, 2),
             "noise_floor_dB": round(self.noise_floor_dB, 2),
@@ -553,6 +602,193 @@ def detect_clipping(
     return int(lengths[qualifying].sum()), int(qualifying.sum())
 
 
+@dataclass
+class CeilingClipping:
+    """
+    Flat-topping at a ceiling BELOW digital full scale.
+
+    ``detected`` is the only thing a caller should branch on; the rest is the
+    evidence, so a report can say what was seen rather than just asserting it.
+    """
+    ceiling_FS: float = 0.0        # the level the waveform is pinned at
+    ceiling_dBFS: float = 0.0      # the same, as dB below full scale
+    samples: int = 0               # samples inside qualifying plateaus
+    runs: int = 0                  # number of qualifying plateaus
+    longest_run: int = 0
+    crest_dB: float = 0.0
+    detected: bool = False
+
+    def describe(self) -> str:
+        """The evidence, as a phrase that can be dropped into a sentence."""
+        return (
+            f"{self.samples} samples pinned there, in {self.runs} plateaus, "
+            f"the longest {self.longest_run} samples long"
+        )
+
+
+def _pinned_runs(x_abs: np.ndarray, ceiling: float, tolerance: float) -> np.ndarray:
+    """Lengths of the maximal runs of samples sitting within tolerance of ceiling."""
+    at = np.abs(x_abs - ceiling) <= ceiling * tolerance
+    if not np.any(at):
+        return np.empty(0, dtype=np.int64)
+    padded = np.concatenate(([False], at, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    return (edges[1::2] - edges[0::2]).astype(np.int64)
+
+
+def detect_ceiling_clipping(
+    samples_FS: np.ndarray,
+    *,
+    ceiling: Optional[float] = None,
+    tolerance: float = CEILING_TOLERANCE,
+    min_run: int = CEILING_RUN_SAMPLES,
+    min_runs: int = CEILING_MIN_RUNS,
+    min_crest_dB: float = CEILING_MIN_CREST_dB,
+) -> CeilingClipping:
+    """
+    Detect a limiter or AGC ceiling: plateaus at the waveform's own extreme.
+
+    ``detect_clipping`` above only sees the digital rail. A recorder that
+    limits at, say, -3 dBFS produces a file with 3 dB of apparent headroom and
+    a destroyed peak, and passes the rail test untouched. This finds that.
+
+    Args:
+        samples_FS: Samples in full-scale units, nominally [-1, 1].
+        ceiling: The level to test, when the caller already knows the global
+                 extreme (a chunked reader does). Defaults to this block's own.
+        tolerance: Fractional distance from the ceiling that still counts as on it.
+        min_run: Consecutive at-ceiling samples that make a plateau.
+        min_runs: Plateaus required before clipping is declared.
+        min_crest_dB: Peak-to-RMS below which the waveform is periodic rather
+                      than impulsive, and its flat top is its shape.
+
+    Returns:
+        CeilingClipping. ``detected`` is False for a signal that is empty,
+        silent, periodic, or already pinned at the digital rail — the rail is
+        ``detect_clipping``'s job and reporting it twice helps nobody.
+    """
+    x = np.asarray(samples_FS, dtype=np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    if x.size < min_run:
+        return CeilingClipping()
+
+    x_abs = np.abs(x)
+    peak = float(x_abs.max())
+    top = float(ceiling) if ceiling is not None else peak
+    if top <= EPS:
+        return CeilingClipping()
+
+    rms = float(np.sqrt(np.mean(x ** 2)))
+    crest_dB = float(20.0 * np.log10(max(peak, EPS) / max(rms, EPS)))
+
+    lengths = _pinned_runs(x_abs, top, tolerance)
+    qualifying = lengths[lengths >= min_run]
+
+    found = CeilingClipping(
+        ceiling_FS=top,
+        ceiling_dBFS=float(20.0 * np.log10(max(top, EPS))),
+        samples=int(qualifying.sum()),
+        runs=int(qualifying.size),
+        longest_run=int(lengths.max()) if lengths.size else 0,
+        crest_dB=crest_dB,
+    )
+    found.detected = (
+        found.runs >= min_runs
+        and top < 1.0 - CLIP_TOLERANCE          # the rail is the other test's
+        and crest_dB >= min_crest_dB
+    )
+    return found
+
+
+class CeilingClippingScan:
+    """
+    Streaming form of detect_ceiling_clipping, for a file read in chunks.
+
+    A chunked reader cannot know the global extreme until it has read the
+    whole file, and the ceiling has to be global: a quiet chunk's own maximum
+    is not a limiter ceiling. So each chunk is measured against the highest
+    extreme seen so far, and the moment a louder chunk arrives the tally
+    starts again from it. The result is identical to running the whole-file
+    detector once the last chunk has been fed.
+    """
+
+    def __init__(self, **options) -> None:
+        self._options = options
+        self._ceiling = 0.0
+        self._samples = 0
+        self._runs = 0
+        self._longest = 0
+        self._peak = 0.0
+        self._sq_sum = 0.0
+        self._n = 0
+
+    def feed(self, block: np.ndarray) -> None:
+        x = np.asarray(block, dtype=np.float64)
+        if x.ndim > 1:
+            x = x.mean(axis=1)
+        if x.size == 0:
+            return
+        self._sq_sum += float(np.sum(x ** 2))
+        self._n += x.size
+
+        x_abs = np.abs(x)
+        block_peak = float(x_abs.max())
+        self._peak = max(self._peak, block_peak)
+
+        tolerance = self._options.get("tolerance", CEILING_TOLERANCE)
+        min_run = self._options.get("min_run", CEILING_RUN_SAMPLES)
+
+        # A louder chunk redefines the ceiling; everything counted against the
+        # old, lower one was not a ceiling at all.
+        if block_peak > self._ceiling * (1.0 + tolerance):
+            self._ceiling = block_peak
+            self._samples = self._runs = self._longest = 0
+        elif block_peak < self._ceiling * (1.0 - tolerance):
+            return      # nothing in this chunk can reach the ceiling
+
+        lengths = _pinned_runs(x_abs, self._ceiling, tolerance)
+        if not lengths.size:
+            return
+        qualifying = lengths[lengths >= min_run]
+        self._samples += int(qualifying.sum())
+        self._runs += int(qualifying.size)
+        self._longest = max(self._longest, int(lengths.max()))
+
+    def result(self) -> CeilingClipping:
+        if self._n == 0 or self._ceiling <= EPS:
+            return CeilingClipping()
+        rms = math.sqrt(self._sq_sum / self._n)
+        crest_dB = float(20.0 * math.log10(max(self._peak, EPS) / max(rms, EPS)))
+        found = CeilingClipping(
+            ceiling_FS=self._ceiling,
+            ceiling_dBFS=float(20.0 * math.log10(max(self._ceiling, EPS))),
+            samples=self._samples,
+            runs=self._runs,
+            longest_run=self._longest,
+            crest_dB=crest_dB,
+        )
+        found.detected = (
+            found.runs >= self._options.get("min_runs", CEILING_MIN_RUNS)
+            and self._ceiling < 1.0 - CLIP_TOLERANCE
+            and crest_dB >= self._options.get("min_crest_dB", CEILING_MIN_CREST_dB)
+        )
+        return found
+
+
+def ceiling_clipping_error(found: CeilingClipping) -> str:
+    """The operator-facing sentence for a detected limiter ceiling."""
+    return (
+        f"Recording is CLIPPED at {found.ceiling_dBFS:.1f} dBFS - {found.describe()}. "
+        f"The flat top is below digital full scale, so this is a limiter or automatic "
+        f"gain control in the recording chain rather than a converter that ran out of "
+        f"range: the file appears to have {abs(found.ceiling_dBFS):.1f} dB of headroom "
+        f"and has none. Peak level is understated by an unknown amount, and rise time, "
+        f"crest factor and kurtosis describe the plateau rather than the blast. "
+        f"Re-record with limiting and AGC switched off."
+    )
+
+
 def assess_signal_quality(
     samples_FS: np.ndarray,
     sample_rate: int,
@@ -600,6 +836,7 @@ def assess_signal_quality(
 
     clipped_samples, clipped_runs = detect_clipping(x)
     clipping_ratio = clipped_samples / n
+    ceiling = detect_ceiling_clipping(x)
 
     # DC offset
     dc = float(np.mean(x))
@@ -635,6 +872,8 @@ def assess_signal_quality(
             f"Peak levels are understated and rise time, crest factor and kurtosis are invalid. "
             f"Re-record with lower input gain."
         )
+    elif ceiling.detected:
+        errors.append(ceiling_clipping_error(ceiling))
     elif headroom_dB < min_headroom_dB:
         warnings.append(
             f"Only {headroom_dB:.1f} dB of headroom; the recording is close to clipping."
@@ -687,6 +926,7 @@ def assess_signal_quality(
         lf_energy_fraction=lf_fraction,
         nyquist_Hz=nyquist,
         sample_rate_adequate=sample_rate_adequate,
+        ceiling=ceiling,
         warnings=warnings,
         errors=errors,
     )
@@ -835,7 +1075,7 @@ def compute_rms(samples: np.ndarray, axis: int | None = None) -> np.ndarray | fl
         axis: Axis along which to compute RMS. None = entire array.
 
     Returns:
-        RMS value(s).
+        A scalar when axis is None, otherwise one RMS value per slice.
     """
     x = np.asarray(samples, dtype=np.float64)
     return np.sqrt(np.mean(x ** 2, axis=axis))
@@ -850,7 +1090,7 @@ def compute_peak(samples: np.ndarray, axis: int | None = None) -> np.ndarray | f
         axis: Axis along which to compute peak. None = entire array.
 
     Returns:
-        Peak absolute value(s).
+        A scalar when axis is None, otherwise one peak per slice.
     """
     x = np.asarray(samples, dtype=np.float64)
     return np.max(np.abs(x), axis=axis)

@@ -711,9 +711,32 @@ HTML files with pan, zoom, and hover tooltips:
 | `-o, --output` | `<input dir>/analysis` | Output base directory. Defaults to an `analysis/` folder next to the input file, not the current directory. |
 | `--config` | — | Load config from JSON file (overrides all other options) |
 | `--formats` | `png` | Plot formats, comma-separated: `png`, `pdf`, `svg` |
+| `--probe` | — | Describe the input as JSON and exit. Headers only: nothing is decoded, extracted or analysed. |
 
 The positional `input` argument is optional — omit it to get a native file
 picker. `--config` is read instead of, not merged with, the other flags.
+
+#### `--probe`
+
+Answers what a recording is before anything is spent on it:
+
+```bash
+sasa --probe range/test-04.mov
+```
+
+```json
+{"readable": true, "needs_extraction": true, "sample_rate": 48000,
+ "channels": 2, "subtype": "pcm_s32le", "frames": 162240, "duration_s": 3.38,
+ "nyquist_Hz": 24000.0, "sample_rate_adequate": true,
+ "notes": ["The audio track will be extracted from this mov before analysis, ...",
+           "2 channels; channel 0 is analysed unless another is chosen. ..."]}
+```
+
+An unreadable file still produces JSON — `readable: false` and a `problem` that
+says why — and a non-zero exit code. The web interface calls this the moment a
+recording is chosen, which is how the setup page knows the bin spacing, the
+highest band the recording can carry, and whether the sample rate can resolve a
+rise time, without running an analysis to find out.
 
 ### Config File
 
@@ -797,6 +820,7 @@ rounding happens on write, so what is stored is exactly what the readout shows.
 | `FileSelector.py` | Native OS file picker (macOS + Windows) | `choose_media_file()` |
 | `ExtractAudio.py` | Audio extraction from video files | `extract_audio()` |
 | `SignalGenerator.py` | Synthetic test tone generation | `synthesize_tone()` |
+| `textutil.py` | Sentence construction for operator-facing text | `count()`, `plural()`, `join_list()` |
 
 ### Standalone Module Usage
 
@@ -898,7 +922,29 @@ SASA follows or references these international standards:
 | Sample rate | ≥ 96 kHz | Captures energy up to 48 kHz; gunshots have significant content above 20 kHz |
 | Bit depth | 24-bit or 32-bit float | Provides sufficient dynamic range (~144 dB) for gunshot peak + ambient |
 | Headroom | Peaks below 0 dBFS | Clipping invalidates all peak metrics |
+| Limiter / AGC | **Off** | A limiter flat-tops the blast at its own ceiling, so the file arrives looking like it has headroom and the peak is already gone. SASA detects this and refuses the measurement — see below. |
 | Calibration | Required | Without it, dB values are relative, not absolute SPL |
+
+#### Clipping is detected at any level, not just at full scale
+
+The obvious form of clipping pins samples at ±1.0, and the obvious test finds
+it. The common form does not: phone and camera recorders, field recorders with
+AGC, and anything that has been through a broadcast limiter flat-top the
+waveform at whatever ceiling the limiter was set to. A recording limited at
+−3 dBFS reports 3 dB of headroom, passes a full-scale test untouched, and has
+had its peak removed.
+
+SASA looks for the plateau instead of the rail: several consecutive samples
+pinned at the waveform's own extreme, in more than one place, in a signal whose
+crest factor shows it is impulsive rather than periodic. A square wave or a
+calibrator tone is flat-topped by construction and is not accused of anything.
+
+When it is found, the measurement is refused — `quality.errors` names the
+ceiling in dBFS and the evidence, individual shots that reached the ceiling are
+flagged `clipped`, and the aggregate excludes them. The interface says
+`Limited at −3.0 dBFS` on the Clipping check and marks the Headroom check as a
+failure too, because the headroom it reports is to a rail the signal never
+reached.
 
 ### Known Limitations
 
@@ -906,7 +952,11 @@ SASA follows or references these international standards:
 2. **Near-field effects** — assumes far-field acoustic measurements
 3. **Doppler** — not compensated for moving sources
 4. **Very short events** — events < 1 ms may not be fully captured by STFT with default window size
-5. **Single-channel** — multichannel recordings are mixed to mono
+5. **One channel at a time** — a multichannel recording is analysed on channel 0
+   by default, because mixing two microphones together changes the level. Use
+   `--channel N` to pick another, or `--channels all` to analyse each in turn.
+   `--mono-mix` mixes them, and is only correct when the channels are the same
+   microphone.
 
 ---
 

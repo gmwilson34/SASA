@@ -63,6 +63,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
+from textutil import count
 
 # ---- Reference conditions (ISO 9613-1 clause 3) ----
 
@@ -647,7 +648,7 @@ class Atmosphere:
         )]
         if out_of_band.size:
             warnings.append(
-                f"{out_of_band.size} band(s) lie outside the "
+                f"{count(out_of_band.size, 'band')} lie outside the "
                 f"{ISO_9613_FREQUENCY_RANGE_HZ[0]:g}-{ISO_9613_FREQUENCY_RANGE_HZ[1]:g} Hz "
                 f"range ISO 9613-1 tabulates; their absorption is an extrapolation"
             )
@@ -1006,7 +1007,7 @@ def describe_atmospheric_effect(
     if outside.size:
         worst_outside = float(np.max(outside))
         effect.notes.append(
-            f"{outside.size} band(s) lie outside the {lo:g}-{hi:g} Hz range "
+            f"{count(outside.size, 'band')} lie outside the {lo:g}-{hi:g} Hz range "
             f"ISO 9613-1 tabulates, the highest at {worst_outside:.0f} Hz. Absorption "
             f"there is an extrapolation of the formula, and it is exactly where the "
             f"formula grows fastest, so those figures carry unquantified error."

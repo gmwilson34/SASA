@@ -539,6 +539,11 @@
                 </button>
               </div>
 
+              <!-- What the file's own header says, once it has been read.
+                   Filled by renderInputNotes(); these are things the operator
+                   would otherwise learn from the verdict after the run. -->
+              <ul class="stack-2 mt-3" id="input-notes" hidden></ul>
+
               <p class="divider-or"><span>or give a path on this machine</span></p>
 
               <div class="field">
@@ -1102,9 +1107,9 @@
             </div>
 
             <div class="card-footer">
-              <span id="metadata-completeness">
-                <span class="num" id="metadata-missing-count">0</span> required field(s) still empty
-              </span>
+              <!-- Replaced wholesale by renderMetadataCompleteness(); this is
+                   the pre-script state, so it says nothing it cannot know. -->
+              <span id="metadata-completeness" data-state="incomplete">Checking the record…</span>
             </div>
           </div>
         </section>
@@ -1225,8 +1230,11 @@
                     </select>
                     <span class="input-suffix">samples</span>
                   </div>
+                  <!-- Filled by renderSettingsDerived(); the sample rate is
+                       not known until a recording has been analysed, so the
+                       wording changes rather than printing "fs / 2048". -->
                   <p class="field-hint" id="stft-nperseg-hint">
-                    Resolution: <span class="num" id="stft-resolution">—</span> Hz per bin
+                    <span id="stft-resolution">—</span>
                   </p>
                 </div>
 
@@ -1383,7 +1391,11 @@
             </div>
           </div>
 
-          <div class="card">
+          <!-- Hidden by renderBlockers() once it holds nothing: on the last
+               step placeRunControls() takes the buttons out to the sticky bar,
+               and with no blockers left this card was an empty white panel
+               carrying one right-aligned sentence. -->
+          <div class="card" id="card-run-actions">
             <div class="card-body">
               <!-- Explicit, live-announced reasons the run cannot start. -->
               <div class="banner" data-tone="warn" id="run-blockers" role="status" aria-live="polite">
@@ -1412,9 +1424,6 @@
                     Cancel
                   </button>
                 </span>
-                <!-- Prose, not a unit: .unit is nowrap and clipped this sentence at
-                     narrow widths / high zoom. .field-hint wraps. -->
-                <span class="row-end field-hint" id="run-hint">Analysis runs locally; nothing leaves this machine.</span>
               </div>
             </div>
           </div>
@@ -1442,6 +1451,12 @@
                        aria-labelledby="run-progress-stage" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
               </div>
+
+              <p class="field-hint mt-2" id="run-hint">
+                Analysis runs on this machine; nothing is uploaded. Cancelling stops
+                the engine, and whatever it had already written is partial and is
+                not a result.
+              </p>
 
               <h4 class="subsection-title mt-5">Analysis log</h4>
               <div class="log" id="run-log" role="log" aria-label="Analysis log" tabindex="0"></div>
@@ -1639,7 +1654,7 @@
                 </figcaption>
                 <div class="figure-canvas" id="waveform-figure">
                   <canvas id="waveform-canvas" width="960" height="300" role="img"
-                          aria-label="Pressure against time, with each detected shot marked."></canvas>
+                          aria-label="Signal against time, with each detected shot marked."></canvas>
                   <img id="img-waveform" alt="Waveform of the recording with each detected shot marked." hidden />
                 </div>
                 <!-- The legend names what is actually drawn. The detection
@@ -1647,7 +1662,12 @@
                      legend entry with no mark is a claim about the picture
                      that the picture does not support. -->
                 <div class="figure-legend">
-                  <span class="legend-item"><span class="legend-swatch" data-series="1"></span>Pressure envelope</span>
+                  <!-- "Pressure" only when there IS a pressure. Uncalibrated,
+                       the trace is in full-scale units and calling it pressure
+                       is the exact claim this application refuses to make;
+                       renderWaveformLabels() sets the wording from the
+                       calibration. -->
+                  <span class="legend-item"><span class="legend-swatch" data-series="1"></span><span id="legend-waveform-trace">Signal envelope</span></span>
                   <span class="legend-item"><span class="legend-swatch" data-shot-marker></span>Detected shot</span>
                 </div>
                 <p class="figure-caption" id="caption-waveform">—</p>
@@ -1883,7 +1903,7 @@
                 </figcaption>
                 <div class="figure-canvas">
                   <canvas id="shot-wave-canvas" width="960" height="260" role="img"
-                          aria-label="Pressure against time for the selected shot."></canvas>
+                          aria-label="Signal against time for the selected shot."></canvas>
                 </div>
                 <p class="figure-caption" id="caption-shot-wave">—</p>
               </figure>
@@ -2303,6 +2323,11 @@
         </div>
       </div>
 
+      <!-- Says so when proposeComparePair() has filled the two dropdowns from
+           history. A proposal the operator did not make has to announce
+           itself, or it is indistinguishable from a choice they forgot making. -->
+      <p class="note note-info" id="compare-proposed" hidden></p>
+
       <!-- Selection -->
       <div class="compare-grid">
         <div class="card compare-slot" data-role="reference">
@@ -2412,12 +2437,15 @@
           <span class="metric-tile-caption" id="il-hero-caption">—</span>
         </div>
 
-        <section aria-labelledby="compare-metrics-title">
+        <!-- Hidden when the comparison is refused: an empty metric grid and
+             an empty table under a refusal are scaffolding for a number that
+             is never going to arrive. See renderCompare(). -->
+        <section id="compare-metrics-section" aria-labelledby="compare-metrics-title">
           <h2 class="subsection-title" id="compare-metrics-title">Insertion loss by metric</h2>
           <div class="metric-grid" id="compare-metrics"></div>
         </section>
 
-        <section aria-labelledby="compare-table-title">
+        <section id="compare-table-section" aria-labelledby="compare-table-title">
           <h2 class="subsection-title" id="compare-table-title">Reference against test</h2>
           <div class="table-scroll" tabindex="0" role="region" aria-label="Insertion loss table, scrollable">
             <table class="data-table" id="compare-table">
@@ -2440,7 +2468,7 @@
           </div>
         </section>
 
-        <figure class="figure">
+        <figure class="figure" id="compare-band-figure">
           <figcaption class="figure-toolbar">
             <span class="section-title">Insertion loss by 1/3-octave band</span>
             <span class="row-end unit">dB</span>
@@ -2525,7 +2553,7 @@
         </div>
       </div>
 
-      <div class="card-grid">
+      <div class="card-grid settings-grid">
 
         <div class="card">
           <div class="card-header"><h2 class="card-title">Appearance</h2></div>

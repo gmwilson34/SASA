@@ -601,3 +601,57 @@ def test_arrival_serialises_its_basis_and_character():
 
 def test_classifying_an_empty_arrival_list_is_safe():
     assert classify_arrivals([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Overlapping shot windows
+#
+# The warning used to be raised from the SETTINGS (post_ms > refractory_ms),
+# which is a statement about what could happen rather than what did. With the
+# shipped defaults that made it fire on every run, including runs whose shots
+# were a second apart.
+# ---------------------------------------------------------------------------
+
+def _detect_with_report(x, fs, **kwargs):
+    report = []
+    shots = detect_shots(x, fs, report=report, **kwargs)
+    return shots, report[0]
+
+
+def test_no_overlap_warning_when_the_windows_do_not_touch():
+    fs = 48000
+    # 700 ms apart, 200 ms of post-trigger window: nothing overlaps.
+    x = make_shot_train(fs, [0.4, 1.1, 1.8], duration=2.6, amplitude=0.5, noise_rms=1e-4)
+    shots, report = _detect_with_report(
+        x, fs, threshold_relative_dB=25.0, pre_ms=20.0, post_ms=200.0, refractory_ms=50.0,
+    )
+    assert len(shots) == 3
+    assert not any("overlap" in w for w in report.warnings), report.warnings
+
+
+def test_no_overlap_warning_from_the_settings_alone():
+    """post_ms above refractory_ms is not, by itself, an overlap."""
+    fs = 48000
+    x = make_shot_train(fs, [0.4, 1.4, 2.4], duration=3.4, amplitude=0.5, noise_rms=1e-4)
+    shots, report = _detect_with_report(
+        # 500 ms window, 200 ms refractory: the shipped defaults. The shots are
+        # a second apart, so no window reaches the next one.
+        x, fs, threshold_relative_dB=25.0, pre_ms=20.0, post_ms=500.0, refractory_ms=200.0,
+    )
+    assert len(shots) == 3
+    assert not any("overlap" in w for w in report.warnings), report.warnings
+
+
+def test_overlap_warning_when_the_windows_really_do_overlap():
+    fs = 48000
+    # 150 ms apart with a 500 ms window: every pair overlaps.
+    x = make_shot_train(fs, [0.4, 0.55, 0.70], duration=1.6, amplitude=0.5, noise_rms=1e-4)
+    shots, report = _detect_with_report(
+        x, fs, threshold_relative_dB=25.0, pre_ms=20.0, post_ms=500.0, refractory_ms=50.0,
+    )
+    assert len(shots) == 3
+    overlap = [w for w in report.warnings if "overlap" in w]
+    assert len(overlap) == 1, report.warnings
+    # It states how many pairs and how close the closest two are.
+    assert "2 pairs" in overlap[0]
+    assert "150 ms apart" in overlap[0]

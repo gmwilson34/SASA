@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from textutil import count, plural
 
 __all__ = [
     "generate_report",
@@ -286,23 +287,41 @@ def assess_validity(metadata: Dict[str, Any]) -> ValidityReport:
     clipped_shots = [s for s in shots if isinstance(s, dict) and s.get("clipped")]
     q_clipped = bool(quality.get("is_clipped")) or int(quality.get("clipped_runs") or 0) > 0
     if q_clipped or clipped_shots:
-        n_samples = quality.get("clipped_samples")
-        n_runs = quality.get("clipped_runs")
-        where = f"{len(clipped_shots)} shot(s)" if clipped_shots else "the recording"
-        checks.append(ValidityCheck(
-            "Clipping", "fail",
-            f"The signal reached digital full scale in {where} "
-            f"({_txt(n_samples, missing='?')} samples in {_txt(n_runs, missing='?')} runs).",
-            "A clipped peak is censored: the true peak is unknown and is at least the "
-            "value shown. Peak levels, crest factor, rise time and sound exposure from "
-            "the affected shots are lower bounds, not measurements. Re-record with more "
-            "headroom.",
-        ))
+        where = count(len(clipped_shots), "shot") if clipped_shots else "the recording"
+        # Two causes, and they call for two different corrections: a converter
+        # that ran out of range wants less gain, a limiter wants switching off.
+        if quality.get("ceiling_clipped"):
+            ceiling = quality.get("ceiling_dBFS")
+            detail = (
+                f"The waveform is flat-topped at {_txt(ceiling, missing='?')} dBFS in {where} "
+                f"({_txt(quality.get('ceiling_samples'), missing='?')} samples in "
+                f"{_txt(quality.get('ceiling_runs'), missing='?')} plateaus). The ceiling is "
+                f"below digital full scale, so a limiter or automatic gain control was active."
+            )
+            remedy = (
+                "A clipped peak is censored: the true peak is unknown and is at least the "
+                "value shown. Peak levels, crest factor, rise time and sound exposure from "
+                "the affected shots are lower bounds, not measurements. The apparent "
+                "headroom is not real headroom. Re-record with limiting and AGC switched off."
+            )
+        else:
+            detail = (
+                f"The signal reached digital full scale in {where} "
+                f"({_txt(quality.get('clipped_samples'), missing='?')} samples in "
+                f"{_txt(quality.get('clipped_runs'), missing='?')} runs)."
+            )
+            remedy = (
+                "A clipped peak is censored: the true peak is unknown and is at least the "
+                "value shown. Peak levels, crest factor, rise time and sound exposure from "
+                "the affected shots are lower bounds, not measurements. Re-record with more "
+                "headroom."
+            )
+        checks.append(ValidityCheck("Clipping", "fail", detail, remedy))
         blocking.append("The recording is clipped; peak levels are lower bounds, not measurements.")
     else:
         checks.append(ValidityCheck(
-            "Clipping", "ok", "No samples reached digital full scale.",
-            "Peak levels are not limited by the converter.",
+            "Clipping", "ok", "The waveform is not flat-topped, at the rail or below it.",
+            "Peak levels are limited by neither the converter nor a limiter.",
         ))
 
     # ── 3. Headroom ───────────────────────────────────────────────────
@@ -365,7 +384,7 @@ def assess_validity(metadata: Dict[str, Any]) -> ValidityReport:
         checks.append(ValidityCheck(
             "Sample rate", "warn",
             f"{_txt(sample_rate)} Hz (Nyquist {_num(nyquist, 0)} Hz); the rise time was "
-            f"not resolvable for {len(unresolved_rise)} shot(s).",
+            f"not resolvable for {count(len(unresolved_rise), 'shot')}.",
             "Rise time for those shots is an upper bound set by the sample interval.",
         ))
     else:
@@ -411,7 +430,7 @@ def assess_validity(metadata: Dict[str, Any]) -> ValidityReport:
         checks.append(ValidityCheck(
             "Shot detection",
             "warn" if det_warnings else "ok",
-            f"{int(n_detected)} shot(s) detected at a "
+            f"{count(int(n_detected), 'shot')} detected at a "
             f"{_num(detection.get('threshold_dB'))} {level_unit} threshold "
             f"({_txt(detection.get('threshold_mode'), missing='mode not recorded')}).",
             " ".join(str(w) for w in det_warnings),
@@ -452,7 +471,7 @@ def assess_validity(metadata: Dict[str, Any]) -> ValidityReport:
     else:
         checks.append(ValidityCheck(
             "Measurement record", "warn",
-            f"Incomplete - {len(missing_required)} required field(s) missing: "
+            f"Incomplete - {count(len(missing_required), 'required field')} missing: "
             f"{', '.join(str(m) for m in missing_required) or 'unspecified'}.",
             "The numbers remain arithmetically valid, but the measurement cannot be "
             "reproduced by another party or compared against another session, because "
@@ -1737,10 +1756,12 @@ def _section_hazard(metadata: Dict[str, Any], validity: ValidityReport) -> str:
 
     verdict_class = "danger" if exceeds else "warn"
     if exceeds:
-        verdict = (f"The daily noise dose for {_txt(hazard.get('n_rounds'))} round(s) "
+        verdict = (f"The daily noise dose for {_txt(hazard.get('n_rounds'))} "
+                   f"{plural(hazard.get('n_rounds') or 0, 'round')} "
                    f"EXCEEDS the {_num(criterion, 0)} dB criterion.")
     else:
-        verdict = (f"The daily noise dose for {_txt(hazard.get('n_rounds'))} round(s) is "
+        verdict = (f"The daily noise dose for {_txt(hazard.get('n_rounds'))} "
+                   f"{plural(hazard.get('n_rounds') or 0, 'round')} is "
                    f"within the {_num(criterion, 0)} dB criterion.")
 
     protection = ("no hearing protection assumed" if not _is_num(nrr) or float(nrr) == 0.0
@@ -2185,7 +2206,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.check:
         external = check_self_contained(path)
         if external:
-            print(f"NOT self-contained — {len(external)} external reference(s):",
+            print(f"NOT self-contained — {count(len(external), 'external reference')}:",
                   file=sys.stderr)
             for item in external[:20]:
                 print(f"  {item}", file=sys.stderr)

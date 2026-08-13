@@ -154,7 +154,16 @@ const APP_CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  `connect-src 'self' ws://localhost:${PORT} ws://127.0.0.1:${PORT} ws://[::1]:${PORT}`,
+  // 'self' is what covers the WebSocket: CSP Level 3 matches a ws:// URL
+  // against 'self' when the host and port are the page's own, which includes
+  // the IPv6 loopback the app is reached on when localhost resolves to ::1.
+  // The two named hosts are belt and braces for the IPv4 spellings.
+  //
+  // There was a third entry, `ws://[::1]:PORT`. A bracketed IPv6 literal is
+  // not in CSP's host-source grammar, so every browser rejected the WHOLE
+  // source expression as invalid, logged it to the console on every page
+  // load, and ignored it. It never granted anything.
+  `connect-src 'self' ws://localhost:${PORT} ws://127.0.0.1:${PORT}`,
   "frame-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
@@ -650,6 +659,11 @@ app.get('/api/health', (req, res) => {
       interpreter: probe.source,
       scriptPresent: isFile(path.join(PYTHON_DIR, 'main.py')),
     },
+    // Where results land when the operator has not chosen somewhere else.
+    // Shown as the Output directory field's placeholder, so "blank" reads as
+    // "here" rather than as "nowhere decided yet". Not a secret: the Results
+    // view already offers to open this directory and copy its path.
+    defaultOutputDir: ANALYSIS_DIR,
     limits: {
       maxUploadBytes: MAX_UPLOAD_BYTES,
       allowedExtensions: ALLOWED_UPLOAD_EXTENSIONS,
@@ -658,6 +672,51 @@ app.get('/api/health', (req, res) => {
     },
     activeRuns,
   });
+});
+
+// ── API: Describe a chosen recording, without analysing it ──
+//
+// The interface asks for this the moment a file is picked. Everything it
+// answers — bin spacing, the top of the band range, whether the rate can
+// resolve a rise time at all, which channel will be measured — is in the
+// file's header, and the alternative to reading it here is letting the
+// operator find out from the verdict after a run they did not need to spend.
+//
+// It reads headers only: `main.py --probe` decodes nothing.
+const PROBE_TIMEOUT_MS = 20000;
+
+app.get('/api/probe', (req, res) => {
+  const requested = typeof req.query.path === 'string' ? req.query.path : '';
+  const resolved = resolveWithinRoots(requested, INPUT_ROOTS, { mustExist: true });
+  if (!resolved) {
+    return sendError(res, 400, 'bad-path',
+      'That file is not inside the SASA workspace, so it cannot be read.');
+  }
+  if (!isFile(resolved)) {
+    return sendError(res, 404, 'not-found', 'No such file.');
+  }
+
+  const python = new PythonBridge(PYTHON_DIR).findPython();
+  execFile(
+    python.path,
+    [path.join(PYTHON_DIR, 'main.py'), '--probe', resolved],
+    { timeout: PROBE_TIMEOUT_MS, maxBuffer: 1 << 20, cwd: PYTHON_DIR },
+    (err, stdout) => {
+      res.set('Cache-Control', 'no-store');
+      // A non-zero exit is expected for an unreadable file: main.py still
+      // prints the JSON that says why, so stdout is parsed either way.
+      let parsed = null;
+      try { parsed = JSON.parse(String(stdout || '').trim()); } catch { parsed = null; }
+      if (parsed && typeof parsed === 'object') return res.json(parsed);
+
+      const reason = err && err.killed ? 'the probe timed out' : 'the probe produced no answer';
+      return res.json({
+        readable: false,
+        problem: `That file could not be described: ${reason}.`,
+        notes: [],
+      });
+    },
+  );
 });
 
 // ── Unmatched API routes ──
@@ -822,7 +881,7 @@ async function startAnalysis(ws, session, rawConfig, requestId) {
     if (dropped === 0) return;
     send(ws, {
       type: 'log', requestId, stream: 'stdout', dropped,
-      line: `[${dropped} log line(s) omitted to keep the interface responsive]`,
+      line: `[${dropped} log ${dropped === 1 ? 'line' : 'lines'} omitted to keep the interface responsive]`,
     });
     dropped = 0;
   };
@@ -934,7 +993,7 @@ function sweepUploads() {
     } catch { /* raced with another delete */ }
   }
 
-  if (removed > 0) console.log(`  · removed ${removed} upload(s) older than ${UPLOAD_TTL_HOURS}h`);
+  if (removed > 0) console.log(`  · removed ${removed} ${removed === 1 ? 'upload' : 'uploads'} older than ${UPLOAD_TTL_HOURS}h`);
 }
 
 const sweeper = setInterval(sweepUploads, UPLOAD_SWEEP_MINUTES * 60 * 1000);

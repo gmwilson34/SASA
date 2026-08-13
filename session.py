@@ -41,6 +41,7 @@ import numpy as np
 
 from pairing import auto_pair
 from stringstats import energy_average_dB, first_round_pop_across_strings
+from textutil import count, plural
 
 # Audio and video containers a range session is likely to hold.
 SESSION_EXTENSIONS: tuple = (
@@ -160,7 +161,7 @@ class SessionResult:
 
     def summary(self) -> str:
         lines = [
-            f"  Session: {len(self.entries)} recording(s), "
+            f"  Session: {count(len(self.entries), 'recording')}, "
             f"{len(self.analysed)} analysed, {len(self.failed)} failed"
         ]
         for entry in self.failed:
@@ -168,7 +169,8 @@ class SessionResult:
 
         if self.pairings:
             lines.append(f"  Pairing: {len(self.paired)} of {len(self.pairings)} "
-                         f"suppressed string(s) matched to a reference")
+                         f"suppressed {plural(len(self.pairings), 'string')} "
+                         f"matched to a reference")
             for pairing in self.pairings:
                 for line in pairing.summary().splitlines():
                     lines.append(f"  {line}")
@@ -178,12 +180,12 @@ class SessionResult:
         if math.isfinite(self.baseline_trend_dB_per_string):
             lines.append(
                 f"  Baseline drift: {self.baseline_trend_dB_per_string:+.3f} dB per "
-                f"string across {len(self.baseline_levels_dB)} unsuppressed string(s)"
+                f"string across {count(len(self.baseline_levels_dB), 'unsuppressed string')}"
             )
         elif self.baseline_levels_dB:
             lines.append(
                 f"  Baseline drift: not tested - only "
-                f"{len(self.baseline_levels_dB)} unsuppressed string(s), and drift "
+                f"{count(len(self.baseline_levels_dB), 'unsuppressed string')}, and drift "
                 f"needs at least {MIN_BASELINES_FOR_TREND}"
             )
 
@@ -408,7 +410,7 @@ def main() -> int:
     if args.json:
         print(json.dumps([str(p) for p in paths], indent=2))
     else:
-        print(f"{len(paths)} recording(s) in {args.directory}:")
+        print(f"{count(len(paths), 'recording')} in {args.directory}:")
         for path in paths:
             print(f"  {path.name}")
         print("\nRun the session through main.py to analyse and pair them.")

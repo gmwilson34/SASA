@@ -145,3 +145,65 @@ def test_a_config_with_no_calibration_is_still_refused():
     # An explicitly empty flag is not a choice either.
     with pytest.raises(app.ConfigError):
         app.build_calibration({"uncalibrated": False}, Calibration)
+
+
+# ---------------------------------------------------------------------------
+# The input probe
+#
+# The probe crosses three layers too — main.py writes the JSON, ui/server.js
+# forwards it, ui/renderer/app.js reads fields out of it by name — and it is
+# the same kind of contract as the run config, so it is guarded the same way.
+# ---------------------------------------------------------------------------
+
+_UI_SERVER = _REPO_ROOT / "ui" / "server.js"
+
+
+def probe_fields_produced() -> set[str]:
+    """Every key main.probe_input() puts in its result."""
+    source = (_REPO_ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.find("def probe_input(")
+    assert start >= 0, "probe_input has been renamed; this test needs updating"
+    end = source.find("\ndef ", start + 1)
+    body = source[start:end if end > 0 else len(source)]
+
+    name = r"([A-Za-z_][A-Za-z0-9_]*)"
+    produced: set[str] = set()
+    produced |= set(re.findall(rf'"{name}":', body))          # the initial literal
+    produced |= set(re.findall(rf'out\["{name}"\]', body))    # direct assignment
+    produced |= set(re.findall(rf"^\s+{name}=", body, re.M))   # out.update(field=...)
+    assert {"sample_rate", "nyquist_Hz", "readable"} <= produced, sorted(produced)
+    return produced
+
+
+def probe_fields_read_by_the_interface() -> set[str]:
+    """Every field the renderer reads off a probe result."""
+    source = _RENDERER.read_text(encoding="utf-8")
+    # The whole identifier, not just its lower-case head: `probe.nyquist_Hz`
+    # truncated to `nyquist_` would be reported as a field nobody writes.
+    return set(re.findall(r"\bprobe\.([A-Za-z_][A-Za-z0-9_]*)", source))
+
+
+def test_the_interface_reads_no_probe_field_the_engine_does_not_write():
+    produced = probe_fields_produced()
+    read = probe_fields_read_by_the_interface()
+    missing = sorted(read - produced)
+    assert not missing, (
+        "ui/renderer/app.js reads probe fields main.probe_input() never writes: "
+        f"{missing}. They will be undefined at runtime."
+    )
+
+
+def test_the_server_exposes_the_probe_the_interface_calls():
+    server = _UI_SERVER.read_text(encoding="utf-8")
+    renderer = _RENDERER.read_text(encoding="utf-8")
+
+    called = re.findall(r"fetch\(`(/api/[a-z-]+)", renderer)
+    assert "/api/probe" in called, "the renderer no longer calls /api/probe"
+    assert "app.get('/api/probe'" in server, "ui/server.js no longer serves /api/probe"
+    assert "'--probe'" in server, "the probe endpoint no longer runs main.py --probe"
+
+
+def test_the_probe_cli_flag_exists_under_that_exact_name():
+    """The server spells the flag in a string; argparse has to agree."""
+    main_source = (_REPO_ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'add_argument("--probe"' in main_source

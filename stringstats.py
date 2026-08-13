@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import stats
+from textutil import count, plural
 
 # Significance level for the one-sided first-round-pop test.
 POP_ALPHA: float = 0.05
@@ -243,7 +244,7 @@ def first_round_pop(
 
     if rest.size < MIN_SUBSEQUENT_SHOTS:
         result.refusal = (
-            f"only {rest.size} shot(s) followed the first, below the "
+            f"only {count(rest.size, 'shot')} followed the first, below the "
             f"{MIN_SUBSEQUENT_SHOTS} needed to say what a normal shot from this "
             f"string looks like"
         )
@@ -327,13 +328,13 @@ def first_round_pop_across_strings(
     result.n_strings = len(deltas)
     if skipped:
         result.notes.append(
-            f"{skipped} string(s) were too short to contribute a first-round "
+            f"{count(skipped, 'string')} {plural(skipped, 'was')} too short to contribute a first-round "
             f"observation and were left out."
         )
 
     if len(deltas) < MIN_STRINGS_FOR_CLAIM:
         result.refusal = (
-            f"only {len(deltas)} usable string(s), below the "
+            f"only {count(len(deltas), 'usable string')}, below the "
             f"{MIN_STRINGS_FOR_CLAIM} needed to estimate first-round pop across "
             f"strings rather than within one"
         )
@@ -428,7 +429,7 @@ class StringSummary:
 
     def summary(self) -> str:
         lines = [
-            f"  {self.metric} across {self.n_shots} shot(s)",
+            f"  {self.metric} across {count(self.n_shots, 'shot')}",
             f"    Energy mean       {self.energy_mean_dB:8.2f} dB "
             f"(+/-{self.ci95_half_width_dB:.2f} at 95%)",
             f"    Excluding shot 1  {self.energy_mean_excluding_first_dB:8.2f} dB "

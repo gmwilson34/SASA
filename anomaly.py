@@ -81,6 +81,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import stats
+from textutil import count, plural
 
 # 0.75 quantile of the standard normal distribution. MAD/0.6745 estimates sigma.
 # Used for the reported magnitude of a deviation, not for the decision to flag.
@@ -454,7 +455,7 @@ class AnomalyReport:
         }
 
     def summary(self) -> str:
-        lines = [f"  Shot string review: {self.n_shots} shot(s)"]
+        lines = [f"  Shot string review: {count(self.n_shots, 'shot')}"]
         if not self.statistics_applied:
             lines.append(
                 f"    Outlier statistics NOT applied: fewer than "
@@ -466,9 +467,9 @@ class AnomalyReport:
         excluded = self.shots_to_exclude()
         review = self.shots_to_review()
         if excluded:
-            lines.append(f"    EXCLUDE: shot(s) {', '.join(str(n) for n in excluded)}")
+            lines.append(f"    EXCLUDE: {plural(len(excluded), 'shot')} {', '.join(str(n) for n in excluded)}")
         if review:
-            lines.append(f"    REVIEW:  shot(s) {', '.join(str(n) for n in review)}")
+            lines.append(f"    REVIEW:  {plural(len(review), 'shot')} {', '.join(str(n) for n in review)}")
         if not excluded and not review:
             lines.append("    No shot departs from the string.")
         lines.append(f"    {self.sensitivity_statement}")
@@ -602,7 +603,11 @@ def review_shot_string(
                 code="clipped",
                 severity=SEVERITY_EXCLUDE,
                 message=(
-                    "samples reached digital full scale, so the true peak is unknown "
+                    # Not "reached digital full scale": clipping also happens at a
+                    # limiter's ceiling well below the rail, and this flag is
+                    # raised for both. What matters is the flat top, not where
+                    # in the range it sits.
+                    "the waveform is flat-topped, so the true peak is unknown "
                     "and every level derived from this shot is a lower bound only"
                 ),
             ))
@@ -676,7 +681,7 @@ def review_shot_string(
                 )
     else:
         report.notes.append(
-            f"Only {len(usable)} shot(s) can be compared, below the "
+            f"Only {count(len(usable), 'shot')} can be compared, below the "
             f"{MIN_SHOTS_FOR_STATISTICS} at which the outlier test carries useful "
             f"sensitivity. Shot-to-shot outliers were NOT tested for; per-shot "
             f"conditions such as clipping were."

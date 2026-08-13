@@ -16,14 +16,17 @@ import pytest
 from calibration import (
     P_REF,
     Calibration,
+    CeilingClippingScan,
     amplitude_to_dB_SPL,
+    assess_signal_quality,
     dB_SPL_to_amplitude,
+    detect_ceiling_clipping,
     detect_clipping,
     energy_average_dB,
     power_to_dB_SPL,
     remove_dc_offset,
 )
-from conftest import make_friedlander, make_sine
+from conftest import make_friedlander, make_sine, make_shot_train
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +251,120 @@ def test_detect_clipping_finds_none_at_0_99_peak():
 
 def test_detect_clipping_empty_signal():
     assert detect_clipping(np.array([])) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Ceiling (limiter / AGC) clipping
+#
+# The case these cover is the one the rail test cannot see: a recorder that
+# limits below full scale, so the file arrives looking like it has headroom.
+# ---------------------------------------------------------------------------
+
+def _limit(x: np.ndarray, ceiling: float) -> np.ndarray:
+    """Hard-limit a waveform, the way a recorder's limiter does."""
+    return np.clip(x, -ceiling, ceiling)
+
+
+def test_ceiling_clipping_found_on_a_limited_shot_train():
+    fs = 48000
+    x = make_shot_train(fs, [0.2, 0.7, 1.2], amplitude=1.0, noise_rms=1e-4)
+    limited = _limit(x, 0.5)          # a limiter set 6 dB below full scale
+
+    found = detect_ceiling_clipping(limited)
+    assert found.detected
+    assert found.ceiling_dBFS == pytest.approx(-6.0206, abs=1e-3)
+    assert found.runs >= 2
+    # And the rail test, which is what SASA used to rely on, sees nothing.
+    assert detect_clipping(limited) == (0, 0)
+
+
+def test_ceiling_clipping_absent_from_the_same_train_unlimited():
+    fs = 48000
+    x = make_shot_train(fs, [0.2, 0.7, 1.2], amplitude=0.5, noise_rms=1e-4)
+    assert not detect_ceiling_clipping(x).detected
+
+
+def test_ceiling_clipping_ignores_a_square_wave():
+    # A square wave is flat-topped by construction: its crest factor is 0 dB,
+    # which is what the guard exists to catch. Flagging it would be a false
+    # accusation against a legitimate test signal.
+    fs = 48000
+    t = np.arange(fs) / fs
+    square = 0.5 * np.sign(np.sin(2 * np.pi * 1000.0 * t))
+    assert not detect_ceiling_clipping(square).detected
+
+
+def test_ceiling_clipping_ignores_a_sine():
+    fs = 48000
+    assert not detect_ceiling_clipping(0.5 * make_sine(1000.0, 94.0, fs, 1.0)).detected
+
+
+def test_ceiling_clipping_defers_to_the_rail_test_at_full_scale():
+    # Clipped AT the rail: detect_clipping owns this, and reporting it twice
+    # under two different names would double-count one fault.
+    fs = 48000
+    x = _limit(make_shot_train(fs, [0.2, 0.7], amplitude=2.0, noise_rms=1e-4), 1.0)
+    assert detect_clipping(x)[1] > 0
+    assert not detect_ceiling_clipping(x).detected
+
+
+def test_ceiling_clipping_needs_more_than_one_plateau():
+    # A single plateau anywhere in a file is not evidence of a limiter.
+    x = np.zeros(48000)
+    x[:100] = np.linspace(0.0, 0.4, 100)
+    x[1000:1010] = 0.4
+    assert not detect_ceiling_clipping(x).detected
+
+
+def test_ceiling_clipping_scan_matches_the_whole_file_detector():
+    # The chunked reader must reach exactly the same verdict as the one-shot
+    # detector, including when the loudest chunk is not the first.
+    fs = 48000
+    x = _limit(make_shot_train(fs, [0.2, 1.4, 2.6], duration=3.0,
+                               amplitude=1.0, noise_rms=1e-4), 0.5)
+    whole = detect_ceiling_clipping(x)
+
+    for chunk in (7919, 48000, 100000):
+        scan = CeilingClippingScan()
+        for start in range(0, len(x), chunk):
+            scan.feed(x[start:start + chunk])
+        streamed = scan.result()
+        assert streamed.detected == whole.detected, chunk
+        assert streamed.ceiling_FS == pytest.approx(whole.ceiling_FS), chunk
+        assert (streamed.samples, streamed.runs) == (whole.samples, whole.runs), chunk
+
+
+def test_ceiling_clipping_scan_discards_a_quieter_chunks_tally():
+    # A quiet chunk's own maximum is not a ceiling. If the tally from it
+    # survived, a file whose loud half arrived second would report plateaus
+    # that are not at the file's ceiling at all.
+    fs = 48000
+    quiet = _limit(make_shot_train(fs, [0.2, 0.6], duration=1.0,
+                                   amplitude=0.4, noise_rms=1e-4), 0.2)
+    loud = _limit(make_shot_train(fs, [0.2, 0.6], duration=1.0,
+                                  amplitude=1.0, noise_rms=1e-4), 0.5)
+
+    scan = CeilingClippingScan()
+    scan.feed(quiet)
+    scan.feed(loud)
+    result = scan.result()
+    assert result.ceiling_FS == pytest.approx(0.5, abs=1e-6)
+    assert result.samples == detect_ceiling_clipping(loud).samples
+
+
+def test_limited_recording_is_inadmissible():
+    # The end-to-end consequence: a limited recording must fail the
+    # admissibility gate, not merely pick up a note.
+    fs = 48000
+    x = _limit(make_shot_train(fs, [0.2, 0.7, 1.2], amplitude=1.0, noise_rms=1e-4), 0.5)
+    quality = assess_signal_quality(x, fs, Calibration.uncalibrated())
+
+    assert quality.is_clipped
+    assert not quality.is_valid
+    assert any("CLIPPED at -6.0 dBFS" in e for e in quality.errors)
+    # The headroom warning must not be what the operator is told instead: the
+    # recording has 6 dB of apparent headroom and is destroyed anyway.
+    assert not any("headroom" in w for w in quality.warnings)
 
 
 # ---------------------------------------------------------------------------

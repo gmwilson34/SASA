@@ -67,9 +67,11 @@ from WavLoader import get_wav_info, load_wav, load_wav_chunk  # noqa: E402
 from calibration import (  # noqa: E402
     dB_SPL_to_amplitude,
     Calibration,
+    CeilingClipping,
     SignalQuality,
     amplitude_to_dB_SPL,
     assess_signal_quality,
+    ceiling_clipping_error,
 )
 from shot_detect import (  # noqa: E402
     DetectionReport,
@@ -106,6 +108,7 @@ from provenance import (  # noqa: E402
     make_provenance_block,
 )
 from provenance import __version__ as _PROVENANCE_VERSION  # noqa: E402
+from textutil import count, plural
 
 # ONE version for the whole application, and provenance.py owns it.
 #
@@ -755,7 +758,7 @@ class AnalysisConfig:
         unknown = sorted(set(data) - known)
         if unknown:
             message = (
-                f"Config file {path.name} contains unrecognised key(s): "
+                f"Config file {path.name} contains unrecognised {plural(len(unknown), 'key')}: "
                 f"{', '.join(unknown)}. They were ignored."
             )
             logger.warning(message)
@@ -972,6 +975,141 @@ def prepare_input(path: Path, warnings: Optional[List[str]] = None) -> PreparedI
     )
 
 
+# The rate below which a muzzle blast's rise time cannot be resolved. Kept
+# here as well as in calibration.assess_signal_quality so the probe can say so
+# BEFORE a run rather than in the verdict afterwards.
+MIN_USEFUL_SAMPLE_RATE_HZ: int = 48000
+
+
+def probe_input(path: Path) -> Dict[str, Any]:
+    """
+    Describe a recording without analysing it.
+
+    The interface needs the sample rate, channel count and duration the moment
+    a file is chosen, not after a run: the bin spacing it quotes, the band
+    range it can offer and the "this rate cannot resolve a rise time" warning
+    are all functions of properties that are in the file's header. Reading
+    them costs milliseconds; discovering them by running an analysis and
+    reading the verdict costs minutes and a wasted output directory.
+
+    Nothing is decoded. A container is probed through ffmpeg's stream
+    metadata, an audio file through its header, so this stays cheap on a file
+    of any length.
+
+    Returns a JSON-safe dict. `readable` is false when the file cannot be
+    described at all, and `problem` then says why -- this never raises for a
+    file the operator picked by mistake.
+    """
+    path = Path(path).expanduser()
+    out: Dict[str, Any] = {
+        "path": str(path),
+        "name": path.name,
+        "readable": False,
+        "problem": None,
+        "needs_extraction": None,
+        "sample_rate": None,
+        "channels": None,
+        "subtype": None,
+        "frames": None,
+        "duration_s": None,
+        "size_bytes": None,
+        "nyquist_Hz": None,
+        "sample_rate_adequate": None,
+        "notes": [],
+    }
+
+    if not path.exists():
+        out["problem"] = f"File not found: {path}"
+        return out
+    if not path.is_file():
+        out["problem"] = f"Not a file: {path}"
+        return out
+
+    try:
+        out["size_bytes"] = path.stat().st_size
+    except OSError:
+        pass
+
+    suffix = path.suffix.lower()
+
+    # Audio first: a header read, no decoding, no ffmpeg.
+    if suffix not in VIDEO_EXTS:
+        try:
+            import soundfile as sf  # noqa: PLC0415
+
+            info = sf.info(str(path))
+            out.update(
+                readable=True,
+                needs_extraction=False,
+                sample_rate=int(info.samplerate),
+                channels=int(info.channels),
+                subtype=str(info.subtype or ""),
+                frames=int(info.frames),
+                duration_s=round(float(info.frames) / float(info.samplerate), 4)
+                if info.samplerate else None,
+            )
+        except Exception as exc:  # noqa: BLE001 - may still be a container ffmpeg can read
+            logger.info("%s is not directly readable as audio (%s)", path.name, exc)
+
+    # Container: ask ffmpeg about the first audio stream. Still no decoding.
+    if not out["readable"]:
+        try:
+            from ExtractAudio import ExtractionError, find_ffmpeg, probe_audio_stream  # noqa: PLC0415
+
+            exe = find_ffmpeg()
+            if not exe:
+                out["problem"] = (
+                    "No ffmpeg is available to read this container, so its audio "
+                    "track cannot be described or extracted."
+                )
+                return out
+            info = probe_audio_stream(path, exe)
+            frames = (
+                int(round(info.duration_s * info.sample_rate))
+                if info.duration_s and info.sample_rate else None
+            )
+            out.update(
+                readable=True,
+                needs_extraction=True,
+                sample_rate=int(info.sample_rate) if info.sample_rate else None,
+                channels=int(info.channels) if info.channels else None,
+                subtype=str(info.codec or ""),
+                frames=frames,
+                duration_s=round(float(info.duration_s), 4) if info.duration_s else None,
+            )
+            out["notes"].append(
+                f"The audio track will be extracted from this {suffix.lstrip('.') or 'container'} "
+                f"before analysis, at its own rate, depth and channel count."
+            )
+        except ExtractionError as exc:
+            out["problem"] = str(exc)
+            return out
+        except Exception as exc:  # noqa: BLE001 - a probe must not raise for a bad file
+            out["problem"] = f"{path.name} could not be read as audio or as a container: {exc}"
+            return out
+
+    rate = out["sample_rate"]
+    if rate:
+        out["nyquist_Hz"] = rate / 2.0
+        out["sample_rate_adequate"] = rate >= MIN_USEFUL_SAMPLE_RATE_HZ
+        if not out["sample_rate_adequate"]:
+            out["notes"].append(
+                f"{rate} Hz cannot resolve a muzzle blast's rise time: one sample is "
+                f"{1e6 / rate:.1f} us against a typical 1-50 us rise. Rise time, crest "
+                f"factor and A-duration from this recording will be upper bounds. "
+                f"{MIN_USEFUL_SAMPLE_RATE_HZ} Hz or more is wanted."
+            )
+
+    if out["channels"] and out["channels"] > 1:
+        out["notes"].append(
+            f"{count(out['channels'], 'channel')}; channel 0 is analysed unless another "
+            f"is chosen. The channels are not mixed, because mixing two microphones "
+            f"changes the level."
+        )
+
+    return out
+
+
 def describe_channel(channel: Optional[int], mono_mix: bool, n_channels: int) -> str:
     """Human/machine description of which channel produced the numbers."""
     if mono_mix:
@@ -982,7 +1120,7 @@ def describe_channel(channel: Optional[int], mono_mix: bool, n_channels: int) ->
 def read_samples(
     path: Path,
     start: int,
-    count: int,
+    n_frames: int,
     *,
     channel: Optional[int],
     mono_mix: bool,
@@ -990,7 +1128,7 @@ def read_samples(
 ) -> np.ndarray:
     """Read a span of full-scale samples for the selected channel."""
     samples, _sr = load_wav_chunk(
-        path, start, count,
+        path, start, n_frames,
         dtype=dtype,
         mono=mono_mix,
         channel=None if mono_mix else channel,
@@ -1682,7 +1820,7 @@ def _run_pipeline(
         if config.channel >= n_channels:
             raise ConfigurationError(
                 f"--channel {config.channel} was requested but {wav_path.name} has "
-                f"{n_channels} channel(s) (0-{n_channels - 1})."
+                f"{count(n_channels, 'channel')} (0-{n_channels - 1})."
             )
         if n_channels > 1:
             message = (
@@ -1821,7 +1959,8 @@ def _run_pipeline(
                 say(f"    {key:<9} mean {stat.mean:7.1f}  +/-{stat.ci95_half_width:.1f} (95% CI)  "
                     f"min {stat.minimum:7.1f}  max {stat.maximum:7.1f}")
         if aggregate.n_valid < aggregate.n_shots:
-            say(f"    {aggregate.n_shots - aggregate.n_valid} shot(s) were excluded as invalid.")
+            say(f"    {count(aggregate.n_shots - aggregate.n_valid, 'shot')} "
+                f"{plural(aggregate.n_shots - aggregate.n_valid, 'was')} excluded as invalid.")
         if aggregate.hazard and math.isfinite(aggregate.hazard.LAeq8h_dB):
             hazard = aggregate.hazard
             say(f"    LAeq8h {hazard.LAeq8h_dB:.1f} dB, dose {hazard.dose_percent:.1f}% of the "
@@ -1991,7 +2130,7 @@ def _run_pipeline(
         try:
             write_json(levels_path, levels_block)
             artifacts["shot_levels"] = levels_path.name
-            say(f"    levels:   {levels_path.name} ({len(levels_block['shots'])} shot(s))")
+            say(f"    levels:   {levels_path.name} ({count(len(levels_block['shots']), 'shot')})")
         except OSError as exc:
             message = f"The shot level curves could not be written: {exc}"
             logger.warning(message)
@@ -2009,7 +2148,7 @@ def _run_pipeline(
             artifacts["waveform_envelope"] = waveform_path.name
             say(f"    waveform: {waveform_path.name} "
                 f"({waveform_block['columns']} columns, "
-                f"{len(waveform_block['shots'])} shot window(s))")
+                f"{count(len(waveform_block['shots']), 'shot window')})")
         except OSError as exc:
             message = f"The waveform envelope could not be written: {exc}"
             logger.warning(message)
@@ -2435,6 +2574,7 @@ def _analyze_in_memory(
         max_shots=config.max_shots,
         full_scale_dB=calibration.full_scale_dB if calibration.calibrated else None,
         samples_FS=samples_FS,          # so individual shots carry a clipped flag
+        ceiling_FS=quality.ceiling.ceiling_FS if quality.ceiling.detected else None,
         report=reports,
     )
     detection = reports[0] if reports else DetectionReport(
@@ -2524,9 +2664,9 @@ def _analyze_chunked(
     )
     dtype = config.load_dtype
 
-    def read(start: int, count: int) -> np.ndarray:
+    def read(start: int, n_frames: int) -> np.ndarray:
         return read_samples(
-            wav_path, start, count,
+            wav_path, start, n_frames,
             channel=channel, mono_mix=config.mono_mix, dtype=dtype,
         )
 
@@ -2544,8 +2684,9 @@ def _analyze_chunked(
     noise_estimates: List[float] = []
     quality_chunks: List[SignalQuality] = []
 
-    from calibration import detect_clipping  # noqa: PLC0415
+    from calibration import CeilingClippingScan, detect_clipping  # noqa: PLC0415
 
+    ceiling_scan = CeilingClippingScan()
     n_chunks = max(1, math.ceil(total_frames / chunk_frames))
     for index, (_rs, _re, core_start, core_stop) in enumerate(
         _chunk_plan(total_frames, chunk_frames, 0)
@@ -2559,6 +2700,7 @@ def _analyze_chunked(
         counts = detect_clipping(block)
         clipped_samples += counts[0]
         clipped_runs += counts[1]
+        ceiling_scan.feed(block)
         dc_sum += float(np.sum(block, dtype=np.float64))
         sq_sum += float(np.sum(np.asarray(block, dtype=np.float64) ** 2))
         n_total += block.size
@@ -2582,6 +2724,7 @@ def _analyze_chunked(
         n_samples=n_total, sample_rate=sample_rate, peak_FS=peak_FS,
         clipped_samples=clipped_samples, clipped_runs=clipped_runs,
         dc=dc_sum / max(n_total, 1), rms=math.sqrt(sq_sum / max(n_total, 1)),
+        ceiling=ceiling_scan.result(),
     )
 
     peak_dB = float(amplitude_to_dB_SPL(max(peak_envelope, 1e-12)))
@@ -2622,6 +2765,7 @@ def _analyze_chunked(
             max_shots=config.max_shots,
             full_scale_dB=calibration.full_scale_dB if calibration.calibrated else None,
             samples_FS=block,
+            ceiling_FS=quality.ceiling.ceiling_FS if quality.ceiling.detected else None,
             report=reports,
         )
         if reports:
@@ -2670,7 +2814,7 @@ def _analyze_chunked(
         detection_warnings.append(f"Expected at least {config.min_shots} shots, found {len(shots)}")
 
     detection_warnings.append(
-        f"Chunked analysis: {n_chunks} chunk(s) of {CHUNK_DURATION_S:.0f} s with "
+        f"Chunked analysis: {count(n_chunks, 'chunk')} of {CHUNK_DURATION_S:.0f} s with "
         f"{context_frames / sample_rate:.1f} s of overlap; the detection threshold was "
         f"resolved once over the whole recording."
     )
@@ -2735,6 +2879,7 @@ def _merge_quality(
     clipped_runs: int,
     dc: float,
     rms: float,
+    ceiling: Optional[CeilingClipping] = None,
 ) -> SignalQuality:
     """
     Combine per-chunk quality assessments into one whole-recording verdict.
@@ -2742,6 +2887,10 @@ def _merge_quality(
     Clipping, peak and DC are computed exactly across the whole file; the
     spectral checks are taken from the sampled chunks. Errors and warnings are
     unioned, so a single clipped chunk still invalidates the measurement.
+
+    ``ceiling`` is the whole-file limiter scan. It cannot be merged from the
+    chunks: a chunk's own maximum is not a ceiling, so the scan has to be run
+    across the file with one global extreme.
     """
     eps = 1e-30
     peak_level_dB = float(amplitude_to_dB_SPL(max(peak_FS * calibration.Pa_per_FS, eps)))
@@ -2756,12 +2905,15 @@ def _merge_quality(
             if warn not in warnings:
                 warnings.append(warn)
 
+    ceiling = ceiling or CeilingClipping()
     if clipped_runs > 0:
         errors.append(
             f"Recording is CLIPPED ({clipped_samples} samples in {clipped_runs} runs). "
             f"Peak levels are understated and rise time, crest factor and kurtosis are invalid. "
             f"Re-record with lower input gain."
         )
+    elif ceiling.detected:
+        errors.append(ceiling_clipping_error(ceiling))
 
     quality = SignalQuality(
         n_samples=n_samples,
@@ -2780,6 +2932,7 @@ def _merge_quality(
         lf_energy_fraction=lf_fraction,
         nyquist_Hz=sample_rate / 2.0,
         sample_rate_adequate=sample_rate >= 48000,
+        ceiling=ceiling,
         warnings=warnings,
         errors=errors,
     )
@@ -2827,14 +2980,14 @@ def _make_reader(
     rather than re-read, so plotting costs no extra I/O.
     """
     if preloaded is not None:
-        def reader(start: int, count: int) -> np.ndarray:
+        def reader(start: int, n_frames: int) -> np.ndarray:
             start = max(0, int(start))
-            return preloaded[start:start + max(0, int(count))]
+            return preloaded[start:start + max(0, int(n_frames))]
         return reader
 
-    def reader(start: int, count: int) -> np.ndarray:
+    def reader(start: int, n_frames: int) -> np.ndarray:
         return read_samples(
-            wav_path, start, count,
+            wav_path, start, n_frames,
             channel=channel, mono_mix=config.mono_mix, dtype=config.load_dtype,
         )
     return reader
@@ -3716,6 +3869,9 @@ Exit codes: 0 ok, 1 error, 2 no shots detected, 3 measurement inadmissible.
                      help="Previous UNSUPPRESSED analysis directory; computes insertion loss.")
     out.add_argument("--verbose", "-v", action="store_true", help="Debug-level diagnostics.")
     out.add_argument("--quiet", "-q", action="store_true", help="Warnings and errors only.")
+    out.add_argument("--probe", action="store_true",
+                     help="Describe the input file as JSON and exit. Reads headers only: "
+                          "no decoding, no extraction, no analysis.")
 
     meta = parser.add_argument_group("Test metadata (recorded with the result)")
     meta.add_argument("--metadata", type=Path, default=None, metavar="FILE",
@@ -3863,7 +4019,7 @@ def _metadata_from_args(args: argparse.Namespace, warnings: List[str]) -> TestMe
         unknown = sorted(set(loaded) - known)
         if unknown:
             message = (
-                f"Metadata file {path.name} contains unrecognised key(s): "
+                f"Metadata file {path.name} contains unrecognised {plural(len(unknown), 'key')}: "
                 f"{', '.join(unknown)}. They were ignored."
             )
             logger.warning(message)
@@ -3920,6 +4076,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     configure_logging(args.verbose, args.quiet)
     warnings: List[str] = []
+
+    # Answered before anything else is resolved: a probe needs no calibration,
+    # no profiles and no output directory, and must not be able to fail
+    # because one of them is missing.
+    if args.probe:
+        if args.input is None:
+            print(json.dumps({"readable": False, "problem": "No file was given to probe."}))
+            return EXIT_ERROR
+        result = probe_input(Path(args.input))
+        print(json.dumps(result))
+        return EXIT_OK if result.get("readable") else EXIT_ERROR
 
     try:
         store = profiles_path(args.profiles_file)
@@ -4065,7 +4232,7 @@ def _final_status(results: Sequence[AnalysisResult]) -> int:
             any_invalid = True
         if result.reference_requested and not result.insertion_loss_produced:
             deliverable_missing = True
-        say(f"  {label}: {result.n_shots} shot(s), {state}")
+        say(f"  {label}: {count(result.n_shots, 'shot')}, {state}")
         if stat and math.isfinite(stat.maximum):
             say(f"    Peak (Z) max {stat.maximum:.1f} {unit}")
         if lae and math.isfinite(lae.mean):
@@ -4122,7 +4289,7 @@ def _run_session_cli(
         )
 
     say("")
-    say(f"  Session: {len(paths)} recording(s) in {directory}")
+    say(f"  Session: {count(len(paths), 'recording')} in {directory}")
     for path in paths:
         say(f"    {path.name}")
     say("")

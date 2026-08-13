@@ -39,11 +39,12 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from textutil import count
 
 # The version of SASA, for the whole application: main.py re-exports this one
 # rather than keeping its own. See the note there -- this constant was stale by
 # two releases and every record it stamped named the wrong producer.
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 # Fields required for a measurement record that another lab could reproduce.
 REQUIRED_FOR_DEFENSIBLE: tuple[str, ...] = (
@@ -256,7 +257,7 @@ class TestMetadata:
         lines = []
         if missing:
             lines.append(
-                f"  Measurement record INCOMPLETE - {len(missing)} required field(s) missing:"
+                f"  Measurement record INCOMPLETE - {count(len(missing), 'required field')} missing:"
             )
             lines.append("    " + ", ".join(missing))
             lines.append(

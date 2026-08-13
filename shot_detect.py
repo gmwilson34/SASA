@@ -43,7 +43,14 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.signal import butter, find_peaks, sosfiltfilt
 
-from calibration import EPS, P_REF, amplitude_to_dB_SPL, detect_clipping
+from calibration import (
+    EPS,
+    P_REF,
+    amplitude_to_dB_SPL,
+    detect_ceiling_clipping,
+    detect_clipping,
+)
+from textutil import count, plural
 
 # Blast band for detection. Muzzle blast energy lives well inside this; wind,
 # handling noise and mains hum sit below it, and it excludes ultrasonic hiss.
@@ -209,7 +216,7 @@ class DetectionReport:
         ]
         if self.n_suppressed_by_refractory:
             lines.append(
-                f"  Suppressed:    {self.n_suppressed_by_refractory} candidate(s) fell inside "
+                f"  Suppressed:    {count(self.n_suppressed_by_refractory, 'candidate')} fell inside "
                 f"the refractory period"
             )
         for w in self.warnings:
@@ -646,6 +653,7 @@ def detect_shots(
     max_shots: int = 1000,
     full_scale_dB: Optional[float] = None,
     samples_FS: Optional[np.ndarray] = None,
+    ceiling_FS: Optional[float] = None,
     report: Optional[List[DetectionReport]] = None,
 ) -> List[ShotEvent]:
     """
@@ -672,6 +680,10 @@ def detect_shots(
         max_shots: Safety limit on the number of detections.
         full_scale_dB: Level of a full-scale sample, used to sanity-check thresholds.
         samples_FS: Original full-scale samples, used to flag clipped shots.
+        ceiling_FS: The whole-recording limiter ceiling, when one was found. A
+                    shot window is too short to establish a ceiling of its own,
+                    so the level has to come from the file-wide scan; without
+                    it only clipping at the digital rail is flagged per shot.
         report: If a list is supplied, a DetectionReport is appended to it.
 
     Returns:
@@ -709,12 +721,6 @@ def detect_shots(
     refractory_samples = max(1, int(refractory_ms * sample_rate / 1000.0))
     env_window = max(1, int(envelope_window_ms * sample_rate / 1000.0))
     env_hop = max(1, int(envelope_hop_ms * sample_rate / 1000.0))
-
-    if post_samples > refractory_samples:
-        warnings.append(
-            f"post_ms ({post_ms:.0f} ms) exceeds refractory_ms ({refractory_ms:.0f} ms); "
-            f"adjacent shot windows will overlap and count the same energy twice"
-        )
 
     # ---- Envelope on the band-limited signal ----
     detect_signal = bandpass_for_detection(x, sample_rate) if bandpass else x
@@ -790,7 +796,8 @@ def detect_shots(
 
     if n_suppressed:
         warnings.append(
-            f"{n_suppressed} candidate event(s) were within {refractory_ms:.0f} ms of a "
+            f"{count(n_suppressed, 'candidate event')} {plural(n_suppressed, 'was')} within "
+            f"{refractory_ms:.0f} ms of a "
             f"louder event and were suppressed. Lower refractory_ms if the weapon's "
             f"cyclic rate is faster than {60000.0/max(refractory_ms,1e-9):.0f} rpm."
         )
@@ -832,6 +839,13 @@ def detect_shots(
         if samples_FS is not None:
             seg = np.asarray(samples_FS)[win_start:win_end]
             clipped = detect_clipping(seg)[1] > 0
+            if not clipped and ceiling_FS is not None:
+                # One plateau is enough here: the file-wide scan has already
+                # established that the ceiling is real, so this only asks
+                # whether THIS shot reached it.
+                clipped = detect_ceiling_clipping(
+                    seg, ceiling=ceiling_FS, min_runs=1,
+                ).detected
 
         shot = ShotEvent(
             index=refined,
@@ -851,7 +865,7 @@ def detect_shots(
     if n_rejected_snr:
         loudest = max(rejected_peak_dB) if rejected_peak_dB else float("-inf")
         warnings.append(
-            f"{n_rejected_snr} candidate event(s) were rejected for insufficient "
+            f"{count(n_rejected_snr, 'candidate event')} {plural(n_rejected_snr, 'was')} rejected for insufficient "
             f"impulsiveness: the loudest reached {loudest:.1f} dB, only "
             f"{loudest - noise_floor_dB:.1f} dB above the noise floor "
             f"({noise_floor_dB:.1f} dB), against a {min_snr_dB:.0f} dB requirement. "
@@ -861,15 +875,40 @@ def detect_shots(
     n_multi = sum(1 for s in shots if s.has_multiple_arrivals)
     if n_multi:
         warnings.append(
-            f"{n_multi} shot(s) contain more than one distinct arrival, which usually "
+            f"{count(n_multi, 'shot')} contain more than one distinct arrival, which usually "
             f"means a supersonic round's ballistic crack alongside the muzzle blast. "
             f"A suppressor acts only on the muzzle blast."
+        )
+
+    # Overlapping windows, asked of the SHOTS rather than of the settings.
+    #
+    # This used to fire whenever post_ms exceeded refractory_ms, which is a
+    # statement about what COULD happen: the refractory period is the closest
+    # two shots are allowed to be, not how close they are. With the shipped
+    # defaults (500 ms window, 200 ms refractory) every single run carried the
+    # warning, including runs whose shots were a second apart and whose
+    # windows did not touch. A caution that is always on is not a caution.
+    overlapping = [
+        (a, b) for a, b in zip(shots, shots[1:]) if a.window_end > b.window_start
+    ]
+    if overlapping:
+        tightest_ms = min(
+            (b.index - a.index) * 1000.0 / sample_rate for a, b in overlapping
+        )
+        warnings.append(
+            f"{count(len(overlapping), 'pair')} of adjacent shot windows overlap "
+            f"(the closest two shots are {tightest_ms:.0f} ms apart, against a "
+            f"{post_ms:.0f} ms post-trigger window). The overlapping span is inside "
+            f"both shots, so their sound exposures are not independent of each other. "
+            f"Shorten the post-trigger window, or treat the string as one event."
         )
 
     n_clipped = sum(1 for s in shots if s.clipped)
     if n_clipped:
         warnings.append(
-            f"{n_clipped} shot(s) are clipped; their peak levels are understated"
+            f"{count(n_clipped, 'shot')} {plural(n_clipped, 'is')} clipped; "
+            f"{plural(n_clipped, 'its')} peak {plural(n_clipped, 'level')} "
+            f"{plural(n_clipped, 'is')} understated"
         )
 
     if len(shots) < min_shots:
@@ -1008,7 +1047,7 @@ class TrimSpan:
             return f"  Auto-trim not applied: {self.reason}"
         return (
             f"  Auto-trimmed to {self.start_s:.2f}-{self.end_s:.2f} s "
-            f"({self.duration_s:.2f} s holding {self.n_shots} shot(s); "
+            f"({self.duration_s:.2f} s holding {count(self.n_shots, 'shot')}; "
             f"{self.removed_s:.2f} s of silence removed)"
         )
 
@@ -1081,7 +1120,7 @@ def find_shot_string_span(
 
     span.start, span.end, span.applied = start, end, True
     span.reason = (
-        f"trimmed to the {len(shots)} detected shot(s) with a {abs(margin_s):g} s margin"
+        f"trimmed to the {count(len(shots), 'detected shot')} with a {abs(margin_s):g} s margin"
     )
     return span
 
@@ -1188,7 +1227,7 @@ def main() -> int:
         report=report,
     )
 
-    print(f"\nDetected {len(shots)} shot(s):")
+    print(f"\nDetected {count(len(shots), 'shot')}:")
     for s in shots:
         extra = f", {len(s.arrivals)} arrivals" if s.has_multiple_arrivals else ""
         print(f"  Shot {s.shot_number}: t={s.time_s:.4f}s, peak={s.peak_dB:.1f} dB, "

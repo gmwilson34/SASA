@@ -67,6 +67,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from atmosphere import Atmosphere, speed_of_sound
+from textutil import count, plural
 
 # How far two channels may disagree, after both have been referred to a common
 # distance, before the array is called inconsistent.
@@ -297,7 +298,7 @@ class ArrayConsistencyReport:
         if self.refusal:
             return f"  Array consistency: NOT CHECKED - {self.refusal}"
         lines = [
-            f"  Array consistency across {len(self.channels)} channel(s), "
+            f"  Array consistency across {count(len(self.channels), 'channel')}, "
             f"referred to {self.reference_distance_m:g} m"
         ]
         for channel in self.channels:
@@ -372,7 +373,7 @@ def check_array_consistency(
     }
     if len(usable) < MIN_CHANNELS:
         report.refusal = (
-            f"only {len(usable)} channel(s) have both a level and a recorded "
+            f"only {count(len(usable), 'channel')} {plural(len(usable), 'has')} both a level and a recorded "
             f"position, and consistency needs at least {MIN_CHANNELS}"
         )
         return report

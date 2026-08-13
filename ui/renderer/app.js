@@ -224,6 +224,40 @@ const VIEW_IDS = {
 // array, so a tab missing here is unreachable by keyboard AND never revealed.
 const TABS = ['overview', 'spectrogram', 'bands', 'shots', 'string', 'table', 'hazard'];
 
+/**
+ * A-weighting at the nominal one-third-octave centres, IEC 61672-1:2013 Table 3.
+ *
+ * This is the published table, transcribed, and it is the same one weighting.py
+ * checks its filter against — not a curve fitted here. It is used for one thing:
+ * to draw the A-weighted band exposure alongside the measured band exposure, so
+ * an operator can see which bands actually carry the A-weighted number that the
+ * hazard assessment is built on. Applying it is one addition per band; nothing
+ * about the measurement is re-derived.
+ */
+const A_WEIGHTING_dB = {
+  10: -70.4, 12.5: -63.4, 16: -56.7, 20: -50.5, 25: -44.7, 31.5: -39.4,
+  40: -34.6, 50: -30.2, 63: -26.2, 80: -22.5, 100: -19.1, 125: -16.1,
+  160: -13.4, 200: -10.9, 250: -8.6, 315: -6.6, 400: -4.8, 500: -3.2,
+  630: -1.9, 800: -0.8, 1000: 0.0, 1250: 0.6, 1600: 1.0, 2000: 1.2,
+  2500: 1.3, 3150: 1.2, 4000: 1.0, 5000: 0.5, 6300: -0.1, 8000: -1.1,
+  10000: -2.5, 12500: -4.3, 16000: -6.6, 20000: -9.3,
+};
+
+/**
+ * The A-weighting to apply at a band centre, or null when the band is outside
+ * the standard's table. Nominal centres are matched within 1 %, which separates
+ * every adjacent one-third-octave pair (they are 26 % apart) while tolerating
+ * the difference between a nominal 31.5 Hz and an exact 31.623 Hz.
+ */
+function aWeightingAt(hz) {
+  if (!isNum(hz)) return null;
+  for (const key of Object.keys(A_WEIGHTING_dB)) {
+    const nominal = Number(key);
+    if (Math.abs(hz - nominal) <= 0.01 * nominal) return A_WEIGHTING_dB[key];
+  }
+  return null;
+}
+
 /* The guided flow. Order is the route; `owns` is the set of concerns whose
    blockers are attributed to that stop, so a missing microphone distance is
    reported on Test record and not as an anonymous item at the end. */
@@ -402,6 +436,30 @@ function fmt(value, digits = 1) {
   return value.toFixed(digits);
 }
 
+/**
+ * A number for prose, with a real minus sign.
+ *
+ * Captions are read, not parsed: "Colour scale -5 to 65 dB" sets a
+ * hyphen-minus in a proportional face, where it is a third the width of the
+ * digits beside it and reads as a hyphen. U+2212 is the minus sign, and it is
+ * the width of a digit.
+ */
+function fmtProse(value, digits = 1) {
+  if (!isNum(value)) return '\u2014';
+  return value.toFixed(digits).replace('-', '\u2212');
+}
+
+/** Title-case a window function's name: "hann" is a person, Julius von Hann. */
+const WINDOW_NAMES = {
+  hann: 'Hann', hamming: 'Hamming', blackman: 'Blackman',
+  blackmanharris: 'Blackman\u2013Harris', flattop: 'flat-top',
+  kaiser: 'Kaiser', bartlett: 'Bartlett', boxcar: 'rectangular',
+};
+function windowName(name) {
+  const key = String(name || '').toLowerCase().replace(/[^a-z]/g, '');
+  return WINDOW_NAMES[key] || String(name || 'unknown');
+}
+
 function fmtSigned(value, digits = 1) {
   if (!isNum(value)) return '—';
   const s = value.toFixed(digits);
@@ -409,6 +467,24 @@ function fmtSigned(value, digits = 1) {
 }
 
 function fmtInt(value) { return isNum(value) ? String(Math.round(value)) : '—'; }
+
+/* ---- plurals -------------------------------------------------------------
+   "6 shot(s) detected" is a form waiting to be filled in, not a sentence, and
+   the interface always knows the number before it writes the line. These two
+   helpers exist so no string in the application has to carry a "(s)". */
+
+/** Irregular plurals this interface actually uses. */
+const IRREGULAR_PLURALS = { is: 'are', was: 'were', has: 'have', this: 'these', it: 'they' };
+
+/** The right form of a word for a count. */
+function plural(n, word, pluralForm) {
+  const one = isNum(n) ? Math.round(Math.abs(n)) === 1 : false;
+  if (one) return word;
+  return pluralForm || IRREGULAR_PLURALS[word] || `${word}s`;
+}
+
+/** "1 shot" / "6 shots" — the count and its noun, agreeing. */
+function count(n, word, pluralForm) { return `${fmtInt(n)} ${plural(n, word, pluralForm)}`; }
 
 function fmtBytes(n) {
   if (!isNum(n)) return '—';
@@ -431,14 +507,31 @@ function fmtHz(hz) {
   return `${hz.toFixed(0)} Hz`;
 }
 
+/**
+ * When an analysis ran, as a person would write it: "13 Aug 2026, 02:43".
+ *
+ * Seconds are dropped and the clock is 24-hour. Neither is a style choice:
+ * "Aug 13, 2026, 02:43:04 AM" put four numbers in a row where two carry
+ * meaning, and a run that took 3.5 seconds cannot be told apart from another
+ * by its start second anyway. The exact instant is preserved untouched in
+ * analysis_metadata.json, which is the record; this is the label.
+ */
 function fmtTimestamp(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
   return d.toLocaleString(undefined, {
-    year: 'numeric', month: 'short', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
   });
+}
+
+/** The same instant with no time of day, for a row that only needs the day. */
+function fmtDay(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 function basename(p) {
@@ -614,7 +707,15 @@ const state = {
   },
 
   /** The recording under analysis. */
-  input: { name: null, path: null, size: null, source: null, uploading: false, progress: 0, error: null },
+  input: {
+    name: null, path: null, size: null, source: null,
+    uploading: false, progress: 0, error: null,
+    // What the file itself says: filled by probeInput() the moment a
+    // recording is chosen, so the bin spacing, the band ceiling and the
+    // sample-rate warning are all answered before the run rather than
+    // after it. null until the answer arrives; `probing` while it is out.
+    probe: null, probing: false,
+  },
 
   /** Calibration is an explicit choice. There is deliberately no default. */
   calibration: {
@@ -665,6 +766,10 @@ const state = {
     blockers: [],
     rows: [],
     bands: null,
+    // proposeComparePair() fills the two empty dropdowns once per session with
+    // the pair the history makes obvious. Latched so a proposal the operator
+    // clears stays cleared.
+    proposed: false,
   },
 
   history: { status: 'idle', items: [], filter: '', config: 'all', error: null },
@@ -673,7 +778,7 @@ const state = {
   recent: [],
   prefs: { outputDir: '', openOnComplete: true },
 
-  app: { version: null, engine: null, commit: null },
+  app: { version: null, engine: null, commit: null, defaultOutputDir: null },
 };
 
 let dirty = false;
@@ -1287,6 +1392,44 @@ function describeFormat(name) {
   return { text: `${ext.slice(1).toUpperCase()} — unsupported`, tone: 'danger' };
 }
 
+/**
+ * What the chosen file's header says, before anything has been run.
+ *
+ * These are not blockers — a 44.1 kHz recording can still be analysed and its
+ * levels are still levels. They are the things that would otherwise appear in
+ * the verdict, at which point the operator has already spent the run.
+ */
+function renderInputNotes() {
+  const list = $('input-notes');
+  if (!list) return;
+  const probe = state.input.probe;
+  const notes = (probe && Array.isArray(probe.notes)) ? probe.notes : [];
+
+  list.textContent = '';
+  show(list, notes.length > 0);
+  for (const note of notes) {
+    const item = document.createElement('li');
+    // The rate note is the one that changes what the numbers mean, so it is
+    // the one that is allowed to be amber.
+    item.className = probe.sample_rate_adequate === false && /resolve/.test(note)
+      ? 'note note-warn'
+      : 'note note-info';
+    item.textContent = note;
+    list.appendChild(item);
+  }
+}
+
+/** The probe as one line: "48.0 kHz · 2 channels · 3.38 s · PCM_32 · 1.2 MB". */
+function describeProbe(probe) {
+  const parts = [];
+  if (isNum(probe.sample_rate)) parts.push(`${fmt(probe.sample_rate / 1000, 1)} kHz`);
+  if (isNum(probe.channels)) parts.push(count(probe.channels, 'channel'));
+  if (isNum(probe.duration_s)) parts.push(fmtDuration(probe.duration_s));
+  if (probe.subtype) parts.push(String(probe.subtype));
+  if (isNum(probe.size_bytes)) parts.push(fmtBytes(probe.size_bytes));
+  return parts.join(' · ');
+}
+
 function renderInput() {
   const chip = $('file-chip');
   const has = Boolean(state.input.path) || state.input.uploading;
@@ -1294,9 +1437,17 @@ function renderInput() {
   show($('file-dropzone'), !has);
 
   setText($('file-chip-name'), state.input.name);
+  // What the file IS, in preference to where it is. The path was all this
+  // line used to carry for a file chosen by path, which the operator had just
+  // typed and does not need read back; the rate, channel count and duration
+  // are what decide whether the recording can carry the measurement.
   let meta;
   if (state.input.uploading) {
     meta = `Uploading… ${Math.round(state.input.progress)}%`;
+  } else if (state.input.probing) {
+    meta = 'Reading the file…';
+  } else if (state.input.probe && state.input.probe.readable) {
+    meta = describeProbe(state.input.probe);
   } else if (state.input.source === 'path') {
     meta = state.input.path;
   } else {
@@ -1314,6 +1465,8 @@ function renderInput() {
     show(pill, false);
   }
 
+  renderInputNotes();
+
   const errorRow = $('file-path-error');
   show(errorRow, Boolean(state.input.error));
   setRaw($('file-path-error-text'), state.input.error || '');
@@ -1324,12 +1477,99 @@ function renderInput() {
   }
 }
 
+const BLANK_INPUT = {
+  name: null, path: null, size: null, source: null,
+  uploading: false, progress: 0, error: null, probe: null, probing: false,
+};
+
 function clearInput() {
-  state.input = { name: null, path: null, size: null, source: null, uploading: false, progress: 0, error: null };
+  state.input = { ...BLANK_INPUT };
   const fileInput = $('file-input');
   if (fileInput) fileInput.value = '';
   commit();
 }
+
+/**
+ * Ask the engine what the chosen recording actually is.
+ *
+ * Header read only — no decoding — so it answers in milliseconds even for a
+ * container of any length. Everything it returns is something the interface
+ * would otherwise either leave blank ("bin spacing = fs / 2048"), offer
+ * wrongly (a band range above Nyquist), or discover far too late (a 44.1 kHz
+ * phone recording that cannot resolve a rise time, reported in the verdict
+ * after the analysis had already run).
+ *
+ * A failed probe is not an error the operator has to deal with: the run is
+ * what refuses, and it refuses with the engine's own reasons. This only ever
+ * makes the page better informed, so it fails quietly into `null`.
+ */
+async function probeInput(filePath) {
+  if (!filePath) return;
+  state.input.probing = true;
+  state.input.probe = null;
+  commit();
+
+  const requested = filePath;
+  let probe = null;
+  try {
+    const response = await fetch(`/api/probe?path=${encodeURIComponent(filePath)}`);
+    probe = await response.json();
+  } catch {
+    probe = null;
+  }
+
+  // The operator may have chosen a different file while this was in flight.
+  if (state.input.path !== requested) return;
+
+  state.input.probing = false;
+  state.input.probe = probe && typeof probe === 'object' ? probe : null;
+  applyProbeToSettings();
+  commit();
+}
+
+/**
+ * Let the file's own properties set what the analysis page can offer.
+ *
+ * Only the band ceiling is moved, and only downwards: a one-third-octave
+ * centre above Nyquist is a band the recording cannot contain, and offering
+ * it invites a chart with empty columns on the right-hand end. Nothing else
+ * is touched — a detection threshold or a window length the operator chose is
+ * theirs, and silently rewriting a setting from a file is how a configuration
+ * stops meaning what the person who set it thought it meant.
+ */
+function applyProbeToSettings() {
+  const probe = state.input.probe;
+  const nyquist = probe && isNum(probe.nyquist_Hz) ? probe.nyquist_Hz : null;
+  if (!nyquist) return;
+
+  const field = $('band-high');
+  if (!field) return;
+  const current = Number(field.value);
+  if (!isNum(current) || current <= nyquist) return;
+
+  // The highest standard one-third-octave centre that the recording can carry.
+  const usable = THIRD_OCTAVE_CENTRES.filter(hz => hz <= nyquist);
+  if (usable.length === 0) return;
+  const capped = usable[usable.length - 1];
+  if (capped === current) return;
+
+  field.value = String(capped);
+  persistSettings();
+  toast({
+    title: 'Band range capped',
+    text: `This recording is sampled at ${fmt(probe.sample_rate / 1000, 1)} kHz, so `
+      + `${fmtInt(current)} Hz is above its Nyquist frequency. The top band is now `
+      + `${fmtInt(capped)} Hz.`,
+    tone: 'info',
+  });
+}
+
+/** Nominal one-third-octave band centres, IEC 61260. */
+const THIRD_OCTAVE_CENTRES = [
+  10, 12.5, 16, 20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315,
+  400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300,
+  8000, 10000, 12500, 16000, 20000,
+];
 
 /** Upload with XHR so large recordings report progress instead of freezing. */
 function uploadFile(file) {
@@ -1371,8 +1611,9 @@ async function acceptRecording(file) {
     state.input.uploading = false;
     rememberRecent(result.path, state.input.name);
     announce(`Recording ready: ${state.input.name}`);
+    probeInput(result.path);
   } catch (err) {
-    state.input = { name: null, path: null, size: null, source: null, uploading: false, progress: 0, error: err.message };
+    state.input = { ...BLANK_INPUT, error: err.message };
     toast({ title: 'Upload failed', text: err.message, tone: 'danger' });
   }
   commit();
@@ -1466,12 +1707,13 @@ function useTypedPath() {
   // The server confines the path to its permitted roots and reports back if it
   // will not accept it; we do not pretend to have verified it here.
   state.input = {
-    name: basename(value), path: value, size: null, source: 'path',
-    uploading: false, progress: 0, error: null,
+    ...BLANK_INPUT,
+    name: basename(value), path: value, source: 'path',
   };
   rememberRecent(value, basename(value));
   commit();
   announce(`Path set: ${basename(value)}`);
+  probeInput(value);
 }
 
 /* ---- calibration -------------------------------------------------------- */
@@ -1514,6 +1756,48 @@ function levelUnitForMethod() {
   return state.calibration.method === 'none' ? 'dB re FS' : 'dB SPL';
 }
 
+/**
+ * The calibration's condition, in one place.
+ *
+ * Both the status pill in the Calibration panel and the Calibration stop on
+ * the rail describe this state, and they used to compute it separately: the
+ * pill said "Uncalibrated — not acknowledged" while the rail, two inches
+ * above it, said "Uncalibrated — incomplete" about the same moment.
+ *
+ * @returns {{tone: string, text: string, short: string}}
+ *          `text` for the pill, `short` for the rail, which has a
+ *          sidebar-width column to say it in.
+ */
+function calibrationStatus() {
+  const method = state.calibration.method;
+  if (method === '') return { tone: 'warn', text: 'Not set', short: 'No method' };
+
+  if (method === 'none') {
+    const ack = $('cal-uncal-ack');
+    return ack && ack.checked
+      ? { tone: 'warn', text: 'Uncalibrated — acknowledged', short: 'Uncalibrated' }
+      : { tone: 'warn', text: 'Uncalibrated — not acknowledged', short: 'Not acknowledged' };
+  }
+
+  if (method === 'tone') {
+    const ready = Boolean(state.calibration.tone.path)
+      && $('cal-tone-level') && $('cal-tone-level').value !== '';
+    return ready
+      ? { tone: 'ok', text: 'Calibrator tone', short: 'Calibrator tone' }
+      : { tone: 'warn', text: 'Calibrator tone — incomplete', short: 'Tone incomplete' };
+  }
+
+  const pa = resolvedPaPerFS();
+  if (isNum(pa)) {
+    return method === 'chain'
+      ? { tone: 'ok', text: 'Recording chain', short: 'Recording chain' }
+      : { tone: 'ok', text: 'Saved profile', short: 'Saved profile' };
+  }
+  return method === 'chain'
+    ? { tone: 'warn', text: 'Recording chain — incomplete', short: 'Chain incomplete' }
+    : { tone: 'warn', text: 'No profile chosen', short: 'No profile' };
+}
+
 function renderCalibration() {
   const method = state.calibration.method;
 
@@ -1521,26 +1805,12 @@ function renderCalibration() {
     show($(`cal-panel-${name}`), method === name);
   }
 
-  // Status pill — never colour alone.
-  const pill = $('cal-status-pill');
-  const text = $('cal-status-text');
-  if (method === '') {
-    setTone(pill, 'warn'); setRaw(text, 'Not set');
-  } else if (method === 'none') {
-    const ack = $('cal-uncal-ack');
-    if (ack && ack.checked) { setTone(pill, 'warn'); setRaw(text, 'Uncalibrated — acknowledged'); }
-    else { setTone(pill, 'warn'); setRaw(text, 'Uncalibrated — not acknowledged'); }
-  } else if (method === 'tone') {
-    const ready = Boolean(state.calibration.tone.path) && $('cal-tone-level') && $('cal-tone-level').value !== '';
-    setTone(pill, ready ? 'ok' : 'warn');
-    setRaw(text, ready ? 'Calibrator tone' : 'Calibrator tone — incomplete');
-  } else {
-    const pa = resolvedPaPerFS();
-    setTone(pill, isNum(pa) ? 'ok' : 'warn');
-    setRaw(text, isNum(pa)
-      ? (method === 'chain' ? 'Recording chain' : 'Saved profile')
-      : (method === 'chain' ? 'Recording chain — incomplete' : 'No profile chosen'));
-  }
+  // Status pill — never colour alone. The wording comes from the one place
+  // that knows it, so the rail at the top of the page and the pill inside the
+  // panel cannot describe the same state in two different ways.
+  const status = calibrationStatus();
+  setTone($('cal-status-pill'), status.tone);
+  setRaw($('cal-status-text'), status.text);
 
   // Chain readout
   const chainPa = chainPaPerFS();
@@ -1682,16 +1952,16 @@ function renderFieldsetCounts(missingIds) {
       return input && missingIds.has(input.id);
     }).length;
 
-    let count = qs('.fieldset-count', legend);
-    if (!count) {
-      count = document.createElement('span');
-      count.className = 'fieldset-count';
-      legend.appendChild(count);
+    let badge = qs('.fieldset-count', legend);
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'fieldset-count';
+      legend.appendChild(badge);
     }
     const done = required.length - outstanding;
-    count.textContent = `${done}/${required.length}`;
-    count.dataset.state = outstanding === 0 ? 'complete' : 'outstanding';
-    count.setAttribute('aria-label',
+    badge.textContent = `${done}/${required.length}`;
+    badge.dataset.state = outstanding === 0 ? 'complete' : 'outstanding';
+    badge.setAttribute('aria-label',
       `${done} of ${required.length} required fields complete in this group`);
   }
 }
@@ -1710,16 +1980,22 @@ function renderMetadataCompleteness() {
   }
   renderFieldsetCounts(missingIds);
 
-  setRaw($('metadata-missing-count'), String(missing.length));
+  // Counting down to "0 required fields still empty" makes the finished state
+  // read as a tally rather than as done. State the positive once it is true.
   const wrapper = $('metadata-completeness');
   if (wrapper) {
     wrapper.textContent = '';
-    const count = document.createElement('span');
-    count.className = 'num';
-    count.id = 'metadata-missing-count';
-    count.textContent = String(missing.length);
-    wrapper.append(count, document.createTextNode(
-      missing.length === 1 ? ' required field still empty' : ' required fields still empty'));
+    wrapper.dataset.state = missing.length === 0 ? 'complete' : 'incomplete';
+    if (missing.length === 0) {
+      wrapper.textContent = 'Every required field is filled in.';
+    } else {
+      const tally = document.createElement('span');
+      tally.className = 'num';
+      tally.id = 'metadata-missing-badge';
+      tally.textContent = String(missing.length);
+      wrapper.append(tally, document.createTextNode(
+        ` required ${plural(missing.length, 'field')} still empty`));
+    }
   }
 
   // The suppressor requirement escalates with the configuration.
@@ -1846,14 +2122,30 @@ function renderSettingsDerived() {
   // STFT resolution readout: sample rate is unknown until a recording is read,
   // so it is quoted per the source when we have one and left as a ratio if not.
   const nperseg = Number($('stft-nperseg') ? $('stft-nperseg').value : NaN);
-  const sampleRate = state.results.payload
-    && state.results.payload.metadata
-    && state.results.payload.metadata.source
-    && state.results.payload.metadata.source.sample_rate;
+  // The chosen recording's own rate first — it is the file this page is about
+  // to analyse. The loaded result's rate is the fallback, for when the
+  // operator is looking at settings with no new file picked.
+  const probe = state.input.probe;
+  const sampleRate = (probe && probe.readable && isNum(probe.sample_rate))
+    ? probe.sample_rate
+    : (state.results.payload
+      && state.results.payload.metadata
+      && state.results.payload.metadata.source
+      && state.results.payload.metadata.source.sample_rate);
   const resolution = $('stft-resolution');
-  if (isNum(nperseg) && nperseg > 0 && isNum(sampleRate)) setText(resolution, fmt(sampleRate / nperseg, 2));
-  else if (isNum(nperseg) && nperseg > 0) setText(resolution, `fs ÷ ${nperseg}`);
-  else setText(resolution, null);
+  if (!isNum(nperseg) || nperseg <= 0) {
+    setText(resolution, null);
+  } else if (isNum(sampleRate)) {
+    setText(resolution,
+      `Bin spacing ${fmt(sampleRate / nperseg, 2)} Hz at ${fmt(sampleRate / 1000, 1)} kHz.`);
+  } else {
+    // No recording analysed yet, so the rate is unknown. "fs / 2048 Hz per
+    // bin" is an equation with a free variable, which is not a hint; a worked
+    // example at the rate almost every recorder uses is.
+    setText(resolution,
+      `Bin spacing is the sample rate divided by ${nperseg} — `
+      + `${fmt(48000 / nperseg, 1)} Hz at 48 kHz.`);
+  }
 }
 
 function wireSettings() {
@@ -1923,6 +2215,12 @@ function detailedBlockers() {
   if (state.input.uploading) add('recording', 'The recording is still uploading.');
   else if (!state.input.path) add('recording', 'Select a recording.');
   else if (state.input.error) add('recording', `Recording: ${state.input.error}`);
+  else if (state.input.probe && state.input.probe.readable === false && state.input.probe.problem) {
+    // The probe read the file's header and could not make sense of it. Better
+    // said here, next to the file, than as an engine error after the operator
+    // has filled in a test record and pressed Run.
+    add('recording', state.input.probe.problem);
+  }
 
   const method = state.calibration.method;
   if (method === '') {
@@ -2011,10 +2309,6 @@ function renderBlockers() {
 
   show($('btn-cancel-run'), busy);
   setDisabled($('btn-cancel-run'), state.run.status === 'cancelling');
-
-  setRaw($('run-hint'), busy
-    ? 'Cancelling stops the engine; whatever it had already written is partial and is not a result.'
-    : 'Analysis runs locally; nothing leaves this machine.');
 }
 
 /**
@@ -2420,7 +2714,7 @@ function handleServerMessage(message) {
     case 'log': {
       if (!mine) break;
       if (isNum(message.dropped) && message.dropped > 0) {
-        appendLog(`[${message.dropped} log line(s) omitted to keep the interface responsive]`, 'warn');
+        appendLog(`[${badge(message.dropped, 'log line')} omitted to keep the interface responsive]`, 'warn');
       }
       if (message.line !== undefined && message.line !== null) {
         appendLog(String(message.line), classifyLogLine(message.line, message.stream));
@@ -2602,7 +2896,8 @@ function applyServerFieldErrors(fields) {
   if (unmapped > 0) {
     toast({
       title: 'Some settings were rejected',
-      text: `${unmapped} rejected field(s) have no control on this page; see the analysis log.`,
+      text: `${badge(unmapped, 'rejected field')} ${plural(unmapped, 'has')} no control on this page; `
+        + 'see the analysis log.',
       tone: 'warn',
     });
   }
@@ -2691,6 +2986,17 @@ function shotEvent(shotNumber) {
 /** The level unit for THIS measurement. Never hard-code "dB SPL". */
 function levelUnit() {
   return state.results.levelUnit || 'dB';
+}
+
+/**
+ * Whether the loaded result carries a real calibration.
+ *
+ * Used to choose between "pressure" and "signal level" in labels: with
+ * Pa_per_FS = 1 the numbers are in full-scale units, and calling the trace a
+ * pressure would be the single claim this application exists to avoid making.
+ */
+function calibratedRecord() {
+  return metaBlock('calibration').calibrated === true;
 }
 
 function unitFor(metric) {
@@ -2951,18 +3257,34 @@ function validityChecks() {
     push('calibration', 'Calibration', `Uncalibrated — levels are ${calibration.level_unit || 'dB re FS'}`, 'warn');
   }
 
-  // Clipping
-  if (quality.is_clipped) {
-    push('clipping', 'Clipping', `${fmtInt(quality.clipped_samples)} samples in ${fmtInt(quality.clipped_runs)} run(s)`, 'fail');
+  // Clipping. Two causes, and they are not the same fault: one is a converter
+  // that ran out of range, the other a limiter that was left switched on and
+  // leaves the file looking like it has headroom.
+  const railClipped = isNum(quality.clipped_runs) && quality.clipped_runs > 0;
+  if (railClipped) {
+    push('clipping', 'Clipping',
+      `${fmtInt(quality.clipped_samples)} ${plural(quality.clipped_samples, 'sample')} at full scale, `
+      + `in ${fmtInt(quality.clipped_runs)} ${plural(quality.clipped_runs, 'run')}`, 'fail');
+  } else if (quality.ceiling_clipped) {
+    push('clipping', 'Clipping',
+      `Limited at ${fmt(quality.ceiling_dBFS, 1)} dBFS — ${fmtInt(quality.ceiling_samples)} `
+      + `${plural(quality.ceiling_samples, 'sample')} flat-topped below full scale`, 'fail');
   } else {
     push('clipping', 'Clipping', 'None detected', 'pass');
   }
 
-  // Headroom
+  // Headroom. When the waveform is flat-topped at a ceiling, the number here
+  // is the distance to a rail the signal never reached, and reporting it on
+  // its own would read as reassurance.
   if (isNum(quality.headroom_dB)) {
     const headroom = quality.headroom_dB;
-    push('headroom', 'Headroom', `${fmt(headroom, 1)} dB below full scale`,
-      headroom < 1 ? 'fail' : headroom < 6 ? 'warn' : 'pass');
+    if (quality.ceiling_clipped && !railClipped) {
+      push('headroom', 'Headroom',
+        `${fmt(headroom, 1)} dB to full scale, but the peak is flat-topped there`, 'fail');
+    } else {
+      push('headroom', 'Headroom', `${fmt(headroom, 1)} dB below full scale`,
+        headroom < 1 ? 'fail' : headroom < 6 ? 'warn' : 'pass');
+    }
   }
 
   // Signal-to-noise
@@ -2985,7 +3307,7 @@ function validityChecks() {
 
   if (isNum(detection.n_suppressed_by_refractory) && detection.n_suppressed_by_refractory > 0) {
     push('refractory', 'Refractory suppressions',
-      `${fmtInt(detection.n_suppressed_by_refractory)} candidate(s) discarded as too close together`, 'warn');
+      `${count(detection.n_suppressed_by_refractory, 'candidate')} discarded as too close together`, 'warn');
   }
 
   // Truncated windows
@@ -3039,20 +3361,67 @@ function describeCheck(check) {
   return `${name} (${value})`;
 }
 
+/** "A", "A and B", "A, B and C" — a list a person would read aloud. */
+function joinList(items, conjunction = 'and') {
+  const parts = items.map(i => String(i).trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} ${conjunction} ${parts[parts.length - 1]}`;
+}
+
 /**
- * Reasons are joined into one sentence with semicolons, so each has to arrive
- * without its own terminator. Engine warnings are written as full sentences
- * and check descriptions are not, which is how "...the muzzle blast.." got
- * onto the verdict banner.
+ * The banner's account of why a measurement is not clean.
+ *
+ * It used to be every reason the engine and the check grid could produce,
+ * concatenated with semicolons and truncated at four with "and N more" — so a
+ * single fault was stated up to three times, in three registers, in one
+ * paragraph, and the sentence ran on past its own full stop.
+ *
+ * What it says now: how many checks are involved, which ones by name, and
+ * where the engine's own wording is. The check tiles are directly underneath
+ * and already carry the measured value, so the banner does not repeat it
+ * unless there is exactly one thing to say, in which case saying it in full
+ * is shorter than pointing at it.
+ *
+ * @param {string[]} leading  Reasons with no check tile of their own.
+ * @param {object[]} checks   The failing (or cautioning) checks.
+ * @param {string[]} messages The engine's sentences, shown in the dialog.
+ * @param {string}   noun     "failed" / "wants qualifying" — the state's verb.
  */
-function joinReasons(reasons, limit = 4) {
-  const cleaned = reasons
-    .map(reason => String(reason).trim().replace(/[.;]+$/, ''))
-    .filter(Boolean);
-  if (cleaned.length === 0) return '';
-  const shown = cleaned.slice(0, limit).join('; ');
-  const rest = cleaned.length - limit;
-  return `${shown}${rest > 0 ? `; and ${rest} more` : ''}.`;
+function reasonSentence(leading, checks, messages, noun) {
+  const sentences = [];
+  const named = checks.map(c => String(c.name || '').toLowerCase()).filter(Boolean);
+
+  if (leading.length > 0) sentences.push(`${joinList(leading)}.`);
+
+  if (checks.length === 1 && leading.length === 0) {
+    // One fault: name it and give its value, which is the whole story.
+    sentences.push(`${sentenceCase(describeCheck(checks[0]))} ${noun}.`);
+  } else if (named.length > 0) {
+    sentences.push(`${sentenceCase(count(named.length, 'check'))} ${noun}: ${joinList(named)}.`);
+  }
+
+  // One or two engine messages are quoted here rather than filed behind a
+  // button. "1 message from the engine is under Warnings and errors" is a
+  // receipt for a message, not the message, and the operator has to open a
+  // dialog to learn something that would have fitted on the line.
+  if (messages.length > 0 && messages.length <= 2) {
+    for (const message of messages) {
+      const text = String(message).trim();
+      sentences.push(/[.!?]$/.test(text) ? text : `${text}.`);
+    }
+  } else if (messages.length > 2) {
+    sentences.push(
+      `${sentenceCase(count(messages.length, 'message'))} from the engine `
+      + `${plural(messages.length, 'is')} under Warnings and errors.`);
+  }
+  return sentences.join(' ');
+}
+
+/** Capitalise the first letter without touching the rest — "dB" must survive. */
+function sentenceCase(text) {
+  const s = String(text || '');
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
 function renderValidity() {
@@ -3080,32 +3449,44 @@ function renderValidity() {
   let verdict;
   let headline;
   let text;
+  let remedy = '';
+
+  // The calibration state gets exactly one sentence, at the end, where it is
+  // the last thing read. Left in the reason list as well it arrived three
+  // times in one paragraph: as a check, as an engine warning, and again here.
+  const uncalibrated = calibration.calibrated === false;
+  const engineMessages = (list) => (uncalibrated
+    ? list.filter(m => !/^No calibration supplied/i.test(String(m).trim()))
+    : list);
 
   if (inadmissible) {
     tone = 'danger';
     verdict = 'Not admissible';
     headline = 'This measurement must not be reported as a result';
-    const reasons = [
-      ...(noShots ? ['no shots were detected'] : []),
-      ...failed.map(describeCheck),
-      ...errors,
-    ];
-    text = `${joinReasons(reasons)} Fix the recording or the setup and measure again.`;
+    text = reasonSentence(
+      noShots ? ['No shots were detected, so there is nothing to report'] : [],
+      failed, engineMessages(errors), 'failed');
+    // The remedy is appended after everything else, below, so it stays the
+    // last sentence: it is what the operator is meant to do next.
+    remedy = 'Fix the recording or the setup and measure again.';
   } else if (warned.length > 0 || warnings.length > 0) {
     tone = 'warn';
     verdict = 'Admissible with cautions';
     headline = 'Usable, but qualify the result';
-    text = joinReasons([...warned.map(describeCheck), ...warnings]);
+    text = reasonSentence([], warned, engineMessages(warnings), 'wants qualifying');
   } else {
     tone = 'ok';
     verdict = 'Admissible';
     headline = 'Measurement passes every automatic check';
-    text = `${shotList().length} shot(s) analysed; every quality check passed.`;
+    text = `${count(shotList().length, 'shot')} analysed; every quality check passed.`;
   }
 
-  if (calibration.calibrated === false) {
-    text += ` Levels are ${calibration.level_unit || 'dB re FS'} — they are not sound pressure levels and no hazard figure is defensible.`;
+  if (uncalibrated) {
+    text += ` Levels are ${calibration.level_unit || 'dB re FS'}: relative to this `
+      + 'recording only. They are not sound pressure levels, and no hazard figure '
+      + 'can be derived from them.';
   }
+  if (remedy) text += ` ${remedy}`;
 
   setTone(banner, tone);
   setIcon($('validity-icon'), TONE_ICON[tone]);
@@ -3257,7 +3638,7 @@ function renderOverview() {
   const drawn = setFigure('img-waveform', waveform, null,
     'Waveform of the recording with each detected shot marked.');
   setText($('caption-waveform'), drawn
-    ? `${fmtInt(detection.n_detected)} shot(s) detected at ${fmt(detection.threshold_dB, 1)} dB `
+    ? `${count(detection.n_detected, 'shot')} detected at ${fmt(detection.threshold_dB, 1)} dB `
       + `(${detection.threshold_mode || 'mode unknown'}); peak ${fmt(detection.peak_level_dB, 1)} ${levelUnit()}, `
       + `noise floor ${fmt(detection.noise_floor_dB, 1)} ${levelUnit()}.`
     : 'No waveform figure was produced for this analysis.');
@@ -3588,14 +3969,14 @@ function renderShotsPanel() {
   const status = $('aggregate-status');
   if (status) {
     status.textContent = '';
-    const count = document.createElement('span');
-    count.className = 'num';
-    count.id = 'aggregate-included';
-    count.textContent = String(included);
+    const tally = document.createElement('span');
+    tally.className = 'num';
+    tally.id = 'aggregate-included';
+    tally.textContent = String(included);
     status.append(
       document.createTextNode('Aggregates include '),
-      count,
-      document.createTextNode(` of ${shots.length} shot(s)`
+      tally,
+      document.createTextNode(` of ${count(shots.length, 'shot')}`
         + (engineInvalid > 0 ? `; ${engineInvalid} excluded by the engine` : '')
         + (manual > 0 ? `; ${manual} rejected here` : '')
         + '. Every figure on this page is recomputed from the included shots.'),
@@ -3642,19 +4023,30 @@ function renderShotsPanel() {
             const deltaNode = slot(node, 'delta');
             const direction = Math.abs(delta) < 0.05 ? 'flat' : (delta > 0 ? 'up' : 'down');
             deltaNode.setAttribute('data-direction', direction);
-            setIcon(slot(node, 'delta-icon'),
-              direction === 'up' ? 'i-arrow-up' : direction === 'down' ? 'i-arrow-down' : 'i-minus');
-            setRaw(slot(node, 'delta-value'), `${fmtSigned(delta, metric.digits)} vs mean`);
+            // No arrow when the shot sits on the mean. The "no change" glyph
+            // was a minus sign, printed immediately before a signed number, so
+            // a shot 0.04 below the mean read "− -0.04".
+            show(slot(node, 'delta-icon'), direction !== 'flat');
+            if (direction !== 'flat') {
+              setIcon(slot(node, 'delta-icon'), direction === 'up' ? 'i-arrow-up' : 'i-arrow-down');
+            }
+            setRaw(slot(node, 'delta-value'), direction === 'flat'
+              ? 'On the mean'
+              : `${fmtSigned(delta, metric.digits)} vs mean`);
             show(deltaNode, true);
           }
         }
         grid.appendChild(node);
       }
 
-      // Shot notes — the engine's own reasons for flagging it.
+      // Shot notes — the engine's own reasons for flagging it. Set as a note
+      // spanning the whole grid: as bare prose it landed in whichever tile
+      // slot happened to be free and read as an unfinished card.
       const notes = Array.isArray(shot.notes) ? shot.notes : [];
       if (notes.length > 0) {
-        const paragraph = addParagraph(grid, `Engine notes: ${notes.join('; ')}`, 'prose');
+        const paragraph = addParagraph(grid,
+          `${plural(notes.length, 'This is what', 'These are what')} the engine `
+          + `recorded about this shot: ${notes.join('; ')}`, 'note note-info grid-span');
         paragraph.setAttribute('data-shot', String(shot.shot_number));
       }
     }
@@ -3900,7 +4292,7 @@ function renderHazardPanel() {
         ['LAeq,8h', fmt(hazard.LAeq8h_dB, 1), 'dB', `Criterion ${fmt(hazard.criterion_dB, 0)} dB`, hazard.exceeds_limit ? 'danger' : 'ok'],
         ['Daily dose', fmt(hazard.dose_percent, 0), '%', '100 % is the criterion', hazard.exceeds_limit ? 'danger' : 'ok'],
         ['Allowable rounds', fmtInt(hazard.allowable_rounds), 'per day', 'Unprotected', 'info'],
-        ['Mean LAE', fmt(hazard.LAE_mean_dB, 1), levelUnit(), `Energy mean of ${hazard.n_shots_used} shot(s)`, 'info'],
+        ['Mean LAE', fmt(hazard.LAE_mean_dB, 1), levelUnit(), `Energy mean of ${count(hazard.n_shots_used, 'shot')}`, 'info'],
       ];
       for (const [label, value, unit, caption, tone] of tiles) {
         const frag = fromTemplate('tpl-metric-tile');
@@ -3926,7 +4318,7 @@ function renderHazardPanel() {
     : null);
   setText($('hazard-criterion-out'), hazard ? `${fmt(hazard.criterion_dB, 0)} dB LAeq,8h` : null);
   setText($('hazard-rounds-out'), hazard
-    ? `${fmtInt(hazard.n_rounds)} per working day, from ${hazard.n_shots_used} included shot(s)` : null);
+    ? `${fmtInt(hazard.n_rounds)} per working day, from ${count(hazard.n_shots_used, 'included shot')}` : null);
   setText($('hazard-lae-mean'), hazard && isNum(hazard.LAE_mean_dB)
     ? `${fmt(hazard.LAE_mean_dB, 1)} ${levelUnit()}` : null);
 
@@ -4000,7 +4392,14 @@ function renderAhaahPanel() {
       rows.push(['Unspecified parameters',
         `${fmtInt(unwarned.category_c_count)} choices ARL's public release does not define`]);
     }
-    if (unwarned.man_coe_md5) rows.push(['man.coe checksum', String(unwarned.man_coe_md5)]);
+    // "man.coe checksum" named a file nobody outside ARL has heard of and gave
+    // no reason to care about its hash. What the row is FOR is provenance: it
+    // pins which parameter set the model was built from, so two results can be
+    // compared knowing the constants did not move between them.
+    if (unwarned.man_coe_md5) {
+      rows.push(['Parameter set',
+        `ARL man.coe, MD5 ${String(unwarned.man_coe_md5)}`]);
+    }
   }
   rows.push(['Metric in use', `A-weighted energy (MIL-STD-1474E), shown above`]);
 
@@ -4229,10 +4628,16 @@ function renderShotReview() {
   const actionable = flags.filter(f => f.severity === 'exclude' || f.severity === 'review');
   const excluded = Array.isArray(review.shots_to_exclude) ? review.shots_to_exclude : [];
 
+  const notes = flags.filter(f => !(f.severity === 'exclude' || f.severity === 'review'));
+
   if (!actionable.length) {
     setCardTone('card-review', 'ok');
     setTone(pill, 'ok', 'i-check-circle');
-    setText($('review-pill-text'), 'No shot departs from the string');
+    // The rows below are still there when they are only notes, and a green
+    // "nothing to see" pill above five blue rows reads as a contradiction.
+    setText($('review-pill-text'), notes.length
+      ? `No shot departs from the string · ${count(notes.length, 'note')}`
+      : 'No shot departs from the string');
     show(counter, false);
   } else {
     const tone = excluded.length ? 'danger' : 'warn';
@@ -4240,7 +4645,7 @@ function renderShotReview() {
     setTone(pill, tone, 'i-alert');
     setText($('review-pill-text'), excluded.length
       ? `${excluded.length} to exclude, ${actionable.length - excluded.length} to review`
-      : `${actionable.length} shot(s) to review`);
+      : `${count(actionable.length, 'shot')} to review`);
     setText(counter, String(actionable.length));
     counter.setAttribute('data-tone', tone);
     show(counter, true);
@@ -4248,17 +4653,35 @@ function renderShotReview() {
 
   // Worst first, so the shot that cannot carry a number is read before the
   // shots that merely want a look.
+  //
+  // Identical findings are collapsed onto one row. A recording sampled too
+  // slowly to resolve any rise time produced the SAME sentence once per shot:
+  // six rows saying one thing, which buries the one row that says something
+  // else. The shots are named, so nothing is lost by saying it once.
   const rank = { exclude: 0, review: 1, info: 2 };
-  flags.slice()
+  const groups = new Map();
+  for (const flag of flags) {
+    const key = `${flag.severity} ${flag.message}`;
+    if (!groups.has(key)) groups.set(key, { severity: flag.severity, message: flag.message, flags: [] });
+    groups.get(key).flags.push(flag);
+  }
+
+  [...groups.values()]
+    .map(group => ({ ...group, flags: group.flags.slice().sort((a, b) => a.shot_number - b.shot_number) }))
     .sort((a, b) => (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3)
-      || a.shot_number - b.shot_number)
-    .forEach(flag => {
-      const amount = isNum(flag.esd_statistic) && isNum(flag.esd_critical)
-        ? `ESD ${fmt(flag.esd_statistic, 2)} against a critical value of ${fmt(flag.esd_critical, 2)}`
+      || a.flags[0].shot_number - b.flags[0].shot_number)
+    .forEach(group => {
+      const numbers = group.flags.map(f => f.shot_number);
+      const label = numbers.length === 1
+        ? `Shot ${numbers[0]}`
+        : `${plural(numbers.length, 'Shot')} ${joinList(numbers.map(String))}`;
+      // The ESD statistic belongs to one shot, so it is only shown when the
+      // row is one shot. A grouped row names the shots instead.
+      const only = group.flags.length === 1 ? group.flags[0] : null;
+      const amount = only && isNum(only.esd_statistic) && isNum(only.esd_critical)
+        ? `ESD ${fmt(only.esd_statistic, 2)} against a critical value of ${fmt(only.esd_critical, 2)}`
         : null;
-      list.appendChild(findingRow(
-        `Shot ${flag.shot_number}`, flag.message, flag.severity, amount,
-      ));
+      list.appendChild(findingRow(label, group.message, group.severity, amount));
     });
 }
 
@@ -4282,7 +4705,7 @@ function renderAtmospherePanel() {
   } else {
     setCardTone('card-atmosphere', 'warn');
     setTone(pill, 'warn', 'i-alert');
-    setText($('atmosphere-pill-text'), `${defaulted.length} field(s) assumed`);
+    setText($('atmosphere-pill-text'), `${count(defaulted.length, 'field')} assumed`);
   }
 
   const assumed = key => defaulted.includes(key) ? ' (assumed)' : '';
@@ -4350,15 +4773,35 @@ function drawBandsChart() {
   show(canvas, true);
 
   const palette = chartPalette();
+  // The A-weighted curve is what the hazard metrics are computed from, so the
+  // chart shows both: the bands as measured, and the same bands after the
+  // weighting network the standard applies to them. The legend used to promise
+  // this series and the chart never drew it.
+  const weighted = mean.map((v, i) => {
+    const adjust = aWeightingAt(frequencies[i]);
+    return isNum(v) && adjust !== null ? v + adjust : NaN;
+  });
+  const anyWeighted = weighted.some(isNum);
+
   drawBandedChart(canvas, {
     frequencies,
     unit: levelUnit(),
-    series: [{ label: 'Mean band exposure', color: palette.series[3], kind: 'bar', values: mean }],
+    series: [
+      { label: 'Mean band exposure', color: palette.series[3], kind: 'bar', values: mean },
+      ...(anyWeighted
+        ? [{ label: 'A-weighted', color: palette.series[1], kind: 'line', values: weighted }]
+        : []),
+    ],
   });
+  show(qs('#panel-bands .figure-legend [data-series="2"]')?.closest('.legend-item'), anyWeighted);
   setRaw($('caption-bands'),
-    `Energy mean over the ${includedShots().length} included shot(s), `
+    `Energy mean over the ${count(includedShots().length, 'included shot')}, `
     + `${frequencies.length} one-third-octave bands, levels in ${levelUnit()}. `
-    + 'Recomputed here when a shot is excluded.');
+    + 'Recomputed here when a shot is excluded. '
+    + (anyWeighted
+      ? 'The line is the same bands with A-weighting applied at the nominal '
+        + 'centres of IEC 61672-1 Table 3 — the shape the hazard metrics see.'
+      : ''));
 }
 
 /** Freedman–Diaconis bin width, falling back to Sturges on a degenerate IQR. */
@@ -4382,11 +4825,11 @@ function histogramBins(values) {
   // standard fallback.
   let width = iqr > 0 ? (2 * iqr) / Math.cbrt(n) : span / (Math.ceil(Math.log2(n)) + 1);
   if (!(width > 0)) width = span / 4;
-  const count = clamp(Math.ceil(span / width), 3, 24);
-  const step = span / count;
-  const edges = Array.from({ length: count + 1 }, (_, i) => lo + i * step);
-  const counts = new Array(count).fill(0);
-  for (const v of sorted) counts[clamp(Math.floor((v - lo) / step), 0, count - 1)] += 1;
+  const bins = clamp(Math.ceil(span / width), 3, 24);
+  const step = span / bins;
+  const edges = Array.from({ length: bins + 1 }, (_, i) => lo + i * step);
+  const counts = new Array(bins).fill(0);
+  for (const v of sorted) counts[clamp(Math.floor((v - lo) / step), 0, bins - 1)] += 1;
   return { edges, counts };
 }
 
@@ -4426,6 +4869,7 @@ function drawDistributionChart() {
   // does not have, and one axis keeps the two readable against each other.
   let running = 0;
   const cumulative = counts.map(c => (running += c));
+  const binWidth = edges.length > 1 ? edges[1] - edges[0] : 1;
 
   drawXYChart(canvas, {
     x: centres,
@@ -4435,8 +4879,9 @@ function drawDistributionChart() {
     unit: 'shots',
     yMin: 0,
     xNoun: 'level range',
+    binWidth,
     series: [
-      { label: 'Shots in bin', color: palette.series[3], kind: 'step', values: counts },
+      { label: 'Shots in bin', color: palette.series[3], kind: 'histogram', values: counts },
       { label: 'Cumulative', color: palette.series[2], kind: 'line', values: cumulative },
     ],
   });
@@ -4445,7 +4890,7 @@ function drawDistributionChart() {
   // the aggregate: the two would disagree the moment a shot is excluded.
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
   setRaw($('caption-distribution'),
-    `${values.length} included shot(s) in ${counts.length} bins of `
+    `${count(values.length, 'included shot')} in ${count(counts.length, 'bin')} of `
     + `${fmt(edges[1] - edges[0], 2)} ${levelUnit()}, width chosen by Freedman–Diaconis. `
     + `Mean ${fmt(mean, 1)}, sigma ${fmt(sampleStd(values), 2)} ${levelUnit()}.`);
 }
@@ -4492,7 +4937,7 @@ function drawVariabilityChart() {
 
   const first = values[0];
   setRaw($('caption-variability'),
-    `${numbers.length} included shot(s). Mean ${fmt(mean, 1)} ${levelUnit()}, `
+    `${count(numbers.length, 'included shot')}. Mean ${fmt(mean, 1)} ${levelUnit()}, `
     + `sigma ${fmt(sd, 2)} ${levelUnit()}, range ${fmt(Math.max(...numbers) - Math.min(...numbers), 2)} dB.`
     + (isNum(first) ? ` First round ${fmtSigned(first - mean, 2)} dB against the mean.` : ''));
 }
@@ -4589,10 +5034,13 @@ function drawShotOverlayChart() {
 
   setText($('overlay-hint'), selected ? `Shot ${selected} highlighted` : '');
   setRaw($('caption-overlay'),
-    `${series.length} included shot(s), aligned on their own peaks, in ${unit}. `
+    `${count(series.length, 'included shot')}, aligned on their own peaks, in ${unit}. `
     + `Each trace is the larger of that shot's two envelope bounds per column, `
     + `${fmt(step * 1e6, 0)} µs each.`
-    + (dropped > 0 ? ` ${dropped} shot(s) were left out: their windows are a different length.` : ''));
+    + (dropped > 0
+      ? ` ${count(dropped, 'shot')} ${plural(dropped, 'was')} left out: `
+        + `${plural(dropped, 'its', 'their')} window is a different length.`
+      : ''));
 }
 
 
@@ -4663,7 +5111,7 @@ function drawShotWaveChart() {
     unit: envelope.unit || 'Pa',
     zeroLine: true,
     series: [{
-      label: 'Pressure',
+      label: calibratedRecord() ? 'Pressure' : 'Signal level',
       color: palette.series[0],
       kind: 'band',
       lower: window_.lo,
@@ -4685,7 +5133,8 @@ function drawShotWaveChart() {
   setRaw($('caption-shot-wave'),
     `Shot ${shot.shot_number}: ${fmt((window_.t1_s - window_.t0_s) * 1000, 0)} ms window, `
     + `peak ${fmt(peak, 2)} ${unit}, ${columns} columns at ${fmt(step * 1e6, 0)} µs each.`);
-  canvas.setAttribute('aria-label', `Pressure against time for shot ${shot.shot_number}.`);
+  canvas.setAttribute('aria-label',
+    `${calibratedRecord() ? 'Pressure' : 'Signal level'} against time for shot ${shot.shot_number}.`);
 }
 
 /** LAF / LAS / LZF against time, for the selected shot. */
@@ -4857,9 +5306,9 @@ function drawSpectrogramChart() {
 
   setRaw($('caption-spectrogram'),
     `${shotNumber === null ? 'Whole recording' : `Shot ${shotNumber}`}: `
-    + `${payload.weighting}-weighted, ${payload.nperseg}-point ${payload.window} window `
-    + `(${fmt(payload.enbw_Hz, 0)} Hz bins), ${payload.frames} frames. `
-    + `Colour scale ${scale.vmin} to ${scale.vmax} ${scale.unit}. `
+    + `${payload.weighting}-weighted, ${payload.nperseg}-point ${windowName(payload.window)} window `
+    + `(${fmt(payload.enbw_Hz, 0)} Hz bins), ${count(payload.frames, 'frame')}. `
+    + `Colour scale ${fmtProse(scale.vmin, 0)} to ${fmtProse(scale.vmax, 0)} ${scale.unit}. `
     + 'Point at the plot to read a level off it.');
 }
 
@@ -4961,9 +5410,9 @@ function drawShotSpectrogramChart() {
   const scale = paintSpectrogram(canvas, payload, { timeShift: payload.time_offset_s || 0 });
   setRaw($('caption-shot-detail'),
     `Shot ${shot.shot_number}: ${payload.weighting}-weighted, ${payload.nperseg}-point `
-    + `${payload.window} window (${fmt(payload.enbw_Hz, 0)} Hz bins), `
-    + `${payload.frames} frames across ${fmt((payload.time_s[payload.frames - 1] || 0) * 1000, 0)} ms. `
-    + `Colour scale ${scale.vmin} to ${scale.vmax} ${scale.unit}.`);
+    + `${windowName(payload.window)} window (${fmt(payload.enbw_Hz, 0)} Hz bins), `
+    + `${count(payload.frames, 'frame')} across ${fmt((payload.time_s[payload.frames - 1] || 0) * 1000, 0)} ms. `
+    + `Colour scale ${fmtProse(scale.vmin, 0)} to ${fmtProse(scale.vmax, 0)} ${scale.unit}.`);
   canvas.setAttribute('aria-label',
     `Spectrogram of shot ${shot.shot_number}, ${payload.weighting}-weighted.`);
 }
@@ -5055,9 +5504,9 @@ function drawBandHeatmapChart() {
   });
 
   setRaw($('caption-band-heatmap'),
-    `${payload.bins} one-third-octave bands, ${payload.time_weighting} time weighting, `
-    + `${fmt(payload.hop_ms, 0)} ms hop, ${payload.frames} frames. `
-    + `Colour scale ${vmin} to ${vmax} ${payload.level_unit || levelUnit()}. `
+    `${count(payload.bins, 'one-third-octave band')}, ${payload.time_weighting} time weighting, `
+    + `${fmt(payload.hop_ms, 0)} ms hop, ${count(payload.frames, 'frame')}. `
+    + `Colour scale ${fmtProse(vmin, 0)} to ${fmtProse(vmax, 0)} ${payload.level_unit || levelUnit()}. `
     + 'Point at the plot to read a band and a level off it.');
 }
 
@@ -5254,7 +5703,7 @@ function drawWaveformChart() {
     t0 = inside.t0_s + a * step;
     t1 = inside.t0_s + b * step;
     sourceColumns = inside.columns;
-    sourceLabel = `shot ${inside.shot_number}`;
+    sourceLabel = `the stored envelope of shot ${inside.shot_number}`;
   } else {
     const level = pickWaveformLevel(envelope, window0, window1, pixels);
     const duration = envelope.duration_s || 1;
@@ -5266,7 +5715,10 @@ function drawWaveformChart() {
     t0 = a * step;
     t1 = b * step;
     sourceColumns = level.columns;
-    sourceLabel = `level ${level.columns}`;
+    // "level 2048" is the name of an internal pyramid rung and means nothing
+    // to a reader. What they need to know is that they are looking at a
+    // decimated view of the whole recording, not every sample.
+    sourceLabel = `a ${level.columns}-column summary of the whole recording`;
   }
 
   const columns = Math.min(lo.length, hi.length);
@@ -5294,7 +5746,7 @@ function drawWaveformChart() {
     unit: envelope.unit || 'Pa',
     zeroLine: true,
     series: [{
-      label: 'Pressure',
+      label: calibratedRecord() ? 'Pressure' : 'Signal level',
       color: palette.series[0],
       kind: 'band',
       lower: lo,
@@ -5320,13 +5772,20 @@ function drawWaveformChart() {
     (a, v) => (isNum(v) && Math.abs(v) > a ? Math.abs(v) : a), 0);
   const resolution = (t1 - t0) / Math.max(1, columns - 1);
   setRaw($('caption-waveform'),
-    `${brief ? `${fmt((t1 - t0) * 1000, 1)} ms` : `${fmt(t1 - t0, 2)} s`} shown, `
-    + `peak ${fmt(peak, 2)} ${envelope.unit || 'Pa'}. ${columns} columns at `
+    `${brief ? `${fmt((t1 - t0) * 1000, 1)} ms` : `${fmt(t1 - t0, 2)} s`} of the recording, `
+    + `peak ${fmt(peak, 2)} ${envelope.unit || 'Pa'}. `
+    + `${count(columns, 'column')} at `
     + `${resolution < 1e-3 ? `${fmt(resolution * 1e6, 0)} µs` : `${fmt(resolution * 1e3, 2)} ms`} each, `
-    + `drawn from ${sourceLabel}. Each column is the extremes of its span, so the band always contains the true peak.`);
+    + `drawn from ${sourceLabel}. Each column spans the highest and lowest sample in its `
+    + `slice, so the shaded band always contains the true peak.`);
+  // What the trace IS depends on whether there is a calibration: with one it
+  // is pressure, without one it is the recorded signal in full-scale units.
+  // Naming it pressure either way would be a measurement claim.
+  const quantity = calibratedRecord() ? 'Pressure' : 'Signal level';
+  setRaw($('legend-waveform-trace'), `${quantity} envelope`);
   canvas.setAttribute('aria-label', focused
-    ? `Pressure against time for shot ${focused.shot_number}.`
-    : 'Pressure against time, with each detected shot marked.');
+    ? `${quantity} against time for shot ${focused.shot_number}.`
+    : `${quantity} against time, with each detected shot marked.`);
 }
 
 function wireWaveform() {
@@ -6158,8 +6617,12 @@ function drawXYChart(canvas, spec) {
   }
 
   const logX = spec.xScale === 'log';
-  const x0 = xs[0];
-  const x1 = xs[xs.length - 1];
+  // A histogram's outer bins need half a bin of room at each end, or the first
+  // and last columns are sliced down the middle by the axis. Linear only: the
+  // padding is an addition in x units and means nothing on a log axis.
+  const xPad = !logX && isNum(spec.binWidth) ? spec.binWidth / 2 : 0;
+  const x0 = xs[0] - xPad;
+  const x1 = xs[xs.length - 1] + xPad;
   const lx0 = logX ? Math.log10(Math.max(x0, 1e-9)) : x0;
   const lx1 = logX ? Math.log10(Math.max(x1, 1e-9)) : x1;
   const spanX = (lx1 - lx0) || 1;
@@ -6240,6 +6703,31 @@ function drawXYChart(canvas, spec) {
 
   // ---- series ----
   for (const s of series) {
+    if (s.kind === 'histogram') {
+      // Bins are contiguous intervals, so each is drawn as the column it is,
+      // spanning its own width. Drawn as a step line through the bin centres —
+      // which is what this was — three bins read as a staircase with a
+      // diagonal in it, and nobody recognises it as a distribution.
+      const base = yOf(Math.max(lo, 0));
+      const half = isNum(spec.binWidth)
+        ? spec.binWidth / 2
+        : (xs.length > 1 ? Math.abs(xs[1] - xs[0]) / 2 : plotW);
+      ctx.fillStyle = s.color;
+      ctx.globalAlpha = isNum(s.alpha) ? s.alpha : 0.9;
+      for (let i = 0; i < xs.length; i += 1) {
+        const v = s.values[i];
+        if (!isNum(v)) continue;
+        const left = clamp(xOf(xs[i] - half), pad.left, pad.left + plotW);
+        const right = clamp(xOf(xs[i] + half), pad.left, pad.left + plotW);
+        if (right - left < 0.5) continue;
+        const y = yOf(v);
+        ctx.fillRect(left, Math.min(y, base),
+          Math.max(1, right - left - 1), Math.max(1, Math.abs(base - y)));
+      }
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
     if (s.kind === 'band') {
       // A filled region between two measured bounds — an envelope, or an
       // interval. Never a smoothed ribbon around a single line.
@@ -6955,11 +7443,14 @@ function exportAnalysisSheet() {
     return { ...f, chartH, caption: captionFor(f.canvas) };
   });
 
-  const probe = document.createElement('canvas').getContext('2d');
-  probe.font = '12px system-ui, sans-serif';
+  // Named for what it does: it measures text, and nothing else in this
+  // application calls a canvas context a probe. `probe` now means the input
+  // probe everywhere else in this file.
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = '12px system-ui, sans-serif';
   let cssH = headerH;
   for (const block of blocks) {
-    block.captionLines = block.caption ? wrapText(probe, block.caption, inner) : [];
+    block.captionLines = block.caption ? wrapText(measure, block.caption, inner) : [];
     block.y = cssH + 24;
     cssH = block.y + block.chartH + 6 + block.captionLines.length * 16 + 26;
   }
@@ -7061,7 +7552,7 @@ function exportAnalysisSheet() {
   ctx.font = `11px ${palette.mono}`;
   ctx.fillStyle = palette.muted;
   ctx.fillText(
-    `${blocks.length} figure(s) · compiled from the live charts at ${sheet.width} × ${sheet.height} px`,
+    `${count(blocks.length, 'figure')} · compiled from the live charts at ${sheet.width} × ${sheet.height} px`,
     left, cssH - 16);
 
   // Put every chart back at its own layout size -- all of them, not only the
@@ -7584,7 +8075,7 @@ function compareObjections(ref, test) {
     if (data.aggregate.n_included === 0) {
       add(true, `The ${side} has no included shots.`);
     } else if (data.aggregate.n_included < 3) {
-      add(false, `The ${side} contributes only ${data.aggregate.n_included} shot(s); the confidence `
+      add(false, `The ${side} contributes only ${count(data.aggregate.n_included, 'shot')}; the confidence `
         + 'interval on that mean is very wide.');
     }
   }
@@ -7770,9 +8261,86 @@ function renderComparePill(pillId, textId, side) {
   setRaw($(textId), verdict.label);
 }
 
+/**
+ * The rig two analyses have to share before their difference is insertion loss
+ * and not the difference between two setups.
+ *
+ * Deliberately not the whole test record: a different date, operator or note
+ * changes nothing about what the microphone heard.
+ */
+const PAIRING_KEYS = ['weapon', 'ammunition', 'mic_model', 'mic_distance_m', 'mic_angle_deg'];
+
+/** How many of those a candidate shares with a reference. Null fields do not count. */
+function pairingAffinity(a, b) {
+  const left = (a && a.meta && a.meta.test_metadata) || {};
+  const right = (b && b.meta && b.meta.test_metadata) || {};
+  let score = 0;
+  for (const key of PAIRING_KEYS) {
+    const x = left[key];
+    const y = right[key];
+    if (x === undefined || x === null || x === '' || y === undefined || y === null || y === '') continue;
+    if (String(x) === String(y)) score += 1;
+  }
+  return score;
+}
+
+/**
+ * Offer the pair the operator almost certainly means, without choosing for them.
+ *
+ * The Compare view opened with two empty dropdowns and a list of every
+ * analysis on the machine in each, which is a filing task rather than a
+ * measurement one: the answer is nearly always "the suppressed string I just
+ * shot and the unsuppressed one I shot beside it". So the most recent
+ * suppressed analysis is proposed as the test, and the unsuppressed analysis
+ * that shares the most of the rig with it as the reference.
+ *
+ * Only ever a proposal, and only into an EMPTY control: a selection the
+ * operator made is never replaced, and both dropdowns still hold everything.
+ * The comparison itself still has to pass its own objections, which are what
+ * decide whether the pair is defensible.
+ */
+function proposeComparePair() {
+  const refSelect = $('compare-ref-select');
+  const testSelect = $('compare-test-select');
+  if (!refSelect || !testSelect) return;
+  if (refSelect.value || testSelect.value) return;          // the operator has chosen
+  if (state.compare.proposed) return;                       // proposed once, not on every render
+
+  const configurationOf = (item) =>
+    ((item.meta && item.meta.test_metadata) || {}).configuration || '';
+  // state.history.items is newest first.
+  const suppressed = state.history.items.filter(i => configurationOf(i) === 'suppressed');
+  const unsuppressed = state.history.items.filter(i => configurationOf(i) === 'unsuppressed');
+  if (suppressed.length === 0 || unsuppressed.length === 0) return;
+
+  const test = suppressed[0];
+  const reference = unsuppressed
+    .map(item => ({ item, affinity: pairingAffinity(item, test) }))
+    .sort((a, b) => b.affinity - a.affinity)[0].item;
+
+  state.compare.proposed = true;
+  refSelect.value = reference.path;
+  testSelect.value = test.path;
+  refSelect.dispatchEvent(new Event('change', { bubbles: true }));
+  testSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+  const shared = pairingAffinity(reference, test);
+  const banner = $('compare-proposed');
+  if (banner) {
+    setText(banner,
+      'These two were chosen from your history: the most recent suppressed measurement, '
+      + `and the unsuppressed one that shares the most of the same rig (${shared} of `
+      + `${PAIRING_KEYS.length}: weapon, ammunition, microphone, distance and angle). `
+      + 'Change either one — every analysis is still in both lists.');
+    show(banner, true);
+  }
+  announce('A reference and test measurement have been proposed from your history.');
+}
+
 function renderCompare() {
   fillCompareSelect('compare-ref-select', 'unsuppressed');
   fillCompareSelect('compare-test-select', 'suppressed');
+  if (state.view === 'compare') proposeComparePair();
 
   const ref = state.compare.ref;
   const test = state.compare.test;
@@ -7788,6 +8356,14 @@ function renderCompare() {
   const showResult = status === 'loaded' || status === 'refused';
   show($('compare-empty'), !showResult);
   show($('compare-loaded'), showResult);
+  // A refused comparison has a verdict and no numbers. The hero states the
+  // refusal and the objections say why; the metric grid, the table and the
+  // band chart would be three empty frames under it, which reads as a
+  // rendering failure rather than as a decision.
+  const refused = status === 'refused';
+  for (const id of ['compare-metrics-section', 'compare-table-section', 'compare-band-figure']) {
+    show($(id), !refused);
+  }
   ['btn-compare-print', 'btn-compare-csv'].forEach(id => setDisabled($(id), status !== 'loaded'));
 
   // The empty panel carries the reason when a load failed.
@@ -7847,7 +8423,7 @@ function renderCompare() {
     setRaw($('il-hero-caption'),
       `${headline.metric.plain}: ${fmt(headline.reference.mean, 1)} → ${fmt(headline.test.mean, 1)} `
       + `${(ref.metadata.calibration || {}).level_unit || 'dB'} · 95% CI ±${fmt(headline.ci, 2)} dB · `
-      + `${ref.aggregate.n_included} reference and ${test.aggregate.n_included} test shot(s) · `
+      + `${fmtInt(ref.aggregate.n_included)} reference and ${count(test.aggregate.n_included, 'test shot')} · `
       + `${headline.significant ? 'the difference exceeds its confidence interval' : 'the difference is INSIDE its confidence interval and is not resolved'}.`);
   } else {
     setRaw($('il-hero-value'), '—');
@@ -7927,7 +8503,7 @@ function renderCompare() {
   const bands = state.compare.bands;
   setText($('caption-compare-bands'), bands
     ? `Reference and test band exposure with their difference, energy-averaged over `
-      + `${ref.aggregate.n_included} and ${test.aggregate.n_included} included shot(s). `
+      + `${fmtInt(ref.aggregate.n_included)} and ${count(test.aggregate.n_included, 'included shot')}. `
       + `A positive insertion loss means the suppressed configuration is quieter in that band.`
     : 'Per-band insertion loss is unavailable: at least one record has no band analysis.');
 }
@@ -8025,6 +8601,13 @@ function downloadCompareCsv() {
 }
 
 function wireCompare() {
+  // Any deliberate choice retires the proposal note: from that point the
+  // selection is the operator's, and saying it was proposed would be wrong.
+  for (const id of ['compare-ref-select', 'compare-test-select']) {
+    const select = $(id);
+    if (select) select.addEventListener('change', () => show($('compare-proposed'), false));
+  }
+
   const ref = $('compare-ref-select');
   if (ref) ref.addEventListener('change', () => loadCompareSide('reference', ref.value));
   const test = $('compare-test-select');
@@ -8185,6 +8768,12 @@ function renderPrefs() {
   // Never write into a control the operator is typing in.
   if (output && document.activeElement !== output && output.value !== state.prefs.outputDir) {
     output.value = state.prefs.outputDir;
+  }
+  // An empty field means "wherever the engine puts them", and that is a real
+  // place with a real path. Saying it as the placeholder is the difference
+  // between a setting that is unset and one that looks forgotten.
+  if (output && state.app.defaultOutputDir) {
+    output.placeholder = state.app.defaultOutputDir;
   }
   const open = $('setting-open-on-complete');
   if (open && open.checked !== state.prefs.openOnComplete) open.checked = state.prefs.openOnComplete;
@@ -8396,6 +8985,7 @@ async function loadHealth() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     state.app.version = health.version || null;
+    state.app.defaultOutputDir = health.defaultOutputDir || null;
     state.app.engine = health.backend
       ? `Python (${health.backend.interpreter || 'unknown'})`
         + `${health.backend.scriptPresent === false ? ' — main.py NOT FOUND' : ''}`
@@ -8468,13 +9058,8 @@ function stepStatusText(id) {
       if (state.input.error) return 'Unreadable';
       return state.input.name ? basename(state.input.name) : 'Not chosen';
     }
-    case 'calibration': {
-      const method = state.calibration.method;
-      if (!method) return 'No method';
-      const label = CAL_METHOD_LABEL[method] || method;
-      const outstanding = blockersForStep('calibration').length;
-      return outstanding ? `${label} — incomplete` : label;
-    }
+    case 'calibration':
+      return calibrationStatus().short;
     case 'metadata': {
       const missing = missingRequiredMetadata().length;
       return missing === 0 ? 'Complete' : `${missing} missing`;
@@ -8545,12 +9130,27 @@ function renderStepper() {
     flow.dataset.dir = state.ui.stepDir;
   }
 
+  // How far the route is actually clear: the run of complete stops from the
+  // first one. The connector into a stop is filled only within that run, so
+  // the rail is continuous or absent and never a stripe in the middle.
+  // Asked as "has this stop got anything outstanding", not "is its condition
+  // done": the stop the operator is standing on reports 'current', which says
+  // where they are and nothing about whether they have finished there.
+  let reached = 0;
   for (const step of STEPS) {
+    if (blockersForStep(step.id).length > 0) break;
+    reached += 1;
+  }
+
+  for (const [index, step] of STEPS.entries()) {
     const node = qs(`.stepper-node[data-step="${step.id}"]`);
     if (!node) continue;
     const item = node.closest('.stepper-item');
     const condition = stepCondition(step.id);
-    if (item) item.dataset.state = condition;
+    if (item) {
+      item.dataset.state = condition;
+      item.dataset.reached = index <= reached && index > 0 ? 'true' : 'false';
+    }
 
     if (condition === 'current') node.setAttribute('aria-current', 'step');
     else node.removeAttribute('aria-current');
@@ -8560,10 +9160,10 @@ function renderStepper() {
 
     // The visible label is short; the accessible name carries the whole story,
     // because a screen-reader user cannot see the disc's colour.
-    const count = blockersForStep(step.id).length;
+    const outstanding = blockersForStep(step.id).length;
     node.setAttribute('aria-label',
       `Step ${stepIndex(step.id) + 1}, ${step.name}. ${stepStatusText(step.id)}.`
-      + (count > 0 ? ` ${count} item${count === 1 ? '' : 's'} outstanding.` : ''));
+      + (outstanding > 0 ? ` ${count(outstanding, 'item')} outstanding.` : ''));
 
     const panel = $(step.panel);
     if (panel) {
@@ -8595,6 +9195,17 @@ function placeRunControls(onLast) {
   if (run.parentElement !== target) {
     target.appendChild(run);
     if (cancel) target.appendChild(cancel);
+  }
+
+  // With the controls gone to the bar, the card they came from holds only the
+  // blockers banner — and when that is empty too it is a white panel with
+  // nothing in it. Decided here rather than in renderBlockers() because this
+  // is the point at which the placement is actually known.
+  const card = $('card-run-actions');
+  if (card) {
+    const banner = $('run-blockers');
+    const bannerVisible = !!banner && !banner.hidden;
+    show(card, bannerVisible || !onLast);
   }
 }
 
@@ -8637,8 +9248,13 @@ function renderFlowBar() {
       setRaw(status, `${mine.length} items outstanding on this step`);
       status.dataset.tone = 'warn';
     } else if (onLast) {
+      // The last step's bar is where the Run button lives, so this is where
+      // the operator is looking when they decide to press it: the reassurance
+      // that nothing is uploaded belongs next to it, not in the panel above.
       const all = detailedBlockers().length;
-      setRaw(status, all === 0 ? 'Ready to run' : `${all} outstanding on earlier steps`);
+      setRaw(status, all === 0
+        ? 'Ready to run — everything stays on this machine'
+        : `${count(all, 'item')} outstanding on earlier steps`);
       status.dataset.tone = all === 0 ? 'ok' : 'warn';
     } else {
       setRaw(status, 'Nothing outstanding here');
