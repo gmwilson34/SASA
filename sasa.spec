@@ -29,6 +29,27 @@ IS_WINDOWS = sys.platform == 'win32'
 
 PROJECT_ROOT = os.path.abspath(SPECPATH)
 
+
+def _sasa_version() -> str:
+    """
+    The version the bundle reports to Finder, read from provenance.py.
+
+    It was hardcoded to "1.0.0" and stayed there through every release, so a
+    signed 2.4.1 build told Get Info, the installer and any management tool
+    that it was 1.0.0 — and two different releases were indistinguishable to
+    anything that reads the bundle rather than the app's own About panel.
+    Imported textually rather than by importing the module, because a spec file
+    is executed by PyInstaller before the package is importable.
+    """
+    source = Path(PROJECT_ROOT, 'provenance.py').read_text(encoding='utf-8')
+    for line in source.splitlines():
+        if line.startswith('__version__'):
+            return line.split('=', 1)[1].strip().strip('\'"')
+    raise SystemExit('sasa.spec: provenance.py has no __version__ to read')
+
+
+SASA_VERSION = _sasa_version()
+
 # Icon paths. NOTE: assets/ is *build-time only* — the icons are compiled into
 # the bundle by BUNDLE/EXE below and nothing under assets/ is read at runtime,
 # so the directory is deliberately not added to `datas`.
@@ -214,8 +235,8 @@ if IS_MACOS:
         bundle_identifier='com.ridgebackdefense.sasa',
         info_plist={
             'CFBundleDisplayName': 'SASA',
-            'CFBundleShortVersionString': '1.0.0',
-            'CFBundleVersion': '1.0.0',
+            'CFBundleShortVersionString': SASA_VERSION,
+            'CFBundleVersion': SASA_VERSION,
             'NSHighResolutionCapable': True,
             'LSBackgroundOnly': False,
             'LSUIElement': True,  # App runs as agent (no dock icon bouncing)
