@@ -99,6 +99,16 @@ jobs:
     needs: [lint, test]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
+    # Hoisted to the job so the signing steps can test them in an `if`. The
+    # `secrets` context is NOT available in a step's `if`, and a step-level
+    # `env` is not available to its own `if`; the job's `env` is available to
+    # both, which is what makes the "sign only when configured" condition work.
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      SASA_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      SASA_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+      SASA_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
     steps:
       - uses: actions/checkout@v5
 
@@ -123,13 +133,8 @@ jobs:
       # keeps working unchanged until it is added and starts signing the moment
       # it is. The certificate goes into a throwaway keychain that is deleted
       # in the cleanup step below, whatever the outcome.
-      # `secrets` is available to a step's `if`; a step-level `env` is not
-      # available to its own `if`, which would have made this never run.
       - name: Import the signing certificate
-        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        if: env.MACOS_CERTIFICATE != ''
         run: |
           KEYCHAIN="$RUNNER_TEMP/sasa-signing.keychain-db"
           PASSWORD="$(openssl rand -base64 24)"
@@ -149,14 +154,14 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN"
 
       - name: Package, sign and notarize the macOS app
-        env:
-          SASA_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
-          SASA_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
-          SASA_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
           # A release tag must not ship silently unsigned once signing is set
           # up; an ordinary branch build may.
-          SASA_REQUIRE_SIGNED: ${{ (secrets.MACOS_CERTIFICATE != '' && startsWith(github.ref, 'refs/tags/')) && '1' || '0' }}
-        run: |
+          if [ -n "$MACOS_CERTIFICATE" ] && [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            export SASA_REQUIRE_SIGNED=1
+            echo "Release tag with a certificate configured: an unsigned build is a failure."
+          fi
+
           if [ -d dist/SASA.app ]; then
             ./scripts/sign_macos.sh
           else
