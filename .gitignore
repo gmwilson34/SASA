@@ -6,6 +6,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# The packaged, signed artifacts. Produced by build_macos.sh / the CI workflow
+# and attached to a release; a 100 MB zip has no business in git history.
+SASA-macOS.zip
+SASA-Windows.zip
 *.egg
 
 # Virtual environments
