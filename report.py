@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from textutil import count, plural
+from textutil import count, join_list, plural
 
 __all__ = [
     "generate_report",
@@ -437,6 +437,64 @@ def assess_validity(metadata: Dict[str, Any]) -> ValidityReport:
         ))
         if int(n_detected) == 0:
             blocking.append("No shots were detected; there is nothing to report.")
+
+    # Where the detection settings came from. A reader who is asked to accept a
+    # shot count needs to know whether the setting that produced it was chosen
+    # by a person, or measured - and, if measured, over how wide a span the
+    # answer held. A count that only survives two decibels of threshold is a
+    # different claim from one that survives twenty.
+    settings = _map(metadata, "settings")
+    tuning = _map(settings, "detection_tuning")
+    if tuning.get("applied") is True:
+        span = tuning.get("stable_width_dB")
+        checks.append(ValidityCheck(
+            "Detection settings", "ok",
+            f"Measured from the recording: {_num(tuning.get('threshold_relative_dB'), 0)} dB "
+            f"below peak, {_num(tuning.get('refractory_ms'), 0)} ms refractory, "
+            f"{_num(tuning.get('post_ms'), 0)} ms post-trigger window.",
+            f"The shot count is unchanged from {_num(tuning.get('stable_from_dB'), 0)} to "
+            f"{_num(tuning.get('stable_to_dB'), 0)} dB below peak"
+            + (f", a span of {_num(span, 0)} dB." if _is_num(span) else ".")
+            + " The centre of that span was taken, so the count does not depend on a "
+              "threshold chosen by hand.",
+        ))
+    elif settings.get("auto_detect") is False:
+        checks.append(ValidityCheck(
+            "Detection settings", "warn",
+            "Chosen by the operator; nothing was measured from the recording.",
+            "The shot count below is a consequence of those settings. Nothing here "
+            "establishes that a different threshold would have found the same shots.",
+        ))
+    elif tuning.get("reason"):
+        checks.append(ValidityCheck(
+            "Detection settings", "warn",
+            f"Could not be measured: {_txt(tuning.get('reason'))}.",
+            "The defaults were used instead. Check the shot count against the waveform.",
+        ))
+
+    reflection = _map(tuning, "reflection")
+    if reflection.get("detected") is True:
+        followers = [str(v) for v in _seq(reflection, "followers")]
+        checks.append(ValidityCheck(
+            "Repeated delay", "warn",
+            f"{count(len(followers), 'event')} arrive a near-constant "
+            f"{_num(reflection.get('delay_ms'), 0)} ms after a louder one, "
+            f"{_num(reflection.get('drop_dB'), 0)} dB quieter"
+            + (f": {join_list(followers)}." if followers else "."),
+            "A delay that repeats is the signature of a reflection off fixed geometry, "
+            "not of separate discharges. If these are reflections they must be rejected "
+            "before the aggregate is read, because a reflection averaged into a "
+            "suppressor's rated level understates it.",
+        ))
+
+    if tuning.get("expectation_met") is False and _is_num(tuning.get("expected_shots")):
+        checks.append(ValidityCheck(
+            "Rounds expected", "warn",
+            f"{count(int(tuning['expected_shots']), 'round')} were expected; "
+            f"{count(int(tuning.get('n_shots') or 0), 'event')} were found.",
+            "No threshold produced the expected count, and none was forced to. Either "
+            "the expectation is wrong, or shots are missing from the recording.",
+        ))
 
     # A record can carry a detection count and still have no measured shots - a
     # truncated run, or every shot rejected. Reporting statistics over nothing

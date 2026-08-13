@@ -36,9 +36,10 @@ Usage:
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.signal import butter, find_peaks, sosfiltfilt
@@ -50,7 +51,7 @@ from calibration import (
     detect_ceiling_clipping,
     detect_clipping,
 )
-from textutil import count, plural
+from textutil import count, join_list, plural
 
 # Blast band for detection. Muzzle blast energy lives well inside this; wind,
 # handling noise and mains hum sit below it, and it excludes ultrasonic hiss.
@@ -797,9 +798,10 @@ def detect_shots(
     if n_suppressed:
         warnings.append(
             f"{count(n_suppressed, 'candidate event')} {plural(n_suppressed, 'was')} within "
-            f"{refractory_ms:.0f} ms of a "
-            f"louder event and were suppressed. Lower refractory_ms if the weapon's "
-            f"cyclic rate is faster than {60000.0/max(refractory_ms,1e-9):.0f} rpm."
+            f"{refractory_ms:.0f} ms of a louder event and "
+            f"{plural(n_suppressed, 'was')} suppressed. Shorten the refractory period if "
+            f"the weapon's cyclic rate is faster than "
+            f"{60000.0 / max(refractory_ms, 1e-9):.0f} rpm."
         )
 
     if len(accepted) > max_shots:
@@ -983,6 +985,853 @@ def detect_shots_adaptive(
         relative += step_dB
 
     return best
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Automatic tuning
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# What the tuner is and is not.
+#
+# It does not guess at a "good" threshold. It asks the recording which settings
+# its own answer is INSENSITIVE to, and reports the span it found. A threshold
+# that yields five shots anywhere from 18 to 41 dB below peak is not a lucky
+# choice; it is the recording telling you there are five shots. A threshold
+# whose answer changes every decibel is telling you the opposite, and the tuner
+# says so rather than picking the middle of the confusion and calling it a
+# measurement.
+#
+# Every number it chooses is reported with the basis it was chosen on, because a
+# setting that arrived by itself still has to be defensible to whoever reads the
+# result.
+
+# The span the tuner searches, in dB below the recording's own envelope peak.
+#
+# Tighter than 6 dB below peak selects only the single loudest event, which no
+# real recording wants. The lower bound is the interesting one: 40 dB below the
+# loudest event is one hundredth of its pressure, and nothing at one hundredth
+# of the pressure is another discharge of the same weapon at the same station -
+# it is that weapon's own reverberation. Searching past it does not find
+# quieter shots; it finds the tail of the loud ones, in numbers (a hundred
+# "shots" in a three-second recording) that look perfectly stable, because
+# reverberation is smooth.
+AUTOTUNE_MIN_RELATIVE_DB: float = 6.0
+AUTOTUNE_MAX_RELATIVE_DB: float = 40.0
+AUTOTUNE_STEP_DB: float = 1.0
+
+# Refractory periods searched alongside the thresholds. Spaced closely enough
+# at the short end to separate 900 rpm from 1200 rpm, and coarsely at the long
+# end where the difference between 200 and 250 ms cannot change a shot count.
+# The range is the same one AUTOTUNE_REFRACTORY_MIN/MAX_MS declare.
+AUTOTUNE_REFRACTORY_LADDER: Tuple[float, ...] = (
+    20.0, 25.0, 30.0, 40.0, 50.0, 65.0, 80.0, 100.0, 125.0, 150.0, 200.0, 250.0,
+)
+
+# A rival count is worth mentioning when its span is at least this fraction of
+# the winner's. Below it the winner is not in doubt and naming the alternative
+# would be manufacturing a caveat.
+AUTOTUNE_RIVAL_FRACTION: float = 0.8
+
+# A plateau narrower than this is not evidence of a stable count; it is the
+# count passing through a value on its way somewhere else.
+AUTOTUNE_MIN_PLATEAU_DB: float = 3.0
+
+# Bounds on what the tuner may choose. They exist so that a pathological
+# recording cannot produce a setting that is physically absurd, not to steer
+# the answer on an ordinary one.
+AUTOTUNE_REFRACTORY_MIN_MS: float = 20.0
+AUTOTUNE_REFRACTORY_MAX_MS: float = 250.0
+AUTOTUNE_POST_MIN_MS: float = 100.0
+AUTOTUNE_POST_MAX_MS: float = 2000.0
+
+# Pre-trigger context. Fixed, because there is nothing in the signal to derive
+# it from: it exists to carry the ambient immediately before the arrival and to
+# let the detection filter settle, and 20 ms does both at every rate SASA
+# accepts.
+AUTOTUNE_PRE_MS: float = 20.0
+
+# How far a shot has to have decayed before the post-trigger window may end.
+# 40 dB is twice the 20 dB drop that defines B-duration, so the window outlasts
+# the quantity it has to contain. The noise margin stops the tuner from chasing
+# a decay into a noise floor that will never reach the target.
+AUTOTUNE_DECAY_DB: float = 40.0
+AUTOTUNE_NOISE_MARGIN_DB: float = 3.0
+
+# Fraction of the tightest observed shot spacing used as the refractory period.
+# Half is the largest value that cannot merge two shots that are genuinely that
+# far apart, while still suppressing an echo arriving soon after a blast.
+AUTOTUNE_REFRACTORY_FRACTION: float = 0.5
+
+# How much slack a refractory period has to leave. Events accepted under a
+# refractory period of R are always at least R apart - that much is arithmetic
+# and says nothing. What matters is whether they are only JUST that far apart:
+# if the closest two sit within 20 % of the minimum spacing the setting
+# imposed, then the setting is what produced the spacing, and the count is a
+# fact about the setting rather than about the recording. This is what rejects
+# a short refractory period chopping one blast's decay into a string of
+# evenly-spaced "shots".
+AUTOTUNE_SPACING_SLACK: float = 1.2
+
+
+@dataclass
+class DetectionTuning:
+    """
+    Detection settings chosen from the recording, with the basis for each.
+
+    `applied` is False when the recording did not support a choice; `reason`
+    then says why, and the caller keeps its own defaults. Nothing here is ever
+    silently substituted - `basis` carries one sentence per number.
+    """
+    applied: bool = False
+    reason: str = ""
+
+    threshold_relative_dB: float = DEFAULT_THRESHOLD_RELATIVE_DB
+    refractory_ms: float = DEFAULT_REFRACTORY_MS
+    pre_ms: float = AUTOTUNE_PRE_MS
+    post_ms: float = 200.0
+
+    n_shots: int = 0
+    stable_from_dB: float = float("nan")     # widest span giving this count,
+    stable_to_dB: float = float("nan")       # in dB below peak
+    peak_dB: float = float("-inf")
+    noise_floor_dB: float = float("-inf")
+    decay_ms: float = float("nan")
+    tightest_spacing_ms: float = float("nan")
+
+    expected_shots: Optional[int] = None
+    expectation_met: Optional[bool] = None
+
+    # None means the scan was not reached, which is not the same as having run
+    # and found nothing.
+    reflection: Optional[ReflectionPattern] = None
+
+    basis: Dict[str, str] = field(default_factory=dict)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def stable_width_dB(self) -> float:
+        if math.isnan(self.stable_from_dB) or math.isnan(self.stable_to_dB):
+            return float("nan")
+        return self.stable_to_dB - self.stable_from_dB
+
+    @property
+    def dynamic_range_dB(self) -> float:
+        if not (math.isfinite(self.peak_dB) and math.isfinite(self.noise_floor_dB)):
+            return float("nan")
+        return self.peak_dB - self.noise_floor_dB
+
+    @property
+    def implied_rate_rpm(self) -> float:
+        """Cyclic rate implied by the tightest spacing, or NaN if only one shot."""
+        if not math.isfinite(self.tightest_spacing_ms) or self.tightest_spacing_ms <= 0:
+            return float("nan")
+        return 60000.0 / self.tightest_spacing_ms
+
+    def to_dict(self) -> dict:
+        def num(x, places=1):
+            return round(float(x), places) if math.isfinite(x) else None
+        return {
+            "applied": self.applied,
+            "reason": self.reason,
+            "threshold_relative_dB": num(self.threshold_relative_dB),
+            "refractory_ms": num(self.refractory_ms),
+            "pre_ms": num(self.pre_ms),
+            "post_ms": num(self.post_ms),
+            "n_shots": self.n_shots,
+            "stable_from_dB": num(self.stable_from_dB),
+            "stable_to_dB": num(self.stable_to_dB),
+            "stable_width_dB": num(self.stable_width_dB),
+            "peak_dB": num(self.peak_dB),
+            "noise_floor_dB": num(self.noise_floor_dB),
+            "dynamic_range_dB": num(self.dynamic_range_dB),
+            "decay_ms": num(self.decay_ms),
+            "tightest_spacing_ms": num(self.tightest_spacing_ms),
+            "implied_rate_rpm": num(self.implied_rate_rpm, 0),
+            "expected_shots": self.expected_shots,
+            "expectation_met": self.expectation_met,
+            "reflection": self.reflection.to_dict() if self.reflection else None,
+            "basis": dict(self.basis),
+            "notes": list(self.notes),
+        }
+
+    def summary(self) -> str:
+        if not self.applied:
+            return f"  Detection settings not tuned: {self.reason}"
+        return (
+            f"  Detection tuned from the recording: "
+            f"{self.threshold_relative_dB:.0f} dB below peak, "
+            f"{self.refractory_ms:.0f} ms refractory, "
+            f"{self.post_ms:.0f} ms post-trigger "
+            f"({count(self.n_shots, 'shot')}, unchanged from "
+            f"{self.stable_from_dB:.0f} to {self.stable_to_dB:.0f} dB below peak)"
+        )
+
+
+def _greedy_keep(
+    positions: np.ndarray,
+    values: np.ndarray,
+    min_separation: int,
+) -> np.ndarray:
+    """
+    Keep the loudest candidate in each neighbourhood; return a boolean mask.
+
+    Same rule as _select_with_refractory, but it answers in place and in
+    O(n log n) rather than O(n^2), because the tuner runs it hundreds of times
+    over candidate lists that have not been thinned yet.
+    """
+    n = positions.size
+    keep = np.zeros(n, dtype=bool)
+    if n == 0:
+        return keep
+    if min_separation <= 1:
+        keep[:] = True
+        return keep
+
+    accepted: List[int] = []
+    for k in np.argsort(values, kind="stable")[::-1]:
+        p = int(positions[k])
+        j = bisect.bisect_left(accepted, p)
+        near_left = j > 0 and (p - accepted[j - 1]) < min_separation
+        near_right = j < len(accepted) and (accepted[j] - p) < min_separation
+        if near_left or near_right:
+            continue
+        accepted.insert(j, p)
+        keep[k] = True
+    return keep
+
+
+class _EnvelopePeaks:
+    """
+    Every local maximum of the envelope, with the properties a threshold filters on.
+
+    The tuner searches a two-dimensional grid of thresholds and refractory
+    periods, which would otherwise mean hundreds of peak searches over the whole
+    envelope. Height and prominence are properties of the signal rather than of
+    a setting, so they are found once here and the grid becomes filtering.
+    """
+
+    def __init__(self, envelope: np.ndarray, indices: np.ndarray, env_hop: int) -> None:
+        found, props = find_peaks(envelope, prominence=0.0)
+        self.frames = found.astype(np.int64)
+        self.samples = (indices[found] if found.size else np.array([], dtype=np.int64))
+        self.heights = (envelope[found] if found.size else np.array([], dtype=np.float64))
+        self.prominences = (np.asarray(props["prominences"], dtype=np.float64)
+                            if found.size else np.array([], dtype=np.float64))
+        self.peak = float(envelope.max()) if envelope.size else 0.0
+        self.env_hop = max(1, int(env_hop))
+
+    def select(self, rel_dB: float, refractory_samples: int) -> np.ndarray:
+        """
+        The events detect_shots() would accept, as sample indices.
+
+        The stages run in detect_shots()'s order, which is scipy's: height,
+        then the half-refractory peak spacing, then prominence, then the
+        loudest-wins refractory selection. Counting a different quantity from
+        the one the run will produce would make the whole sweep meaningless.
+        The SNR gate is not repeated - the sweep never reaches a threshold below
+        it, so nothing that gate would reject can appear here.
+        """
+        if self.frames.size == 0:
+            return np.array([], dtype=np.int64)
+
+        level = self.peak * (10.0 ** (-float(rel_dB) / 20.0))
+        mask = self.heights >= level
+        if not mask.any():
+            return np.array([], dtype=np.int64)
+
+        frames, samples, heights = self.frames[mask], self.samples[mask], self.heights[mask]
+        prominences = self.prominences[mask]
+
+        spacing = max(1, refractory_samples // (2 * self.env_hop))
+        near = _greedy_keep(frames, heights, spacing)
+        samples, heights, prominences = samples[near], heights[near], prominences[near]
+
+        promising = prominences >= max(level * 0.5, self.peak * 1e-4)
+        samples, heights = samples[promising], heights[promising]
+
+        final = _greedy_keep(samples, heights, max(1, int(refractory_samples)))
+        return samples[final]
+
+
+def _sweep_candidate_counts(
+    peaks: _EnvelopePeaks,
+    rel_values: np.ndarray,
+    refractory_samples: int,
+) -> np.ndarray:
+    """Count the events detect_shots() would return at each threshold swept."""
+    counts = np.zeros(rel_values.size, dtype=np.int64)
+    for i, rel in enumerate(rel_values):
+        counts[i] = peaks.select(float(rel), refractory_samples).size
+    return counts
+
+
+def _stable_plateaus(
+    rel_values: np.ndarray,
+    counts: np.ndarray,
+    min_width_dB: float,
+) -> List[Tuple[int, float, float]]:
+    """
+    Find the runs over which the candidate count does not change.
+
+    Returns (count, from_dB, to_dB) for every run at least `min_width_dB` wide
+    whose count is non-zero, in the order they occur.
+    """
+    runs: List[Tuple[int, float, float]] = []
+    if counts.size == 0:
+        return runs
+    start = 0
+    for i in range(1, counts.size + 1):
+        if i == counts.size or counts[i] != counts[start]:
+            lo = float(rel_values[start])
+            hi = float(rel_values[i - 1])
+            if counts[start] > 0 and (hi - lo) >= min_width_dB - 1e-9:
+                runs.append((int(counts[start]), lo, hi))
+            start = i
+    return runs
+
+
+def _measure_decay_ms(
+    envelope: np.ndarray,
+    hop_samples: int,
+    sample_rate: int,
+    event_frames: np.ndarray,
+    noise_floor: float,
+) -> Tuple[float, bool]:
+    """
+    Measure how long the cleanest shot takes to decay.
+
+    "Cleanest" means the event with the most room after it, because a decay
+    measured into the next shot is a measurement of the next shot. The walk
+    stops at the following event, so it can never cross one.
+
+    Returns (decay_ms, complete). `complete` is False when the envelope had not
+    reached the target by the end of the available span, in which case the
+    duration returned is that span and is a LOWER bound.
+    """
+    if event_frames.size == 0 or sample_rate <= 0:
+        return float("nan"), False
+
+    bounds = np.append(event_frames[1:], envelope.size)
+    gaps = bounds - event_frames
+    which = int(np.argmax(gaps))
+    start = int(event_frames[which])
+    stop = int(bounds[which])
+    if stop <= start + 1:
+        return float("nan"), False
+
+    peak = float(envelope[start])
+    target = max(
+        peak * (10.0 ** (-AUTOTUNE_DECAY_DB / 20.0)),
+        float(noise_floor) * (10.0 ** (AUTOTUNE_NOISE_MARGIN_DB / 20.0)),
+    )
+
+    segment = envelope[start:stop]
+    below = np.flatnonzero(segment <= target)
+    complete = below.size > 0
+    frames = int(below[0]) if complete else int(segment.size - 1)
+    return frames * hop_samples * 1000.0 / sample_rate, complete
+
+
+@dataclass
+class _TuningRound:
+    """One (threshold, refractory) pair the tuner tried, kept whole."""
+    plateau: Tuple[int, float, float]
+    refractory_ms: float
+    rel_dB: float
+    events: np.ndarray
+    tightest_ms: float
+    counts: np.ndarray
+    expectation_met: Optional[bool]
+
+    @property
+    def width_dB(self) -> float:
+        return self.plateau[2] - self.plateau[1]
+
+
+# ---- Repeated-delay (reflection) detection ----
+
+# A reflection arrives after its source by the path difference divided by the
+# speed of sound. Between shots that delay varies with the shooter's position
+# and with where inside a smeared reflected wavefront the envelope peaks, so the
+# tolerance is proportional to the delay itself rather than a fixed number of
+# milliseconds - a 6 m path difference is 17 ms at 350 ms and 17 ms at 40 ms,
+# and only the first is plausible drift.
+REFLECTION_TOLERANCE_FRACTION: float = 0.10
+REFLECTION_TOLERANCE_FLOOR_MS: float = 5.0
+
+# Below this the second arrival is part of the same blast, not a return from
+# anything: 20 ms is under 7 m of path difference.
+REFLECTION_MIN_DELAY_MS: float = 20.0
+
+# A reflection is quieter than what it reflects. 3 dB is the smallest drop that
+# is not just measurement scatter.
+REFLECTION_MIN_DROP_DB: float = 3.0
+
+# One repeated delay is a coincidence. Two is a pattern.
+REFLECTION_MIN_PAIRS: int = 2
+
+# Pair-finding is quadratic in the event count. Past this many events the
+# string is long enough that the pattern would be obvious in the waveform, and
+# the scan is skipped rather than allowed to dominate the run.
+REFLECTION_MAX_EVENTS: int = 200
+
+
+@dataclass
+class ReflectionPattern:
+    """A delay at which quieter events repeatedly follow louder ones."""
+    delay_ms: float = float("nan")
+    spread_ms: float = float("nan")
+    n_pairs: int = 0
+    followers: List[int] = field(default_factory=list)   # 1-based event positions
+    sources: List[int] = field(default_factory=list)     # 1-based event positions
+    drop_dB: float = float("nan")
+
+    @property
+    def detected(self) -> bool:
+        return self.n_pairs >= REFLECTION_MIN_PAIRS
+
+    @property
+    def path_difference_m(self) -> float:
+        """Extra path the delay implies, at 343 m/s. Geometry, not a claim."""
+        if not math.isfinite(self.delay_ms):
+            return float("nan")
+        return self.delay_ms / 1000.0 * 343.0
+
+    def to_dict(self) -> dict:
+        def num(x, places=1):
+            return round(float(x), places) if math.isfinite(x) else None
+        return {
+            "detected": self.detected,
+            "delay_ms": num(self.delay_ms),
+            "spread_ms": num(self.spread_ms),
+            "n_pairs": self.n_pairs,
+            "followers": list(self.followers),
+            "sources": list(self.sources),
+            "drop_dB": num(self.drop_dB),
+            "path_difference_m": num(self.path_difference_m),
+        }
+
+    def describe(self) -> str:
+        if not self.detected:
+            return "No repeated delay was found between events."
+        return (
+            f"{count(self.n_pairs, 'event')} arrive a near-constant "
+            f"{self.delay_ms:.0f} ms after a louder one "
+            f"(spread {self.spread_ms:.0f} ms, {self.drop_dB:.0f} dB quieter): "
+            f"{join_list([str(i) for i in self.followers])} after "
+            f"{join_list([str(i) for i in self.sources])}. A delay that repeats is "
+            f"the signature of a reflection off fixed geometry "
+            f"({self.path_difference_m:.0f} m of extra path), not of separate "
+            f"discharges. SASA does not decide this for you: if they are "
+            f"reflections, reject them, and the aggregate will be computed from "
+            f"the shots you keep."
+        )
+
+
+def find_reflection_pattern(
+    event_samples: np.ndarray,
+    event_levels: np.ndarray,
+    sample_rate: int,
+) -> ReflectionPattern:
+    """
+    Look for a delay at which quieter events repeatedly follow louder ones.
+
+    This reports a pattern; it does not classify anything. Two shots fired at a
+    metronomic rate produce the same signature as a reflection, and only the
+    person who was there knows which happened. What the pattern can do is stop a
+    reflection being averaged into a suppressor's rated level unnoticed.
+
+    Args:
+        event_samples: Sample index of each event, ascending.
+        event_levels: Envelope amplitude at each event, same order.
+        sample_rate: Sample rate in Hz.
+
+    Returns:
+        ReflectionPattern. Check `.detected`.
+    """
+    found = ReflectionPattern()
+    events = np.asarray(event_samples, dtype=np.int64).ravel()
+    levels = np.asarray(event_levels, dtype=np.float64).ravel()
+    n = events.size
+    if n != levels.size:
+        raise ValueError(f"got {n} events but {levels.size} levels")
+    if n < 2 * REFLECTION_MIN_PAIRS or n > REFLECTION_MAX_EVENTS or sample_rate <= 0:
+        return found
+
+    drop = 10.0 ** (-REFLECTION_MIN_DROP_DB / 20.0)
+    a_idx, b_idx = np.triu_indices(n, k=1)
+    delays = (events[b_idx] - events[a_idx]) * 1000.0 / sample_rate
+    keep = (
+        (delays >= REFLECTION_MIN_DELAY_MS)
+        & (levels[b_idx] <= levels[a_idx] * drop)
+    )
+    a_idx, b_idx, delays = a_idx[keep], b_idx[keep], delays[keep]
+    if delays.size < REFLECTION_MIN_PAIRS:
+        return found
+
+    # Cluster the delays: for each one, how many others sit within its own
+    # tolerance. O(m log m) via the sorted order, not a pairwise matrix.
+    order = np.argsort(delays)
+    sorted_delays = delays[order]
+    tolerance = np.maximum(REFLECTION_TOLERANCE_FLOOR_MS,
+                           REFLECTION_TOLERANCE_FRACTION * sorted_delays)
+    lo = np.searchsorted(sorted_delays, sorted_delays - tolerance, side="left")
+    hi = np.searchsorted(sorted_delays, sorted_delays + tolerance, side="right")
+    sizes = hi - lo
+    centre = int(np.argmax(sizes))
+    if sizes[centre] < REFLECTION_MIN_PAIRS:
+        return found
+
+    members = order[lo[centre]:hi[centre]]
+    # Louder pairs first, so that when one event could follow two different
+    # sources the stronger explanation claims it. Each event is used once as a
+    # follower and once as a source; anything else would count it twice.
+    members = members[np.argsort(-levels[a_idx[members]])]
+    used_a: set = set()
+    used_b: set = set()
+    picked: List[int] = []
+    for m in members:
+        a, b = int(a_idx[m]), int(b_idx[m])
+        if a in used_a or a in used_b or b in used_a or b in used_b:
+            continue
+        used_a.add(a)
+        used_b.add(b)
+        picked.append(int(m))
+
+    if len(picked) < REFLECTION_MIN_PAIRS:
+        return found
+
+    picked_delays = delays[picked]
+    pairs = sorted((int(a_idx[m]), int(b_idx[m])) for m in picked)
+    ratios = levels[[b for _, b in pairs]] / np.maximum(levels[[a for a, _ in pairs]], EPS)
+
+    found.delay_ms = float(np.median(picked_delays))
+    found.spread_ms = float(np.max(picked_delays) - np.min(picked_delays))
+    found.n_pairs = len(pairs)
+    found.sources = [a + 1 for a, _ in pairs]
+    found.followers = [b + 1 for _, b in pairs]
+    found.drop_dB = float(-20.0 * np.log10(max(float(np.median(ratios)), EPS)))
+    return found
+
+
+def autotune_detection(
+    pressure_Pa: np.ndarray,
+    sample_rate: int,
+    *,
+    expected_shots: Optional[int] = None,
+    min_snr_dB: float = 15.0,
+    envelope_window_ms: float = 1.0,
+    envelope_hop_ms: float = 0.25,
+    bandpass: bool = True,
+) -> DetectionTuning:
+    """
+    Choose detection settings from the recording itself.
+
+    The threshold is chosen by stability rather than by taste: the candidate
+    count is swept across the whole plausible range of thresholds, and the
+    setting picked is the centre of the widest span over which that count does
+    not change. The refractory period follows from the tightest spacing the
+    chosen threshold actually produces, and the post-trigger window from the
+    measured decay of the shot with the most room after it.
+
+    Args:
+        pressure_Pa: Waveform, in Pascals or full-scale units. Only ratios of it
+                     are used, so the two behave identically here.
+        sample_rate: Sample rate in Hz.
+        expected_shots: Round count, when it is known. A plateau at that count
+                        is preferred over a wider one at another count, and the
+                        result records whether such a plateau existed at all.
+        min_snr_dB: The SNR gate detection will apply. Used to stop the sweep
+                    before it reaches thresholds that gate would discard anyway.
+        envelope_window_ms: RMS envelope window, matched to detect_shots().
+        envelope_hop_ms: RMS envelope hop, matched to detect_shots().
+        bandpass: Band-limit before measuring, matched to detect_shots().
+
+    Returns:
+        DetectionTuning. Check `.applied`; `.reason` explains a refusal, and the
+        defaults it carries are then the module defaults, unchanged.
+    """
+    x = np.asarray(pressure_Pa, dtype=np.float64).ravel()
+    if sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+    if x.size == 0:
+        return DetectionTuning(expected_shots=expected_shots,
+                               reason="the recording is empty")
+
+    env_window = max(1, int(envelope_window_ms * sample_rate / 1000.0))
+    env_hop = max(1, int(envelope_hop_ms * sample_rate / 1000.0))
+    detect_signal = bandpass_for_detection(x, sample_rate) if bandpass else x
+    envelope, indices = compute_envelope(detect_signal, env_window, env_hop)
+    return autotune_from_envelope(
+        envelope, indices, sample_rate, env_hop,
+        expected_shots=expected_shots, min_snr_dB=min_snr_dB,
+    )
+
+
+def autotune_from_envelope(
+    envelope: np.ndarray,
+    indices: np.ndarray,
+    sample_rate: int,
+    env_hop: int,
+    *,
+    expected_shots: Optional[int] = None,
+    min_snr_dB: float = 15.0,
+) -> DetectionTuning:
+    """
+    Choose detection settings from an envelope that has already been measured.
+
+    autotune_detection() is the ordinary entry point. This one exists for the
+    chunked path, which never holds the whole recording and so builds the
+    envelope a chunk at a time; tuning has to see the WHOLE string, because a
+    threshold chosen from one chunk is exactly the per-chunk threshold the
+    chunked analyser was written to avoid.
+
+    Args:
+        envelope: Short-term RMS envelope of the band-limited signal.
+        indices: Centre sample position of each envelope frame, ascending.
+        sample_rate: Sample rate in Hz.
+        env_hop: Envelope hop in samples, used to convert between the two.
+        expected_shots: Round count, when it is known.
+        min_snr_dB: The SNR gate detection will apply.
+
+    Returns:
+        DetectionTuning. Check `.applied`.
+    """
+    tuning = DetectionTuning(expected_shots=expected_shots)
+
+    envelope = np.asarray(envelope, dtype=np.float64).ravel()
+    indices = np.asarray(indices, dtype=np.int64).ravel()
+    if sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+    if envelope.size != indices.size:
+        raise ValueError(f"got {envelope.size} envelope frames but {indices.size} indices")
+    env_hop = max(1, int(env_hop))
+
+    if envelope.size == 0:
+        tuning.reason = "the recording is empty"
+        return tuning
+    if envelope.size < 4:
+        tuning.reason = "the recording is too short to measure an envelope"
+        return tuning
+
+    peak_envelope = float(envelope.max())
+    noise_floor = float(np.percentile(envelope, 10.0))
+    tuning.peak_dB = float(amplitude_to_dB_SPL(peak_envelope))
+    tuning.noise_floor_dB = float(amplitude_to_dB_SPL(max(noise_floor, EPS)))
+    dynamic = tuning.dynamic_range_dB
+
+    # The sweep must stop before the SNR gate would reject everything it finds;
+    # searching below that only wastes the plateau on candidates that cannot
+    # become shots.
+    usable = dynamic - min_snr_dB
+    if not math.isfinite(usable) or usable < AUTOTUNE_MIN_RELATIVE_DB + AUTOTUNE_MIN_PLATEAU_DB:
+        tuning.reason = (
+            f"the recording spans only {dynamic:.1f} dB between its noise floor and its "
+            f"loudest event, which leaves no room to search above the {min_snr_dB:.0f} dB "
+            f"impulsiveness gate"
+        )
+        return tuning
+
+    top = min(AUTOTUNE_MAX_RELATIVE_DB, usable)
+    n_steps = int(math.floor((top - AUTOTUNE_MIN_RELATIVE_DB) / AUTOTUNE_STEP_DB)) + 1
+    rel_values = AUTOTUNE_MIN_RELATIVE_DB + AUTOTUNE_STEP_DB * np.arange(n_steps)
+
+    # ---- The two-dimensional stability search ----
+    #
+    # The threshold and the refractory period cannot be chosen one at a time:
+    # how many events there are depends on how close two of them may be, and how
+    # close they are is only known once a threshold has selected them. So both
+    # are searched together, and every pair is judged on two things.
+    #
+    #   Admissibility. The refractory period must not be the thing setting the
+    #   spacing: the tightest gap between the events it selected has to clear it
+    #   by AUTOTUNE_SPACING_SLACK. When the gaps pile up exactly at the minimum
+    #   allowed, what has been measured is the setting and not the recording.
+    #
+    #   Stability. Among what remains, the pair whose count survives the widest
+    #   span of thresholds wins, because that is the answer the recording is
+    #   least able to change its mind about.
+    peaks = _EnvelopePeaks(envelope, indices, env_hop)
+    candidates: List[_TuningRound] = []
+    rejected_tight: List[Tuple[int, float]] = []
+
+    for refractory_ms in AUTOTUNE_REFRACTORY_LADDER:
+        refractory_samples = max(1, int(refractory_ms * sample_rate / 1000.0))
+        counts = _sweep_candidate_counts(peaks, rel_values, refractory_samples)
+        for plateau in _stable_plateaus(rel_values, counts, AUTOTUNE_MIN_PLATEAU_DB):
+            rel_dB = float(round((plateau[1] + plateau[2]) / 2.0))
+            events = peaks.select(rel_dB, refractory_samples)
+            if events.size >= 2:
+                tightest = float(np.min(np.diff(events)) * 1000.0 / sample_rate)
+                if tightest < refractory_ms * AUTOTUNE_SPACING_SLACK:
+                    rejected_tight.append((plateau[0], refractory_ms))
+                    continue
+            else:
+                tightest = float("nan")
+            candidates.append(_TuningRound(
+                plateau=plateau, refractory_ms=float(refractory_ms), rel_dB=rel_dB,
+                events=events, tightest_ms=tightest, counts=counts,
+                expectation_met=(None if expected_shots is None
+                                 else plateau[0] == int(expected_shots)),
+            ))
+
+    if not candidates:
+        tuning.reason = (
+            f"no threshold between {rel_values[0]:.0f} and {rel_values[-1]:.0f} dB below "
+            f"peak held its event count steady for {AUTOTUNE_MIN_PLATEAU_DB:.0f} dB at any "
+            f"refractory period the recording allows, so no setting is more defensible "
+            f"than any other"
+        )
+        return tuning
+
+    # Among the pairs that are admissible, the widest span is the strongest
+    # reading - but not by so much that a marginally wider span may hide shots.
+    # A refractory period can only ever conceal an event, never invent one, so
+    # where two readings are within AUTOTUNE_RIVAL_FRACTION of each other in
+    # span, the one that finds MORE events is taken. Without this, a recording
+    # of five rounds at 600 rpm has a perfectly stable one-shot reading -
+    # perfectly stable because a quarter-second refractory has swallowed four of
+    # them - and stability alone would prefer it.
+    # On a tie the longer refractory period wins. It is the strongest constraint
+    # the recording still admits, and admissibility has already established it
+    # cannot have merged anything.
+    def rank(a: _TuningRound) -> Tuple[int, float, float, float]:
+        return (a.plateau[0], a.width_dB, a.refractory_ms, -a.plateau[1])
+
+    preferred = [a for a in candidates if a.expectation_met] or candidates
+    widest = max(a.width_dB for a in preferred)
+    contenders = [a for a in preferred if a.width_dB >= widest * AUTOTUNE_RIVAL_FRACTION]
+    best = max(contenders, key=rank)
+
+    counts = best.counts
+    events = best.events
+    refractory_ms = best.refractory_ms
+    tuning.tightest_spacing_ms = best.tightest_ms
+    tuning.expectation_met = best.expectation_met
+
+    rivals = sorted({a.plateau[0] for a in contenders if a.plateau[0] != best.plateau[0]})
+    if rivals:
+        tuning.notes.append(
+            f"How close two shots may be changes how many there are. "
+            f"{count(best.plateau[0], 'event')} over {best.width_dB:.0f} dB is the most "
+            f"stable reading, but {join_list([str(v) for v in rivals])} "
+            f"{plural(len(rivals), 'is')} nearly as stable at other refractory periods. "
+            f"Check the count against the waveform before relying on it."
+        )
+
+    if expected_shots is not None and tuning.expectation_met is False:
+        tuning.notes.append(
+            f"No threshold produced the {count(int(expected_shots), 'shot')} expected. "
+            f"The count went {_describe_counts(counts)}. The settings below are the most "
+            f"stable the recording supports, not the ones that would reach "
+            f"{expected_shots}; forcing the expected count would be choosing the answer "
+            f"before measuring it."
+        )
+
+    n_shots, lo, hi = best.plateau
+    tuning.n_shots = n_shots
+    tuning.stable_from_dB, tuning.stable_to_dB = lo, hi
+    # The centre of the plateau is the point furthest from either edge, so it is
+    # the choice a small error in the recording is least able to move.
+    tuning.threshold_relative_dB = best.rel_dB
+    tuning.basis["threshold"] = (
+        f"{count(n_shots, 'event')} {plural(n_shots, 'was')} found at every threshold "
+        f"from {lo:.0f} to {hi:.0f} dB below peak, the widest such span in the "
+        f"recording; the centre of that span was taken."
+    )
+
+    tuning.refractory_ms = float(refractory_ms)
+    if math.isfinite(tuning.tightest_spacing_ms):
+        tuning.basis["refractory"] = (
+            f"Half the tightest spacing between events "
+            f"({tuning.tightest_spacing_ms:.0f} ms, or {tuning.implied_rate_rpm:.0f} rpm), "
+            f"which cannot merge two shots that far apart."
+        )
+    else:
+        # NOT replaced by the module default here. The count above was produced
+        # AT this refractory period; substituting a different one would print a
+        # pair of numbers that never ran together, which is the exact failure
+        # this function exists to avoid.
+        tuning.basis["refractory"] = (
+            f"The recording holds one event, so there is no spacing to measure. "
+            f"{refractory_ms:.0f} ms is the longest period the recording admits, and "
+            f"is the one this count was found at."
+        )
+
+    # ---- A delay that repeats is a reflection until shown otherwise ----
+    event_frames = np.searchsorted(indices, events) if events.size else events
+    if event_frames.size:
+        event_frames = np.clip(event_frames, 0, envelope.size - 1)
+    tuning.reflection = find_reflection_pattern(
+        events, envelope[event_frames] if event_frames.size else np.array([]), sample_rate
+    )
+    if tuning.reflection.detected:
+        tuning.notes.append(tuning.reflection.describe())
+
+    # ---- Post-trigger window, from the measured decay ----
+    decay_ms, complete = _measure_decay_ms(
+        envelope, env_hop, sample_rate, event_frames, noise_floor
+    )
+    if math.isfinite(decay_ms):
+        tuning.decay_ms = decay_ms
+        post = min(AUTOTUNE_POST_MAX_MS, max(AUTOTUNE_POST_MIN_MS, 10.0 * math.ceil(decay_ms / 10.0)))
+        tuning.post_ms = float(post)
+        if complete:
+            tuning.basis["post"] = (
+                f"The cleanest shot fell {AUTOTUNE_DECAY_DB:.0f} dB, or into its noise "
+                f"floor, {decay_ms:.0f} ms after its peak; the window was rounded up "
+                f"from that."
+            )
+        else:
+            tuning.basis["post"] = (
+                f"The cleanest shot had still not fallen {AUTOTUNE_DECAY_DB:.0f} dB "
+                f"{decay_ms:.0f} ms after its peak, which is as far as the recording "
+                f"allows the decay to be followed. The window is that span, and is a "
+                f"lower bound on what the decay needs."
+            )
+            tuning.notes.append(
+                "No shot in this recording decays fully before the next event or the "
+                "end of the file, so the post-trigger window is bounded by the "
+                "recording rather than by the sound. B-duration may be truncated."
+            )
+    else:
+        tuning.basis["post"] = (
+            "No decay could be measured, so the 200 ms default was kept."
+        )
+
+    tuning.pre_ms = AUTOTUNE_PRE_MS
+    tuning.basis["pre"] = (
+        f"Fixed at {AUTOTUNE_PRE_MS:.0f} ms. It carries the ambient immediately before "
+        f"the arrival and lets the detection filter settle; nothing in the signal "
+        f"determines it."
+    )
+
+    if tuning.stable_width_dB < 2 * AUTOTUNE_MIN_PLATEAU_DB:
+        tuning.notes.append(
+            f"The stable span is only {tuning.stable_width_dB:.0f} dB wide. The shot "
+            f"count is more sensitive to the threshold than it should be, which usually "
+            f"means echoes at a similar level to the shots, or shots at very different "
+            f"levels. Check the count against the waveform."
+        )
+
+    tuning.applied = True
+    tuning.reason = (
+        f"chosen from the recording: {count(n_shots, 'event')} at every threshold from "
+        f"{lo:.0f} to {hi:.0f} dB below peak"
+    )
+    return tuning
+
+
+def _describe_counts(counts: np.ndarray) -> str:
+    """Render a swept count series as the sequence of distinct values it took."""
+    distinct: List[int] = []
+    for value in counts.tolist():
+        if not distinct or distinct[-1] != value:
+            distinct.append(int(value))
+    if len(distinct) > 8:
+        distinct = distinct[:4] + [-1] + distinct[-3:]
+        return " -> ".join("..." if v == -1 else str(v) for v in distinct)
+    return " -> ".join(str(v) for v in distinct)
 
 
 # ---- Auto-trim ----

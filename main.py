@@ -75,10 +75,15 @@ from calibration import (  # noqa: E402
 )
 from shot_detect import (  # noqa: E402
     DetectionReport,
+    DetectionTuning,
     ShotEvent,
+    autotune_detection,
+    autotune_from_envelope,
     bandpass_for_detection,
     compute_envelope,
     detect_shots,
+    TrimSpan,
+    find_shot_string_span,
 )
 from metrics import (  # noqa: E402
     AggregateMetrics,
@@ -156,6 +161,11 @@ MAX_SPECTROGRAM_FRAMES = 1500
 SPECTROGRAM_DOWNSAMPLE = 40
 # Full sample resolution is retained around each shot so the blast can be
 # inspected by zooming in; this is the span kept, relative to the peak.
+# Context kept either side of the shot string in the full-recording figures.
+# Wide enough to show the ambient the shots stand against, narrow enough that a
+# ten-minute range recording still collapses to the part with shooting in it.
+PLOT_FOCUS_MARGIN_S = 0.25
+
 WAVEFORM_FULLRES_PRE_S = 0.010
 WAVEFORM_FULLRES_POST_S = 0.020
 
@@ -608,11 +618,18 @@ class AnalysisConfig:
     mono_mix: bool = False
 
     # ---- Shot detection ----
+    #
+    # The four tunable knobs default to None, meaning "measure it from the
+    # recording". A number here is the operator overriding that measurement, and
+    # is always obeyed; None with auto_detect off falls back to the constants
+    # below, which are what SASA shipped before it could tune itself.
     detection_threshold_dB: Optional[float] = None
     threshold_relative_dB: Optional[float] = None
-    refractory_ms: float = 200.0
-    pre_shot_ms: float = 50.0
-    post_shot_ms: float = 200.0
+    refractory_ms: Optional[float] = None
+    pre_shot_ms: Optional[float] = None
+    post_shot_ms: Optional[float] = None
+    auto_detect: bool = True
+    expected_shots: Optional[int] = None
     min_shots: int = 0
     max_shots: int = 1000
 
@@ -632,6 +649,9 @@ class AnalysisConfig:
 
     # ---- Output ----
     make_plots: bool = True
+    # "shots" draws the full-recording figures over the shot string only;
+    # "full" draws the whole file. Metrics are unaffected either way.
+    plot_span: str = "shots"
     save_per_shot_plots: bool = True
     save_aggregate_plots: bool = True
     plot_formats: Optional[List[str]] = None
@@ -668,9 +688,16 @@ class AnalysisConfig:
             self.detection_threshold_dB = _finite(self.detection_threshold_dB, "detection_threshold_dB")
         if self.threshold_relative_dB is not None:
             self.threshold_relative_dB = _positive(self.threshold_relative_dB, "threshold_relative_dB")
-        self.refractory_ms = _positive(self.refractory_ms, "refractory_ms")
-        self.pre_shot_ms = _non_negative(self.pre_shot_ms, "pre_shot_ms")
-        self.post_shot_ms = _positive(self.post_shot_ms, "post_shot_ms")
+        if self.refractory_ms is not None:
+            self.refractory_ms = _positive(self.refractory_ms, "refractory_ms")
+        if self.pre_shot_ms is not None:
+            self.pre_shot_ms = _non_negative(self.pre_shot_ms, "pre_shot_ms")
+        if self.post_shot_ms is not None:
+            self.post_shot_ms = _positive(self.post_shot_ms, "post_shot_ms")
+        if self.expected_shots is not None:
+            self.expected_shots = _integer(
+                self.expected_shots, "expected_shots", minimum=1, maximum=100_000
+            )
         self.min_shots = _integer(self.min_shots, "min_shots", minimum=0, maximum=100_000)
         self.max_shots = _integer(self.max_shots, "max_shots", minimum=1, maximum=100_000)
         if self.min_shots > self.max_shots:
@@ -706,6 +733,10 @@ class AnalysisConfig:
                 f"band_time_weighting must be fast, slow or impulse, got {self.band_time_weighting!r}"
             )
         self.protection_NRR_dB = _non_negative(self.protection_NRR_dB, "protection_NRR_dB")
+        if self.plot_span not in ("shots", "full"):
+            raise ConfigurationError(
+                f"plot_span must be shots or full, got {self.plot_span!r}"
+            )
 
     # ---- Derived values ----
 
@@ -1134,6 +1165,182 @@ def read_samples(
         channel=None if mono_mix else channel,
     )
     return np.asarray(samples)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Detection preview
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Why this exists.
+#
+# Detection settings used to be knobs you turned before a run and judged after
+# it, by reading a shot count in a verdict. That is a slow loop over an
+# expensive operation, and it puts the one decision that determines every
+# subsequent number - which events are shots - furthest from the evidence.
+#
+# The preview does detection and nothing else: no metrics, no weighting
+# filters, no figures, no output directory. It answers "how many shots, where,
+# and how sure" in a fraction of a second, so the setting can be moved against
+# the answer instead of against a guess.
+#
+# It is deliberately UNCALIBRATED. Detection is relative to the recording's own
+# peak, so a calibration would change none of it, and requiring one would mean
+# an operator could not look at their recording until they had resolved a
+# question that has nothing to do with looking at it. Every level it reports is
+# therefore dB re FS and is labelled as such.
+
+# The envelope the preview draws. Enough columns to see individual blasts in a
+# minute-long recording; few enough that the response stays small.
+PREVIEW_COLUMNS: int = 1600
+
+# Preview levels are relative to full scale, never sound pressure. Stated once
+# here so no caller has to decide.
+PREVIEW_LEVEL_UNIT: str = "dB re FS"
+
+
+def detect_preview(
+    path: Path,
+    *,
+    channel: int = 0,
+    auto_detect: bool = True,
+    expected_shots: Optional[int] = None,
+    threshold_relative_dB: Optional[float] = None,
+    refractory_ms: Optional[float] = None,
+    pre_ms: Optional[float] = None,
+    post_ms: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Detect shots and report what was found, without analysing anything.
+
+    Returns a dictionary in every case, including failure: the interface calls
+    this while the operator is still choosing a file, and an exception there is
+    a dead page rather than a message.
+    """
+    result: Dict[str, Any] = {
+        "readable": False,
+        "problem": None,
+        "path": str(path),
+        "name": Path(path).name,
+        "level_unit": PREVIEW_LEVEL_UNIT,
+        "sample_rate": None,
+        "duration_s": None,
+        "n_shots": 0,
+        "shots": [],
+        "tuning": None,
+        "detection": None,
+        "envelope": None,
+        "quality": None,
+    }
+
+    try:
+        import soundfile as sf  # noqa: PLC0415
+
+        prepared = prepare_input(Path(path))
+        info = sf.info(str(prepared.audio_path))
+        sample_rate = int(info.samplerate)
+        samples = read_samples(
+            prepared.audio_path, 0, int(info.frames),
+            channel=channel, mono_mix=False, dtype="float32",
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure is a message, not a crash
+        result["problem"] = str(exc) or exc.__class__.__name__
+        return result
+
+    if samples.size == 0 or sample_rate <= 0:
+        result["problem"] = "The recording contains no samples on this channel."
+        return result
+
+    x = np.asarray(samples, dtype=np.float64).ravel()
+    result["readable"] = True
+    result["sample_rate"] = sample_rate
+    result["duration_s"] = round(x.size / sample_rate, 4)
+
+    reference = Calibration.uncalibrated()
+    # Detection works in the same dB-above-P_REF space a calibrated run does,
+    # because that is what detect_shots() reports. Subtracting the level of a
+    # full-scale sample turns each one back into dB re FS, which is the only
+    # thing an uncalibrated recording can honestly be measured in.
+    full_scale = reference.full_scale_dB
+    quality = assess_signal_quality(x, sample_rate, reference)
+    result["quality"] = {
+        "is_clipped": bool(quality.is_clipped),
+        "ceiling_clipped": bool(quality.ceiling.detected),
+        "ceiling_dBFS": (round(quality.ceiling.ceiling_dBFS, 2)
+                         if quality.ceiling.detected else None),
+        "clipped_runs": int(quality.clipped_runs),
+        "errors": list(quality.errors),
+    }
+
+    tuning: Optional[DetectionTuning] = None
+    if auto_detect:
+        tuning = autotune_detection(x, sample_rate, expected_shots=expected_shots)
+        # DetectionTuning reports levels the way detect_shots() does, which on a
+        # calibrated run is dB SPL. Here there is no calibration, so those two
+        # fields are neither SPL nor dB re FS until the full-scale offset is
+        # taken off. They are replaced rather than supplemented: leaving a
+        # number in the payload whose unit depends on how it got there is how a
+        # dB re FS value ends up printed as a sound pressure level.
+        payload = tuning.to_dict()
+        for absolute, relative in (("peak_dB", "peak_dBFS"),
+                                   ("noise_floor_dB", "noise_floor_dBFS")):
+            value = payload.pop(absolute, None)
+            payload[relative] = round(value - full_scale, 2) if value is not None else None
+        result["tuning"] = payload
+
+    config = AnalysisConfig(
+        uncalibrated=True,
+        auto_detect=auto_detect,
+        expected_shots=expected_shots,
+        threshold_relative_dB=threshold_relative_dB,
+        refractory_ms=refractory_ms,
+        pre_shot_ms=pre_ms,
+        post_shot_ms=post_ms,
+    )
+    resolved = resolve_detection(config, tuning)
+
+    reports: List[DetectionReport] = []
+    shots = detect_shots(
+        x, sample_rate,
+        threshold_relative_dB=resolved.threshold_relative_dB,
+        threshold_dB=resolved.threshold_dB,
+        pre_ms=resolved.pre_ms,
+        post_ms=resolved.post_ms,
+        refractory_ms=resolved.refractory_ms,
+        samples_FS=x,
+        ceiling_FS=quality.ceiling.ceiling_FS if quality.ceiling.detected else None,
+        report=reports,
+    )
+    detection = reports[0] if reports else None
+
+    result["settings"] = resolved.to_dict()
+    result["n_shots"] = len(shots)
+    result["shots"] = [
+        {
+            "shot_number": shot.shot_number,
+            "time_s": round(shot.time_s, 5),
+            "peak_dBFS": round(shot.peak_dB - full_scale, 2),
+            "snr_dB": (round(shot.snr_dB, 1) if math.isfinite(shot.snr_dB) else None),
+            "clipped": bool(shot.clipped),
+            "window_start_s": round(shot.window_start / sample_rate, 5),
+            "window_end_s": round(shot.window_end / sample_rate, 5),
+            "n_arrivals": len(shot.arrivals),
+        }
+        for shot in shots
+    ]
+    if detection is not None:
+        result["detection"] = {
+            "n_candidates": detection.n_candidates,
+            "n_suppressed_by_refractory": detection.n_suppressed_by_refractory,
+            "threshold_dBFS": round(detection.threshold_dB - full_scale, 2),
+            "threshold_mode": detection.threshold_mode,
+            "peak_dBFS": round(detection.peak_level_dB - full_scale, 2),
+            "noise_floor_dBFS": round(detection.noise_floor_dB - full_scale, 2),
+            "warnings": list(detection.warnings),
+        }
+
+    lo, hi = _column_envelope(x, PREVIEW_COLUMNS)
+    result["envelope"] = {"columns": len(lo), "lo": lo, "hi": hi}
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1905,11 +2112,19 @@ def _run_pipeline(
     quality: SignalQuality = analysis["quality"]
     shots: List[ShotEvent] = analysis["shots"]
     detection: DetectionReport = analysis["detection"]
+    resolved: ResolvedDetection = analysis["resolved_detection"]
     shot_metrics: List[ShotMetrics] = analysis["shot_metrics"]
 
     say("")
     say("  Recording quality:")
     say(quality.summary())
+
+    if resolved.tuning is not None:
+        say("")
+        say(resolved.tuning.summary())
+        for note in resolved.tuning.notes:
+            say(f"    {note}")
+            run_warnings.append(note)
 
     measurement_valid = quality.is_valid
     if not measurement_valid:
@@ -2070,7 +2285,7 @@ def _run_pipeline(
         "settings": _settings_block(
             config, sample_rate=sample_rate, nperseg=nperseg, noverlap=noverlap,
             channel_used=channel_used, chunked=chunked, detection=detection,
-            reference_dir=reference_dir, config_file=config_file,
+            resolved=resolved, reference_dir=reference_dir, config_file=config_file,
         ),
         "test_metadata": record["test_metadata"],
         "atmosphere": air.to_dict(),
@@ -2140,6 +2355,7 @@ def _run_pipeline(
         analysis.get("pressure"), shots, sample_rate,
         level_unit=calibration.level_unit,
         calibrated=bool(calibration.calibrated),
+        focus=_plot_focus(config, shots, frames, sample_rate),
     )
     if waveform_block is not None:
         waveform_path = out_dir / "waveform_envelope.json"
@@ -2274,6 +2490,7 @@ def _waveform_envelope_block(
     *,
     level_unit: str,
     calibrated: bool,
+    focus: Optional[TrimSpan] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     The waveform, as data the interface can plot and interrogate.
@@ -2313,6 +2530,11 @@ def _waveform_envelope_block(
         "level_unit": level_unit,
         "columns": levels[0]["columns"],
         "levels": levels,
+        # The span the chart should OPEN at. Every sample is still in the file
+        # above; this says where to look first, so a five-second string inside a
+        # ten-minute recording is not presented as five hairlines on a rule.
+        # Zooming out is one gesture; noticing that you needed to is not.
+        "focus": focus.to_dict() if focus is not None else None,
         "shots": [],
     }
 
@@ -2479,6 +2701,104 @@ def _ahaah_block(
     return block
 
 
+# What the detection knobs fall back to when the operator has not set them and
+# tuning is off or could not reach an answer. These are the values SASA shipped
+# before it could measure them, kept so that --no-auto-detect reproduces the
+# older behaviour exactly rather than something new.
+FALLBACK_REFRACTORY_MS: float = 200.0
+FALLBACK_PRE_SHOT_MS: float = 50.0
+FALLBACK_POST_SHOT_MS: float = 200.0
+FALLBACK_THRESHOLD_RELATIVE_DB: float = 30.0
+
+
+@dataclass
+class ResolvedDetection:
+    """
+    The detection settings a run will actually use, and where each came from.
+
+    `source` carries one word per field - "operator", "measured" or "default" -
+    so a result can never present a tuned number as though the operator chose
+    it, or a fallback as though it were measured.
+    """
+    threshold_dB: Optional[float]
+    threshold_relative_dB: Optional[float]
+    refractory_ms: float
+    pre_ms: float
+    post_ms: float
+    source: Dict[str, str] = field(default_factory=dict)
+    tuning: Optional[DetectionTuning] = None
+
+    @property
+    def tuned(self) -> bool:
+        return bool(self.tuning and self.tuning.applied)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "threshold_dB": self.threshold_dB,
+            "threshold_relative_dB": self.threshold_relative_dB,
+            "refractory_ms": self.refractory_ms,
+            "pre_ms": self.pre_ms,
+            "post_ms": self.post_ms,
+            "source": dict(self.source),
+            "tuning": self.tuning.to_dict() if self.tuning else None,
+        }
+
+
+def resolve_detection(
+    config: AnalysisConfig,
+    tuning: Optional[DetectionTuning],
+) -> ResolvedDetection:
+    """
+    Decide each detection setting, in the order operator, measured, default.
+
+    An explicit value is never overridden - tuning informs the knobs the
+    operator left alone and no others. This is also why the tuner runs even when
+    an absolute threshold was given: the refractory period and the post-trigger
+    window are measurements of the recording, not of the threshold, and stay
+    useful.
+    """
+    source: Dict[str, str] = {}
+
+    def pick(name: str, given: Optional[float], measured: Optional[float],
+             fallback: float) -> float:
+        if given is not None:
+            source[name] = "operator"
+            return float(given)
+        if measured is not None and tuning is not None and tuning.applied:
+            source[name] = "measured"
+            return float(measured)
+        source[name] = "default"
+        return float(fallback)
+
+    usable = tuning if (tuning and tuning.applied) else None
+
+    if config.detection_threshold_dB is not None:
+        source["threshold"] = "operator"
+        threshold_dB: Optional[float] = float(config.detection_threshold_dB)
+        threshold_relative_dB: Optional[float] = None
+    else:
+        threshold_dB = None
+        threshold_relative_dB = pick(
+            "threshold", config.threshold_relative_dB,
+            usable.threshold_relative_dB if usable else None,
+            FALLBACK_THRESHOLD_RELATIVE_DB,
+        )
+
+    return ResolvedDetection(
+        threshold_dB=threshold_dB,
+        threshold_relative_dB=threshold_relative_dB,
+        refractory_ms=pick("refractory", config.refractory_ms,
+                           usable.refractory_ms if usable else None,
+                           FALLBACK_REFRACTORY_MS),
+        pre_ms=pick("pre", config.pre_shot_ms,
+                    usable.pre_ms if usable else None, FALLBACK_PRE_SHOT_MS),
+        post_ms=pick("post", config.post_shot_ms,
+                     usable.post_ms if usable else None, FALLBACK_POST_SHOT_MS),
+        source=source,
+        tuning=tuning,
+    )
+
+
 def _settings_block(
     config: AnalysisConfig,
     *,
@@ -2488,6 +2808,7 @@ def _settings_block(
     channel_used: str,
     chunked: bool,
     detection: DetectionReport,
+    resolved: ResolvedDetection,
     reference_dir: Optional[Path],
     config_file: Optional[Path],
 ) -> Dict[str, Any]:
@@ -2498,12 +2819,16 @@ def _settings_block(
         "mono_mix": config.mono_mix,
         "load_dtype": config.load_dtype,
         "detection_threshold_dB_requested": config.detection_threshold_dB,
-        "threshold_relative_dB": config.threshold_relative_dB,
+        "threshold_relative_dB": resolved.threshold_relative_dB,
         "detection_threshold_dB_used": round(detection.threshold_dB, 2),
         "detection_threshold_mode": detection.threshold_mode,
-        "refractory_ms": config.refractory_ms,
-        "pre_shot_ms": config.pre_shot_ms,
-        "post_shot_ms": config.post_shot_ms,
+        "refractory_ms": resolved.refractory_ms,
+        "pre_shot_ms": resolved.pre_ms,
+        "post_shot_ms": resolved.post_ms,
+        "auto_detect": config.auto_detect,
+        "expected_shots": config.expected_shots,
+        "detection_source": dict(resolved.source),
+        "detection_tuning": resolved.tuning.to_dict() if resolved.tuning else None,
         "min_shots": config.min_shots,
         "max_shots": config.max_shots,
         "nperseg": nperseg,
@@ -2521,6 +2846,7 @@ def _settings_block(
         "protection_NRR_dB": config.protection_NRR_dB,
         "high_pass_10Hz": True,
         "make_plots": config.make_plots,
+        "plot_span": config.plot_span,
         "plot_formats": list(config.plot_formats or []),
         "save_per_shot_plots": config.save_per_shot_plots,
         "save_aggregate_plots": config.save_aggregate_plots,
@@ -2561,15 +2887,24 @@ def _analyze_in_memory(
 
     pressure = calibration.to_pascals(samples_FS)
 
+    tuning: Optional[DetectionTuning] = None
+    if config.auto_detect:
+        progress(18, "Measuring detection settings")
+        tuning = autotune_detection(
+            pressure, sample_rate, expected_shots=config.expected_shots
+        )
+        logger.info("%s", tuning.summary().strip())
+    resolved = resolve_detection(config, tuning)
+
     progress(20, "Detecting shots")
     reports: List[DetectionReport] = []
     shots = detect_shots(
         pressure, sample_rate,
-        threshold_dB=config.detection_threshold_dB,
-        threshold_relative_dB=config.threshold_relative_dB,
-        pre_ms=config.pre_shot_ms,
-        post_ms=config.post_shot_ms,
-        refractory_ms=config.refractory_ms,
+        threshold_dB=resolved.threshold_dB,
+        threshold_relative_dB=resolved.threshold_relative_dB,
+        pre_ms=resolved.pre_ms,
+        post_ms=resolved.post_ms,
+        refractory_ms=resolved.refractory_ms,
         min_shots=config.min_shots,
         max_shots=config.max_shots,
         full_scale_dB=calibration.full_scale_dB if calibration.calibrated else None,
@@ -2609,6 +2944,7 @@ def _analyze_in_memory(
         "quality": quality,
         "shots": shots,
         "detection": detection,
+        "resolved_detection": resolved,
         "shot_metrics": shot_metrics,
         "samples_FS": samples_FS,
         "pressure": pressure,
@@ -2658,10 +2994,6 @@ def _analyze_chunked(
          120 s boundary is measured exactly like one in the middle.
     """
     chunk_frames = max(1, int(CHUNK_DURATION_S * sample_rate))
-    context_frames = max(
-        int(CHUNK_CONTEXT_S * sample_rate),
-        int(3.0 * (config.pre_shot_ms + config.post_shot_ms) * sample_rate / 1000.0),
-    )
     dtype = config.load_dtype
 
     def read(start: int, n_frames: int) -> np.ndarray:
@@ -2683,6 +3015,11 @@ def _analyze_chunked(
     peak_envelope = 0.0
     noise_estimates: List[float] = []
     quality_chunks: List[SignalQuality] = []
+    # The envelope of the WHOLE recording, stitched from the chunks as they are
+    # read. Tuning has to see the whole string: a threshold chosen from one
+    # chunk is exactly the per-chunk threshold this analyser exists to avoid.
+    tune_envelope: List[np.ndarray] = []
+    tune_indices: List[np.ndarray] = []
 
     from calibration import CeilingClippingScan, detect_clipping  # noqa: PLC0415
 
@@ -2706,18 +3043,41 @@ def _analyze_chunked(
         n_total += block.size
 
         pressure_block = calibration.to_pascals(block)
-        envelope, _ = compute_envelope(
+        envelope, frames = compute_envelope(
             bandpass_for_detection(pressure_block, sample_rate), env_window, env_hop
         )
         if envelope.size:
             peak_envelope = max(peak_envelope, float(envelope.max()))
             noise_estimates.append(float(np.percentile(envelope, 10.0)))
+            if config.auto_detect:
+                tune_envelope.append(envelope.astype(np.float32))
+                tune_indices.append((frames + core_start).astype(np.int64))
 
         # Assess a representative slice for the qualitative checks that need spectra
         if len(quality_chunks) < 8:
             quality_chunks.append(assess_signal_quality(block, sample_rate, calibration))
-        del block, pressure_block, envelope
+        del block, pressure_block, envelope, frames
         gc.collect()
+
+    tuning: Optional[DetectionTuning] = None
+    if config.auto_detect and tune_envelope:
+        progress(16, "Measuring detection settings")
+        tuning = autotune_from_envelope(
+            np.concatenate(tune_envelope).astype(np.float64),
+            np.concatenate(tune_indices),
+            sample_rate, env_hop,
+            expected_shots=config.expected_shots,
+        )
+        logger.info("%s", tuning.summary().strip())
+    tune_envelope.clear()
+    tune_indices.clear()
+    gc.collect()
+    resolved = resolve_detection(config, tuning)
+
+    context_frames = max(
+        int(CHUNK_CONTEXT_S * sample_rate),
+        int(3.0 * (resolved.pre_ms + resolved.post_ms) * sample_rate / 1000.0),
+    )
 
     quality = _merge_quality(
         quality_chunks, calibration,
@@ -2728,19 +3088,18 @@ def _analyze_chunked(
     )
 
     peak_dB = float(amplitude_to_dB_SPL(max(peak_envelope, 1e-12)))
-    if config.detection_threshold_dB is not None:
-        absolute_threshold = float(config.detection_threshold_dB)
+    if resolved.threshold_dB is not None:
+        absolute_threshold = float(resolved.threshold_dB)
         mode = "absolute"
     else:
-        relative = config.threshold_relative_dB if config.threshold_relative_dB is not None else 30.0
-        absolute_threshold = peak_dB - float(relative)
+        absolute_threshold = peak_dB - float(resolved.threshold_relative_dB or 0.0)
         mode = "relative (resolved globally over all chunks)"
     logger.info("Chunked detection threshold: %.1f dB (%s), global envelope peak %.1f dB",
                 absolute_threshold, mode, peak_dB)
 
     # ---- Pass 2: detection on overlapping chunks, keeping each chunk's core ----
-    pre_samples = int(config.pre_shot_ms * sample_rate / 1000.0)
-    post_samples = int(config.post_shot_ms * sample_rate / 1000.0)
+    pre_samples = int(resolved.pre_ms * sample_rate / 1000.0)
+    post_samples = int(resolved.post_ms * sample_rate / 1000.0)
     shots: List[ShotEvent] = []
     n_candidates = 0
     n_suppressed = 0
@@ -2759,9 +3118,9 @@ def _analyze_chunked(
         found = detect_shots(
             pressure_block, sample_rate,
             threshold_dB=absolute_threshold,
-            pre_ms=config.pre_shot_ms,
-            post_ms=config.post_shot_ms,
-            refractory_ms=config.refractory_ms,
+            pre_ms=resolved.pre_ms,
+            post_ms=resolved.post_ms,
+            refractory_ms=resolved.refractory_ms,
             max_shots=config.max_shots,
             full_scale_dB=calibration.full_scale_dB if calibration.calibrated else None,
             samples_FS=block,
@@ -2800,7 +3159,7 @@ def _analyze_chunked(
 
     # Deduplicate across seams (an event within one refractory period of the last)
     shots.sort(key=lambda s: s.time_s)
-    refractory_samples = max(1, int(config.refractory_ms * sample_rate / 1000.0))
+    refractory_samples = max(1, int(resolved.refractory_ms * sample_rate / 1000.0))
     deduped: List[ShotEvent] = []
     for shot in shots:
         if deduped and (shot.index - deduped[-1].index) < refractory_samples:
@@ -2862,6 +3221,7 @@ def _analyze_chunked(
         "quality": quality,
         "shots": shots,
         "detection": detection,
+        "resolved_detection": resolved,
         "shot_metrics": shot_metrics,
         "samples_FS": None,
         "pressure": None,
@@ -3062,10 +3422,29 @@ def _generate_plots(
         result = func(*args, **kwargs)
         return result[0] if isinstance(result, tuple) else result
 
+    # ---- The span the full-recording figures cover ----
+    #
+    # A shot is a few hundred milliseconds. Drawn against a recording that is
+    # mostly the walk to the line, it is a hairline. So these figures default to
+    # the shot string, and their titles say which span they are of.
+    focus = _plot_focus(config, shots, total_frames, sample_rate)
+    view_start, view_stop = (focus.start, focus.end) if focus.applied else (0, total_frames)
+    # The record is written after this function returns, so the interface can
+    # read which span its charts cover instead of assuming the whole file.
+    if isinstance(record.get("settings"), dict):
+        record["settings"]["plot_focus"] = focus.to_dict()
+    if focus.applied:
+        say(f"    figures cover {focus.start_s:.2f}-{focus.end_s:.2f} s, the shot string "
+            f"({focus.removed_s:.1f} s outside it is not drawn)")
+        artifacts_span = f" ({focus.start_s:.2f}\u2013{focus.end_s:.2f} s)"
+    else:
+        artifacts_span = ""
+
     # ---- Full-recording waveform ----
     with _plot_step("Full waveform", run_warnings):
         time_axis, pressure_plot = _waveform_for_display(
-            reader, calibration, sample_rate, total_frames, shots
+            reader, calibration, sample_rate, total_frames, shots,
+            frame_start=view_start, frame_stop=view_stop,
         )
         if time_axis.size:
             saved = False
@@ -3073,14 +3452,14 @@ def _generate_plots(
                 path = out_dir / "waveform_full.html"
                 if plot_module.save_interactive_waveform_html(
                     path, time_axis, pressure_plot, shots=shots,
-                    title=f"Pressure Waveform: {wav_path.name}",
+                    title=f"Pressure Waveform: {wav_path.name}{artifacts_span}",
                 ):
                     artifacts["waveform_html"] = path.name
                     saved = True
             if static_formats:
                 figure, _ = plot_module.plot_waveform_pa(
                     time_axis, pressure_plot, shots=shots,
-                    title=f"Pressure Waveform: {wav_path.name}",
+                    title=f"Pressure Waveform: {wav_path.name}{artifacts_span}",
                 )
                 for path in plot_module.save_figure(
                     figure, out_dir / "waveform_full", formats=static_formats
@@ -3099,6 +3478,7 @@ def _generate_plots(
             stft = _spectrogram_for_display(
                 reader, config, calibration, sample_rate, total_frames,
                 nperseg=nperseg, noverlap=noverlap, weighting=weighting, chunked=chunked,
+                frame_start=view_start, frame_stop=view_stop,
             )
             if stft is None:
                 raise RuntimeError("the recording is shorter than one FFT window")
@@ -3119,13 +3499,13 @@ def _generate_plots(
                 path = out_dir / f"{key}_full.html"
                 if plot_module.save_interactive_spectrogram_html(
                     path, stft, shots=shots,
-                    title=f"{weighting}-Weighted Spectrogram: {wav_path.name}",
+                    title=f"{weighting}-Weighted Spectrogram: {wav_path.name}{artifacts_span}",
                 ):
                     artifacts[f"{key}_html"] = path.name
             if static_formats:
                 figure, _ = plot_module.plot_spectrogram_dB(
                     stft, shots=shots,
-                    title=f"{weighting}-Weighted Spectrogram: {wav_path.name}",
+                    title=f"{weighting}-Weighted Spectrogram: {wav_path.name}{artifacts_span}",
                 )
                 for path in plot_module.save_figure(
                     figure, out_dir / f"{key}_full", formats=static_formats
@@ -3143,7 +3523,8 @@ def _generate_plots(
     if config.compute_bands:
         with _plot_step("1/3-octave band heatmap", run_warnings):
             times, freqs, levels = _bands_for_display(
-                reader, config, calibration, sample_rate, total_frames, chunked
+                reader, config, calibration, sample_rate, total_frames, chunked,
+                frame_start=view_start, frame_stop=view_stop,
             )
             if times.size:
                 # Emitted BEFORE the figure branch: a matplotlib failure below
@@ -3165,7 +3546,7 @@ def _generate_plots(
                 if static_formats:
                     figure, _ = plot_module.plot_third_octave_heatmap(
                         times, freqs, levels, shots=shots,
-                        title=f"1/3-Octave Band Levels: {wav_path.name}",
+                        title=f"1/3-Octave Band Levels: {wav_path.name}{artifacts_span}",
                     )
                     for path in plot_module.save_figure(
                         figure, out_dir / "bands_full", formats=static_formats
@@ -3340,26 +3721,74 @@ def _plotly_available() -> bool:
         return False
 
 
+def _view_bounds(
+    frame_start: int, frame_stop: Optional[int], total_frames: int
+) -> Tuple[int, int]:
+    """Clamp a requested display span to the recording, never returning an empty one."""
+    start = max(0, min(int(frame_start), max(0, total_frames - 1)))
+    stop = total_frames if frame_stop is None else min(int(frame_stop), total_frames)
+    if stop <= start:
+        return 0, total_frames
+    return start, stop
+
+
+def _plot_focus(
+    config: AnalysisConfig,
+    shots: Sequence[ShotEvent],
+    total_frames: int,
+    sample_rate: int,
+) -> TrimSpan:
+    """
+    The part of the recording the full-recording figures should show.
+
+    A range recording is mostly not shooting. Drawn end to end, five shots in a
+    ten-minute file are five hairlines against a flat rule, and the spectrogram
+    that should show a muzzle blast's decay shows nine minutes of wind. So the
+    figures default to the span that holds the string - which is what the
+    figures are of - and say so in their titles. Every metric is still computed
+    from the whole recording; this is the picture only.
+
+    Returns an unapplied span when there is nothing to focus on, which
+    TrimSpan.reason explains.
+    """
+    if config.plot_span == "full":
+        return TrimSpan(
+            start=0, end=int(total_frames), sample_rate=int(sample_rate),
+            n_shots=len(shots), original_samples=int(total_frames),
+            reason="the whole recording was requested",
+        )
+    return find_shot_string_span(
+        shots, total_frames, sample_rate, margin_s=PLOT_FOCUS_MARGIN_S
+    )
+
+
 def _waveform_for_display(
     reader,
     calibration: Calibration,
     sample_rate: int,
     total_frames: int,
     shots: Sequence[ShotEvent],
+    *,
+    frame_start: int = 0,
+    frame_stop: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build a display waveform: full resolution around every shot, thinned elsewhere.
 
-    This affects the picture only. Every metric is computed from every sample.
+    frame_start/frame_stop restrict the picture to part of the recording; the
+    time axis stays absolute, so a focused figure still reads in the
+    recording's own clock. This affects the picture only. Every metric is
+    computed from every sample.
     """
-    step = max(1, total_frames // MAX_WAVEFORM_POINTS)
+    view_start, view_stop = _view_bounds(frame_start, frame_stop, total_frames)
+    step = max(1, (view_stop - view_start) // MAX_WAVEFORM_POINTS)
     pre = int(WAVEFORM_FULLRES_PRE_S * sample_rate)
     post = int(WAVEFORM_FULLRES_POST_S * sample_rate)
 
     regions: List[Tuple[int, int]] = []
     for shot in shots:
-        start = max(0, shot.index - pre)
-        stop = min(total_frames, shot.index + post)
+        start = max(view_start, shot.index - pre)
+        stop = min(view_stop, shot.index + post)
         if stop > start:
             regions.append((start, stop))
     regions.sort()
@@ -3389,12 +3818,12 @@ def _waveform_for_display(
         times.append((start + np.arange(block.size)) / sample_rate)
         values.append(calibration.to_pascals(block))
 
-    cursor = 0
+    cursor = view_start
     for start, stop in merged:
         thinned(cursor, start)
         full(start, stop)
         cursor = stop
-    thinned(cursor, total_frames)
+    thinned(cursor, view_stop)
 
     if not times:
         return np.array([]), np.array([])
@@ -3417,6 +3846,8 @@ def _spectrogram_for_display(
     noverlap: int,
     weighting: str,
     chunked: bool,
+    frame_start: int = 0,
+    frame_stop: Optional[int] = None,
 ) -> Optional[STFTResult]:
     """
     Compute a full-recording spectrogram, chunk by chunk when the file is long.
@@ -3424,8 +3855,11 @@ def _spectrogram_for_display(
     The result is thinned to MAX_SPECTROGRAM_FRAMES for display; every metric is
     computed elsewhere, from the full-rate signal.
     """
+    view_start, view_stop = _view_bounds(frame_start, frame_stop, total_frames)
+    view_frames = view_stop - view_start
+
     if not chunked:
-        block = reader(0, total_frames)
+        block = reader(view_start, view_frames)
         if block.size < nperseg:
             return None
         stft = analyze_stft(
@@ -3433,6 +3867,7 @@ def _spectrogram_for_display(
             nperseg=nperseg, noverlap=noverlap, window=config.stft_window,
             weighting=weighting, calibrated=calibration.calibrated,
         )
+        stft.time_s = stft.time_s + view_start / sample_rate
         return _thin_spectrogram(stft)
 
     chunk_frames = max(nperseg * 4, int(CHUNK_DURATION_S * sample_rate))
@@ -3441,7 +3876,9 @@ def _spectrogram_for_display(
     freqs = np.array([])
     template: Optional[STFTResult] = None
 
-    for _rs, _re, core_start, core_stop in _chunk_plan(total_frames, chunk_frames, 0):
+    for _rs, _re, core_start, core_stop in _chunk_plan(view_frames, chunk_frames, 0):
+        core_start += view_start
+        core_stop += view_start
         block = reader(core_start, core_stop - core_start)
         if block.size < nperseg:
             continue
@@ -3647,6 +4084,8 @@ def _bands_for_display(
     sample_rate: int,
     total_frames: int,
     chunked: bool,
+    frame_start: int = 0,
+    frame_stop: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Band-level time history for the heatmap.
@@ -3665,12 +4104,16 @@ def _bands_for_display(
             hop_ms=config.band_hop_ms,
         )
 
+    view_start, view_stop = _view_bounds(frame_start, frame_stop, total_frames)
+    view_frames = view_stop - view_start
+
     if not chunked:
-        block = reader(0, total_frames)
+        block = reader(view_start, view_frames)
         if block.size == 0:
             return np.array([]), analyzer.center_frequencies, np.array([[]])
         result = analyze(block)
-        return result["time_s"], result["center_frequencies"], result["band_levels_dB"]
+        return (result["time_s"] + view_start / sample_rate,
+                result["center_frequencies"], result["band_levels_dB"])
 
     context_frames = int(1.0 * sample_rate)
     chunk_frames = max(1, int(CHUNK_DURATION_S * sample_rate))
@@ -3678,9 +4121,11 @@ def _bands_for_display(
     levels: List[np.ndarray] = []
 
     for read_start, read_stop, core_start, core_stop in _chunk_plan(
-        total_frames, chunk_frames, context_frames
+        view_frames, chunk_frames, context_frames
     ):
-        read_start = max(0, core_start - context_frames)   # leading context only
+        core_start += view_start
+        core_stop += view_start
+        read_start = max(view_start, core_start - context_frames)   # leading context only
         block = reader(read_start, core_stop - read_start)
         if block.size == 0:
             continue
@@ -3815,17 +4260,27 @@ Exit codes: 0 ok, 1 error, 2 no shots detected, 3 measurement inadmissible.
                       help="Average all channels. Destroys a multi-microphone measurement; "
                            "never the default.")
 
-    det = parser.add_argument_group("Shot detection")
+    det = parser.add_argument_group(
+        "Shot detection (measured from the recording unless you say otherwise)"
+    )
+    det.add_argument("--no-auto-detect", dest="auto_detect", action="store_false",
+                     help="Do not measure the detection settings; use the values below "
+                          "or their defaults.")
+    det.set_defaults(auto_detect=True)
+    det.add_argument("--expected-shots", type=int, default=None, metavar="N",
+                     help="Rounds you know were fired. Preferred when a threshold "
+                          "produces it; never forced when none does.")
     det.add_argument("--threshold-dB", type=float, default=None, metavar="dB",
                      help="Absolute detection threshold; requires a real calibration.")
     det.add_argument("--threshold-relative-dB", type=float, default=None, metavar="dB",
-                     help="Detection threshold this many dB below the loudest event. Default: 30.")
-    det.add_argument("--refractory-ms", type=float, default=200.0, metavar="ms",
-                     help="Minimum spacing between shots. Default: 200.")
-    det.add_argument("--pre-ms", type=float, default=50.0, metavar="ms",
-                     help="Window before each peak. Default: 50.")
-    det.add_argument("--post-ms", type=float, default=200.0, metavar="ms",
-                     help="Window after each peak. Default: 200.")
+                     help="Detection threshold this many dB below the loudest event. "
+                          "Overrides the measured value.")
+    det.add_argument("--refractory-ms", type=float, default=None, metavar="ms",
+                     help="Minimum spacing between shots. Overrides the measured value.")
+    det.add_argument("--pre-ms", type=float, default=None, metavar="ms",
+                     help="Window before each peak. Overrides the measured value.")
+    det.add_argument("--post-ms", type=float, default=None, metavar="ms",
+                     help="Window after each peak. Overrides the measured value.")
     det.add_argument("--min-shots", type=int, default=0, metavar="N",
                      help="Warn if fewer than N shots are found. Default: 0.")
     det.add_argument("--max-shots", type=int, default=1000, metavar="N",
@@ -3865,6 +4320,9 @@ Exit codes: 0 ok, 1 error, 2 no shots detected, 3 measurement inadmissible.
                      help="Plot formats, comma-separated (png, pdf, svg, html...). Default: png.")
     out.add_argument("--no-plots", action="store_true",
                      help="Write data artifacts only; draw nothing.")
+    out.add_argument("--plot-span", type=str, default="shots", choices=["shots", "full"],
+                     help="Span the full-recording figures cover: the shot string, or "
+                          "the whole file. Metrics are unaffected. Default: shots.")
     out.add_argument("--reference", type=Path, default=None, metavar="DIR",
                      help="Previous UNSUPPRESSED analysis directory; computes insertion loss.")
     out.add_argument("--verbose", "-v", action="store_true", help="Debug-level diagnostics.")
@@ -3872,6 +4330,11 @@ Exit codes: 0 ok, 1 error, 2 no shots detected, 3 measurement inadmissible.
     out.add_argument("--probe", action="store_true",
                      help="Describe the input file as JSON and exit. Reads headers only: "
                           "no decoding, no extraction, no analysis.")
+    out.add_argument("--detect-only", action="store_true",
+                     help="Detect shots and print what was found as JSON, then exit. No "
+                          "metrics, no figures, no output directory, and no calibration "
+                          "needed - every level is dB re FS. Use it to see what a "
+                          "detection setting does before committing to a run.")
 
     meta = parser.add_argument_group("Test metadata (recorded with the result)")
     meta.add_argument("--metadata", type=Path, default=None, metavar="FILE",
@@ -3950,9 +4413,16 @@ def _config_from_args(args: argparse.Namespace, typed: set, warnings: List[str])
           always=always and args.threshold_dB is not None)
     apply("--threshold-relative-dB", "threshold_relative_dB", args.threshold_relative_dB,
           always=always and args.threshold_relative_dB is not None)
-    apply("--refractory-ms", "refractory_ms", args.refractory_ms, always=always)
-    apply("--pre-ms", "pre_shot_ms", args.pre_ms, always=always)
-    apply("--post-ms", "post_shot_ms", args.post_ms, always=always)
+    # Detection knobs are "measure it" until named, so they are applied only
+    # when actually typed - `always` would write None over a config file's value.
+    apply("--refractory-ms", "refractory_ms", args.refractory_ms,
+          always=always and args.refractory_ms is not None)
+    apply("--pre-ms", "pre_shot_ms", args.pre_ms, always=always and args.pre_ms is not None)
+    apply("--post-ms", "post_shot_ms", args.post_ms, always=always and args.post_ms is not None)
+    apply("--no-auto-detect", "auto_detect", bool(args.auto_detect),
+          always=always and not args.auto_detect)
+    apply("--expected-shots", "expected_shots", args.expected_shots,
+          always=always and args.expected_shots is not None)
     apply("--min-shots", "min_shots", args.min_shots, always=always)
     apply("--max-shots", "max_shots", args.max_shots, always=always)
 
@@ -3970,6 +4440,7 @@ def _config_from_args(args: argparse.Namespace, typed: set, warnings: List[str])
     apply("--no-per-shot", "save_per_shot_plots", not args.no_per_shot,
           always=always and args.no_per_shot)
     apply("--no-plots", "make_plots", not args.no_plots, always=always and args.no_plots)
+    apply("--plot-span", "plot_span", args.plot_span, always=always)
     apply("--formats", "plot_formats", validate_formats(args.formats), always=always)
 
     if overrides:
@@ -4087,6 +4558,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = probe_input(Path(args.input))
         print(json.dumps(result))
         return EXIT_OK if result.get("readable") else EXIT_ERROR
+
+    # Detection only, before any calibration or output directory is resolved:
+    # the operator is looking at their recording, not measuring it yet.
+    if args.detect_only:
+        if args.input is None:
+            print(json.dumps({"readable": False, "problem": "No file was given to detect in."}))
+            return EXIT_ERROR
+        preview = detect_preview(
+            Path(args.input),
+            channel=args.channel,
+            auto_detect=args.auto_detect,
+            expected_shots=args.expected_shots,
+            threshold_relative_dB=args.threshold_relative_dB,
+            refractory_ms=args.refractory_ms,
+            pre_ms=args.pre_ms,
+            post_ms=args.post_ms,
+        )
+        print(json.dumps(preview))
+        return EXIT_OK if preview.get("readable") else EXIT_ERROR
 
     try:
         store = profiles_path(args.profiles_file)

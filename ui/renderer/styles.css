@@ -1084,6 +1084,22 @@ hr.rule {
 
 .fieldset + .fieldset { margin-top: var(--space-6); }
 
+/* A fieldset used purely to make a group of controls disable together, with no
+   legend and no box of its own. `display` is set by the layout class beside it,
+   so nothing here may set it. */
+.fieldset-bare { border: 0; padding: 0; margin: 0; min-width: 0; }
+
+/* A disabled group is dimmed rather than hidden: an operator should be able to
+   read what the other mode would do without switching to it to find out. */
+.fieldset:disabled,
+.fieldset-bare:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fieldset:disabled .field-hint,
+.fieldset-bare:disabled .field-hint { color: var(--text-3); }
+
 .fieldset-legend {
   display: flex;
   align-items: center;

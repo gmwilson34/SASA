@@ -124,6 +124,7 @@ const NUMERIC_INPUTS = {
   'stft-overlap':   { min: 0,     max: 95,     label: 'STFT overlap' },
   'band-low':       { min: 10,    max: 1000,   label: 'Lowest band centre' },
   'band-high':      { min: 1000,  max: 40000,  label: 'Highest band centre' },
+  'expected-shots': { min: 1,     max: 1000,   label: 'Rounds fired', integer: true },
   'hazard-rounds':  { min: 1,     max: 100000, label: 'Rounds per working day', integer: true },
   'md-barrel':      { min: 1,     max: 60,     label: 'Barrel length' },
   'md-distance':    { min: 0.1,   max: 100,    label: 'Distance' },
@@ -136,15 +137,21 @@ const NUMERIC_INPUTS = {
 };
 
 /* Analysis settings persisted between sessions, with their factory values.
-   Threshold is 20 dB below peak; post-trigger is 500 ms because B-duration
-   truncates at 200 ms on most centrefire shots. */
+
+   The manual values below are the starting point for someone who switches
+   detection to Manual. Under Automatic - the default - none of them is sent:
+   the engine measures each one from the recording, so a stale number in a
+   control the operator never opened cannot reach a run. */
 const SETTING_DEFAULTS = {
+  'detect-mode':     'auto',
+  'expected-shots':  '',
   'threshold-mode':  'relative',
   'threshold-value': '20',
   'refractory-ms':   '200',
   'min-snr':         '20',
   'pre-ms':          '20',
   'post-ms':         '500',
+  'plot-span':       'shots',
   'stft-nperseg':    '2048',
   'stft-overlap':    '75',
   'stft-window':     'hann',
@@ -205,9 +212,11 @@ const CONFIG_TO_FIELD = {
   refractoryMs:        { field: null,               input: 'refractory-ms' },
   preMs:               { field: null,               input: 'pre-ms' },
   postMs:              { field: null,               input: 'post-ms' },
+  expectedShots:       { field: 'field-expected-shots', input: 'expected-shots' },
   overlapFraction:     { field: null,               input: 'stft-overlap' },
   nperseg:             { field: null,               input: 'stft-nperseg' },
   formats:             { field: null,               input: 'plot-format' },
+  plotSpan:            { field: null,               input: 'plot-span' },
   outputDir:           { field: null,               input: 'setting-output-dir' },
   calDesc:             { field: null,               input: 'cal-description' },
 };
@@ -819,6 +828,8 @@ function render() {
   renderInput();
   renderCalibration();
   renderMetadataCompleteness();
+  renderDetectionMode();
+  renderDetectPreview();
   renderSettingsDerived();
   renderBlockers();
   renderFlow();
@@ -1507,6 +1518,9 @@ async function probeInput(filePath) {
   if (!filePath) return;
   state.input.probing = true;
   state.input.probe = null;
+  // A preview describes ONE recording. Carrying it across to another would put
+  // the previous file's shot count under the new file's name.
+  clearDetectPreview();
   commit();
 
   const requested = filePath;
@@ -2062,12 +2076,22 @@ function debounce(fn, wait) {
 
 /* ---- detection and analysis settings ------------------------------------ */
 
+/* Radio groups have no single element to read, so they are named here and
+   handled by their checked member rather than by id. */
+const RADIO_SETTINGS = {
+  'threshold-mode': { ids: ['threshold-mode-relative', 'threshold-mode-absolute'],
+                      values: ['relative', 'absolute'] },
+  'detect-mode':    { ids: ['detect-mode-auto', 'detect-mode-manual'],
+                      values: ['auto', 'manual'] },
+};
+
 function settingsValues() {
   const out = {};
   for (const key of Object.keys(SETTING_DEFAULTS)) {
-    if (key === 'threshold-mode') {
-      const relative = $('threshold-mode-relative');
-      out[key] = relative && relative.checked ? 'relative' : 'absolute';
+    const radio = RADIO_SETTINGS[key];
+    if (radio) {
+      const chosen = radio.ids.findIndex(id => { const el = $(id); return el && el.checked; });
+      out[key] = radio.values[chosen >= 0 ? chosen : 0];
       continue;
     }
     const el = $(key);
@@ -2079,13 +2103,13 @@ function settingsValues() {
 
 function applySettings(values) {
   for (const [key, value] of Object.entries(values || {})) {
-    if (key === 'threshold-mode') {
-      const relative = $('threshold-mode-relative');
-      const absolute = $('threshold-mode-absolute');
-      if (relative && absolute) {
-        relative.checked = value !== 'absolute';
-        absolute.checked = value === 'absolute';
-      }
+    const radio = RADIO_SETTINGS[key];
+    if (radio) {
+      const wanted = radio.values.indexOf(String(value));
+      radio.ids.forEach((id, i) => {
+        const el = $(id);
+        if (el) el.checked = i === (wanted >= 0 ? wanted : 0);
+      });
       continue;
     }
     const el = $(key);
@@ -2098,6 +2122,299 @@ function applySettings(values) {
 function thresholdMode() {
   const absolute = $('threshold-mode-absolute');
   return absolute && absolute.checked ? 'absolute' : 'relative';
+}
+
+function detectMode() {
+  const manual = $('detect-mode-manual');
+  return manual && manual.checked ? 'manual' : 'auto';
+}
+
+/* ---- detection preview ---------------------------------------------------
+
+   Runs detection and nothing else, so a setting can be moved against the
+   answer instead of against a guess. It needs no calibration — detection is
+   relative to the recording's own peak — so it is available the moment a file
+   has been chosen, which is the moment the question is actually being asked.
+
+   Every level it shows is dB re FS and is labelled as such. That is not a
+   limitation to apologise for: an uncalibrated recording HAS no sound pressure
+   level, and this view exists to find events, not to measure them. */
+
+/** The last preview, or null. Held here rather than in state so a repaint of
+    the settings page does not re-run detection. */
+let detectPreview = null;
+let detectPreviewBusy = false;
+
+/** The settings the held preview was produced with, so staleness is visible. */
+let detectPreviewKey = null;
+
+/** Guard so a deferred repaint cannot queue itself more than once. */
+let detectPreviewRedrawPending = false;
+
+function detectPreviewSettingsKey() {
+  const mode = detectMode();
+  if (mode === 'auto') {
+    return `${state.input.path}|auto|${readNumber('expected-shots').value ?? ''}`;
+  }
+  return [state.input.path, 'manual', thresholdMode(),
+    readNumber('threshold-value').value, readNumber('refractory-ms').value,
+    readNumber('pre-ms').value, readNumber('post-ms').value,
+    readNumber('expected-shots').value ?? ''].join('|');
+}
+
+async function runDetectPreview() {
+  const filePath = state.input.path;
+  if (!filePath) {
+    toast({ title: 'No recording chosen', text: 'Choose a recording first.', tone: 'warn' });
+    return;
+  }
+  if (detectPreviewBusy) return;
+
+  const params = new URLSearchParams({ path: filePath });
+  const expected = readNumber('expected-shots');
+  if (expected.ok && !expected.empty) params.set('expectedShots', String(expected.value));
+
+  if (detectMode() === 'manual') {
+    params.set('autoDetect', 'false');
+    // An absolute threshold means nothing without a calibration, and the
+    // preview has none. Say so rather than sending a value that will be
+    // refused or, worse, silently reinterpreted.
+    if (thresholdMode() === 'absolute') {
+      toast({
+        title: 'Absolute threshold cannot be previewed',
+        text: 'The preview runs uncalibrated, so an absolute level has nothing to be '
+          + 'absolute against. Switch to a relative threshold to preview, or run the analysis.',
+        tone: 'warn',
+      });
+      return;
+    }
+    for (const [id, key] of [['threshold-value', 'thresholdRelativeDb'],
+      ['refractory-ms', 'refractoryMs'], ['pre-ms', 'preMs'], ['post-ms', 'postMs']]) {
+      const value = readNumber(id);
+      if (value.ok && !value.empty) params.set(key, String(value.value));
+    }
+  }
+
+  const key = detectPreviewSettingsKey();
+  detectPreviewBusy = true;
+  commit();
+
+  let payload = null;
+  try {
+    const response = await fetch(`/api/detect?${params.toString()}`);
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  // The operator may have chosen a different recording while this was running.
+  if (state.input.path !== filePath) { detectPreviewBusy = false; commit(); return; }
+
+  detectPreviewBusy = false;
+  detectPreview = (payload && typeof payload === 'object') ? payload : {
+    readable: false,
+    problem: 'The local service did not answer the detection request.',
+  };
+  detectPreviewKey = key;
+  commit();
+}
+
+/** Wipe the preview when it can no longer describe the current recording. */
+function clearDetectPreview() {
+  detectPreview = null;
+  detectPreviewKey = null;
+}
+
+/* The pill carries an icon with its tone, so the count is never signalled by
+   colour alone. setTone() sets the href, so the <use> has to exist first. */
+function setPreviewPill(text, tone) {
+  const pill = $('detect-preview-pill');
+  if (!pill) return;
+  pill.textContent = '';
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'icon');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'use'));
+  pill.append(svg, document.createTextNode(text));
+  setTone(pill, tone);
+}
+
+function renderDetectPreview() {
+  const card = $('card-detect-preview');
+  if (!card) return;
+
+  const button = $('btn-detect-preview');
+  if (button) {
+    setDisabled(button, !state.input.path || detectPreviewBusy);
+    setRaw(button.lastChild, detectPreviewBusy ? 'Finding the shots…' : 'Find the shots');
+  }
+
+  show(card, Boolean(detectPreview) || detectPreviewBusy);
+  if (!detectPreview) {
+    if (detectPreviewBusy) {
+      setRaw($('detect-preview-caption'), 'Detecting…');
+      setPreviewPill('Working…', 'info');
+    }
+    return;
+  }
+
+  const preview = detectPreview;
+  const notes = $('detect-preview-notes');
+  if (notes) notes.textContent = '';
+
+  if (!preview.readable) {
+    setPreviewPill('Could not read', 'danger');
+    setRaw($('detect-preview-caption'), preview.problem || 'That recording could not be examined.');
+    invalidateChart($('detect-preview-canvas'));
+    return;
+  }
+
+  const n = isNum(preview.n_shots) ? preview.n_shots : 0;
+  const stale = detectPreviewKey !== detectPreviewSettingsKey();
+  setPreviewPill(stale ? `${count(n, 'shot')} — settings have changed since` : count(n, 'shot'),
+    stale ? 'warn' : (n > 0 ? 'ok' : 'warn'));
+
+  const settings = preview.settings || {};
+  setRaw($('detect-preview-subtitle'),
+    `${fmt(settings.threshold_relative_dB, 0)} dB below peak · `
+    + `${fmt(settings.refractory_ms, 0)} ms refractory · `
+    + `${fmt(settings.pre_ms, 0)}/${fmt(settings.post_ms, 0)} ms window`
+    + ` · levels in ${preview.level_unit || 'dB re FS'}`);
+
+  drawDetectPreviewChart();
+
+  const shots = Array.isArray(preview.shots) ? preview.shots : [];
+  const times = shots.slice(0, 12).map(s => `${fmt(s.time_s, 2)} s`);
+  setRaw($('detect-preview-caption'), shots.length
+    ? `${count(shots.length, 'shot')} at ${joinList(times)}`
+      + (shots.length > times.length ? ` and ${shots.length - times.length} more` : '')
+      + `. Peaks ${fmt(Math.min(...shots.map(s => s.peak_dBFS)), 1)} to `
+      + `${fmt(Math.max(...shots.map(s => s.peak_dBFS)), 1)} dBFS.`
+    : 'No events cleared the threshold. Widen it, or check that this recording contains gunfire.');
+
+  if (!notes) return;
+  const addNote = (text, tone) => {
+    const item = document.createElement('li');
+    item.className = `note note-${tone}`;
+    item.textContent = text;
+    notes.appendChild(item);
+  };
+
+  if (stale) {
+    addNote('The settings above have changed since this was run. Find the shots again to '
+      + 'see what they do.', 'warn');
+  }
+
+  const quality = preview.quality || {};
+  if (quality.ceiling_clipped) {
+    addNote(`The waveform is flat-topped at ${fmt(quality.ceiling_dBFS, 1)} dBFS — a limiter or `
+      + 'AGC was left on. Detection still works, but every level from this recording is a '
+      + 'lower bound and the analysis will refuse it.', 'error');
+  } else if (quality.clipped_runs > 0) {
+    addNote('The waveform reaches digital full scale. The true peaks are unknown and the '
+      + 'analysis will refuse this recording.', 'error');
+  }
+
+  const tuning = preview.tuning;
+  if (tuning && tuning.applied) {
+    for (const key of ['threshold', 'refractory', 'post']) {
+      if (tuning.basis && tuning.basis[key]) addNote(tuning.basis[key], 'info');
+    }
+    for (const note of (tuning.notes || [])) addNote(note, 'warn');
+  } else if (tuning && tuning.reason) {
+    addNote(`Settings could not be measured: ${tuning.reason}. The defaults were used.`, 'warn');
+  }
+
+  for (const warning of ((preview.detection || {}).warnings || [])) addNote(warning, 'warn');
+}
+
+/* The preview's own chart: the recording's envelope with a rule at each shot.
+   Deliberately plain — it answers "did it find the right events, and did it
+   find them in the right places", and nothing else. */
+function drawDetectPreviewChart() {
+  const canvas = $('detect-preview-canvas');
+  const preview = detectPreview;
+  if (!canvas || !preview || !preview.envelope) return;
+  chartRegistry.set('detect-preview-canvas', drawDetectPreviewChart);
+
+  // A canvas inside a step that is not on screen has no layout, and
+  // prepareCanvas() correctly refuses to paint into one. Come back on the next
+  // frame instead of leaving an empty box: the panel is shown one render
+  // before the browser has laid it out, and nothing else would repaint it
+  // until the window happened to be resized.
+  if (canvas.getBoundingClientRect().width < 1) {
+    if (!detectPreviewRedrawPending) {
+      detectPreviewRedrawPending = true;
+      requestAnimationFrame(() => {
+        detectPreviewRedrawPending = false;
+        drawDetectPreviewChart();
+      });
+    }
+    return;
+  }
+
+  const { lo, hi } = preview.envelope;
+  const columns = Math.min((lo || []).length, (hi || []).length);
+  if (columns < 2) { chartMessage(canvas, 'No waveform data'); return; }
+
+  const duration = preview.duration_s || 1;
+  const step = duration / Math.max(1, columns - 1);
+  const times = Array.from({ length: columns }, (_, i) => i * step);
+  const palette = chartPalette();
+
+  // The band between the column minimum and maximum IS the signal at this
+  // scale: a single line here would be a line through the middle of a blast,
+  // and the height of a blast is the whole point of looking.
+  drawXYChart(canvas, {
+    x: times,
+    xScale: 'linear',
+    xFormat: (v) => `${fmt(v, 2)} s`,
+    xTitle: 'Time (s)',
+    yTitle: 'Amplitude (full scale)',
+    unit: 'FS',
+    xNoun: 'recording',
+    zeroLine: true,
+    series: [{
+      label: 'Signal envelope',
+      color: palette.series[0],
+      kind: 'band',
+      alpha: 0.85,
+      lower: lo.slice(0, columns),
+      upper: hi.slice(0, columns),
+    }],
+    markers: (preview.shots || []).map(shot => ({
+      x: shot.time_s,
+      label: String(shot.shot_number),
+    })),
+  });
+}
+
+/* Show which controls are live, and say what the other mode would do.
+
+   Under Automatic the manual controls are disabled rather than hidden: an
+   operator who wants to know what the run will be sensitive to should be able
+   to see the alternative without having to switch modes to find it. */
+function renderDetectionMode() {
+  const manual = detectMode() === 'manual';
+  for (const id of ['manual-detection-group', 'threshold-mode-group']) {
+    const group = $(id);
+    if (group) group.disabled = !manual;
+  }
+  const note = $('detection-mode-note');
+  if (!note) return;
+
+  const expected = readNumber('expected-shots');
+  const rounds = (expected.ok && !expected.empty) ? Number(expected.value) : null;
+  if (manual) {
+    setRaw(note, 'Detection uses the values above. Nothing is measured from the recording'
+      + (rounds ? `, and the ${count(rounds, 'round')} you expect will not be checked against it.` : '.'));
+    note.dataset.state = 'manual';
+  } else {
+    setRaw(note, 'Detection settings will be measured from this recording'
+      + (rounds ? `, preferring a threshold that finds ${count(rounds, 'shot')}.` : '.')
+      + ' The result will report each number and how it was arrived at.');
+    note.dataset.state = 'auto';
+  }
 }
 
 function renderSettingsDerived() {
@@ -2149,7 +2466,7 @@ function renderSettingsDerived() {
 }
 
 function wireSettings() {
-  const ids = Object.keys(SETTING_DEFAULTS).filter(k => k !== 'threshold-mode');
+  const ids = Object.keys(SETTING_DEFAULTS).filter(k => !RADIO_SETTINGS[k]);
   for (const id of ids) {
     const el = $(id);
     if (!el) continue;
@@ -2161,9 +2478,14 @@ function wireSettings() {
     el.addEventListener('input', handler);
     el.addEventListener('change', handler);
   }
-  qsa('input[name="threshold-mode"]').forEach(radio => {
-    radio.addEventListener('change', () => { persistSettings(); commit(); });
-  });
+  for (const key of Object.keys(RADIO_SETTINGS)) {
+    qsa(`input[name="${key}"]`).forEach(radio => {
+      radio.addEventListener('change', () => { persistSettings(); commit(); });
+    });
+  }
+
+  const preview = $('btn-detect-preview');
+  if (preview) preview.addEventListener('click', () => { runDetectPreview(); });
 
   const restore = $('btn-load-defaults');
   if (restore) restore.addEventListener('click', async () => {
@@ -2329,17 +2651,29 @@ function buildRunConfig() {
   else config.filePath = state.input.path;
 
   // ---- detection ----
-  const threshold = readNumber('threshold-value');
-  if (threshold.ok && !threshold.empty) {
-    if (thresholdMode() === 'absolute') config.thresholdDb = threshold.value;
-    else config.thresholdRelativeDb = threshold.value;
-  } else problems.push(threshold.error || 'Threshold must have a value.');
+  //
+  // Under Automatic, NOTHING here is sent. The engine treats an absent value as
+  // "measure it", so passing the control's displayed number would silently
+  // override the measurement with whatever the form happened to be showing.
+  if (detectMode() === 'manual') {
+    config.noAutoDetect = true;
 
-  for (const [id, key] of [['refractory-ms', 'refractoryMs'], ['pre-ms', 'preMs'], ['post-ms', 'postMs']]) {
-    const value = readNumber(id);
-    if (value.ok && !value.empty) config[key] = value.value;
-    else problems.push(value.error || `${NUMERIC_INPUTS[id].label} must have a value.`);
+    const threshold = readNumber('threshold-value');
+    if (threshold.ok && !threshold.empty) {
+      if (thresholdMode() === 'absolute') config.thresholdDb = threshold.value;
+      else config.thresholdRelativeDb = threshold.value;
+    } else problems.push(threshold.error || 'Threshold must have a value.');
+
+    for (const [id, key] of [['refractory-ms', 'refractoryMs'], ['pre-ms', 'preMs'], ['post-ms', 'postMs']]) {
+      const value = readNumber(id);
+      if (value.ok && !value.empty) config[key] = value.value;
+      else problems.push(value.error || `${NUMERIC_INPUTS[id].label} must have a value.`);
+    }
   }
+
+  const expected = readNumber('expected-shots');
+  if (expected.ok && !expected.empty) config.expectedShots = expected.value;
+  else if (!expected.ok) problems.push(expected.error || 'Rounds fired must be a whole number.');
 
   // ---- spectral ----
   const nperseg = Number($('stft-nperseg') ? $('stft-nperseg').value : NaN);
@@ -2396,6 +2730,8 @@ function buildRunConfig() {
   // ---- output ----
   const formats = $('plot-format');
   if (formats && formats.value) config.formats = formats.value;
+  const span = $('plot-span');
+  if (span && span.value) config.plotSpan = span.value;
   const bands = $('opt-bands');
   if (bands && !bands.checked) config.noBands = true;
   const perShot = $('opt-per-shot-plots');
@@ -3308,6 +3644,36 @@ function validityChecks() {
   if (isNum(detection.n_suppressed_by_refractory) && detection.n_suppressed_by_refractory > 0) {
     push('refractory', 'Refractory suppressions',
       `${count(detection.n_suppressed_by_refractory, 'candidate')} discarded as too close together`, 'warn');
+  }
+
+  // Where the detection settings came from. A number that arrived by itself
+  // still has to be defensible, so the span it held over is stated with it.
+  const settings = metaBlock('settings');
+  const tuning = settings.detection_tuning;
+  if (tuning && tuning.applied) {
+    push('tuning', 'Detection settings',
+      `Measured — ${fmt(tuning.threshold_relative_dB, 0)} dB below peak, `
+      + `${fmt(tuning.refractory_ms, 0)} ms refractory, ${fmt(tuning.post_ms, 0)} ms window; `
+      + `the count holds from ${fmt(tuning.stable_from_dB, 0)} to ${fmt(tuning.stable_to_dB, 0)} dB below peak`,
+      'pass');
+  } else if (settings.auto_detect === false) {
+    push('tuning', 'Detection settings', 'Chosen by the operator; nothing was measured', 'warn');
+  } else if (tuning && tuning.reason) {
+    push('tuning', 'Detection settings', `Not measured — ${tuning.reason}`, 'warn');
+  }
+
+  const reflection = tuning && tuning.reflection;
+  if (reflection && reflection.detected) {
+    push('reflection', 'Repeated delay',
+      `Shots ${joinList((reflection.followers || []).map(String))} arrive `
+      + `${fmt(reflection.delay_ms, 0)} ms after a louder one and are ${fmt(reflection.drop_dB, 0)} dB `
+      + `quieter — the signature of a reflection, not of separate discharges`, 'warn');
+  }
+
+  if (tuning && tuning.expectation_met === false && isNum(tuning.expected_shots)) {
+    push('expected', 'Rounds expected',
+      `${count(tuning.expected_shots, 'shot')} expected, ${count(tuning.n_shots, 'event')} found; `
+      + `no threshold produced the expected count and none was forced`, 'warn');
   }
 
   // Truncated windows
@@ -5540,6 +5906,7 @@ const waveformCache = new Map();
 function resetChartState() {
   waveformRange = null;
   waveformFocus = '';
+  waveformOpenedAt = null;
   const jump = $('waveform-jump');
   if (jump) jump.value = '';
   for (const id of ['waveform-canvas', 'spectrogram-canvas', 'bands-canvas',
@@ -5592,6 +5959,17 @@ let waveformFocus = '';
 /** The visible time window, in seconds, or null for everything. */
 let waveformRange = null;
 
+/* The record whose stored opening span has already been applied.
+
+   The engine records which part of the recording holds the shot string, and
+   the chart OPENS there rather than on the whole file: five shots inside a
+   ten-minute range recording are five hairlines on a flat rule, and a reader
+   who has to discover that they need to zoom has already been misled once.
+   Every sample is still in the file, and "Whole recording" is one gesture
+   away — this decides the first view, not the only one. Applied once per
+   record so a deliberate zoom-out is not undone on the next repaint. */
+let waveformOpenedAt = null;
+
 /**
  * Choose the coarsest pyramid level that still puts a column in every pixel.
  *
@@ -5637,6 +6015,17 @@ function drawWaveformChart() {
   }
   show(image, false);
   show(canvas, true);
+
+  const recordKey = `${state.results.dir}::${(metaBlock('artifacts') || {}).waveform_envelope}`;
+  const openingSpan = envelope.focus;
+  if (waveformOpenedAt !== recordKey) {
+    waveformOpenedAt = recordKey;
+    if (openingSpan && openingSpan.applied
+        && isNum(openingSpan.start_s) && isNum(openingSpan.end_s)
+        && openingSpan.end_s > openingSpan.start_s) {
+      waveformRange = { t0: openingSpan.start_s, t1: openingSpan.end_s };
+    }
+  }
 
   const shots = Array.isArray(envelope.shots) ? envelope.shots : [];
   if (jump) {
@@ -5777,7 +6166,11 @@ function drawWaveformChart() {
     + `${count(columns, 'column')} at `
     + `${resolution < 1e-3 ? `${fmt(resolution * 1e6, 0)} µs` : `${fmt(resolution * 1e3, 2)} ms`} each, `
     + `drawn from ${sourceLabel}. Each column spans the highest and lowest sample in its `
-    + `slice, so the shaded band always contains the true peak.`);
+    + `slice, so the shaded band always contains the true peak.`
+    + (openingSpan && openingSpan.applied && isNum(openingSpan.removed_s) && openingSpan.removed_s > 0
+      ? ` The view opens on the shot string; the ${fmt(openingSpan.removed_s, 1)} s of recording `
+        + `outside it is still in the file, and “Whole recording” shows it.`
+      : ''));
   // What the trace IS depends on whether there is a calibration: with one it
   // is pressure, without one it is the recorded signal in full-scale units.
   // Naming it pressure either way would be a measurement claim.

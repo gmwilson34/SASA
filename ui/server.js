@@ -719,6 +719,73 @@ app.get('/api/probe', (req, res) => {
   );
 });
 
+// ── Detection preview ──
+//
+// Runs detection and nothing else, so the operator can move a setting against
+// the answer instead of against a guess. It needs no calibration and writes no
+// output; every level it returns is dB re FS.
+//
+// Longer than the probe's budget because this one decodes the file: extraction
+// of a video is cached after the first call, but the first call pays for it.
+const DETECT_TIMEOUT_MS = 120000;
+
+/* Query parameters the preview accepts, with the flag each becomes and the
+   range it must lie in. Values are REJECTED rather than clamped: a threshold
+   silently changed to fit is a different measurement from the one asked for. */
+const DETECT_PARAMS = [
+  { query: 'thresholdRelativeDb', flag: '--threshold-relative-dB', min: 0, max: 200 },
+  { query: 'refractoryMs', flag: '--refractory-ms', min: 0, max: 600000 },
+  { query: 'preMs', flag: '--pre-ms', min: 0, max: 600000 },
+  { query: 'postMs', flag: '--post-ms', min: 0, max: 600000 },
+  { query: 'expectedShots', flag: '--expected-shots', min: 1, max: 100000, integer: true },
+  { query: 'channel', flag: '--channel', min: 0, max: 1024, integer: true },
+];
+
+app.get('/api/detect', (req, res) => {
+  const requested = typeof req.query.path === 'string' ? req.query.path : '';
+  const resolved = resolveWithinRoots(requested, INPUT_ROOTS, { mustExist: true });
+  if (!resolved) {
+    return sendError(res, 400, 'bad-path',
+      'That file is not inside the SASA workspace, so it cannot be read.');
+  }
+  if (!isFile(resolved)) {
+    return sendError(res, 404, 'not-found', 'No such file.');
+  }
+
+  const args = [path.join(PYTHON_DIR, 'main.py'), '--detect-only', resolved];
+  for (const spec of DETECT_PARAMS) {
+    const raw = req.query[spec.query];
+    if (raw === undefined || raw === null || String(raw).trim() === '') continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < spec.min || value > spec.max
+        || (spec.integer && !Number.isInteger(value))) {
+      return sendError(res, 400, 'invalid-config',
+        `${spec.query} must be a number between ${spec.min} and ${spec.max}.`);
+    }
+    args.push(spec.flag, String(value));
+  }
+  if (String(req.query.autoDetect) === 'false') args.push('--no-auto-detect');
+
+  const python = new PythonBridge(PYTHON_DIR).findPython();
+  execFile(
+    python.path, args,
+    { timeout: DETECT_TIMEOUT_MS, maxBuffer: 8 << 20, cwd: PYTHON_DIR },
+    (err, stdout) => {
+      res.set('Cache-Control', 'no-store');
+      // As with the probe, a non-zero exit still carries the JSON that says
+      // why, so stdout is parsed whatever the exit code was.
+      let parsed = null;
+      try { parsed = JSON.parse(String(stdout || '').trim()); } catch { parsed = null; }
+      if (parsed && typeof parsed === 'object') return res.json(parsed);
+
+      const reason = err && err.killed
+        ? 'detection took longer than two minutes and was stopped'
+        : 'detection produced no answer';
+      return res.json({ readable: false, problem: `That file could not be examined: ${reason}.`, shots: [] });
+    },
+  );
+});
+
 // ── Unmatched API routes ──
 app.use('/api', (req, res) => sendError(res, 404, 'not-found', 'No such endpoint.'));
 

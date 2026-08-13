@@ -153,14 +153,17 @@ const NUMBER_FIELDS = {
 };
 
 const INTEGER_FIELDS = {
-  channel:   { flag: '--channel',   min: 0, max: 1024 },
-  noverlap:  { flag: '--noverlap',  min: 0, max: 1048576 },
-  minShots:  { flag: '--min-shots', min: 0, max: 100000 },
-  maxShots:  { flag: '--max-shots', min: 1, max: 100000 },
+  channel:       { flag: '--channel',        min: 0, max: 1024 },
+  noverlap:      { flag: '--noverlap',       min: 0, max: 1048576 },
+  minShots:      { flag: '--min-shots',      min: 0, max: 100000 },
+  maxShots:      { flag: '--max-shots',      min: 1, max: 100000 },
+  expectedShots: { flag: '--expected-shots', min: 1, max: 100000 },
 };
 
 const BOOLEAN_FLAGS = {
   uncalibrated: '--uncalibrated',
+  // Detection settings are measured from the recording unless this is set.
+  noAutoDetect: '--no-auto-detect',
   monoMix:      '--mono-mix',
   noBands:      '--no-bands',
   noTimeSeries: '--no-time-series',
@@ -174,6 +177,7 @@ const ENUM_FIELDS = {
   dtype:         { flag: '--dtype',          values: ['float32', 'float64'] },
   bandWeighting: { flag: '--band-weighting', values: ['fast', 'slow', 'impulse'] },
   channels:      { flag: '--channels',       values: ['all'] },
+  plotSpan:      { flag: '--plot-span',      values: ['shots', 'full'] },
 };
 
 const STRING_FIELDS = {

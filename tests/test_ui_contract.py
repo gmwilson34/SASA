@@ -105,6 +105,75 @@ def test_bridge_accepts_every_key_the_interface_sends():
     )
 
 
+# ---------------------------------------------------------------------------
+# Endpoints, not just config keys
+# ---------------------------------------------------------------------------
+#
+# The same drift happened one level up. /api/probe was added to the Node
+# development server and to the interface, and NOT to app.py, so in the
+# packaged application every request the setup page made for the recording's
+# own properties returned 404 — silently, because the interface treats an
+# unreachable probe as "nothing to say about this file". It was reachable in
+# development and missing in the shipped build, which is the worst place for a
+# difference to live.
+
+_ENDPOINT_RE = re.compile(r"""["'](/api/[a-z][a-z-]*)["']""")
+
+
+def interface_endpoints() -> set[str]:
+    """Every /api/... path the interface fetches."""
+    return set(_ENDPOINT_RE.findall(_RENDERER.read_text(encoding="utf-8")))
+
+
+def node_endpoints() -> set[str]:
+    """Every /api/... path the development server routes."""
+    source = (_REPO_ROOT / "ui" / "server.js").read_text(encoding="utf-8")
+    return set(re.findall(r"app\.(?:get|post)\(\s*'(/api/[a-z][a-z-]*)'", source))
+
+
+def packaged_endpoints() -> set[str]:
+    """Every /api/... path app.py routes."""
+    source = _SERVER.read_text(encoding="utf-8")
+    return set(re.findall(r"path == '(/api/[a-z][a-z-]*)'", source)) \
+        | set(re.findall(r"parsed\.path == '(/api/[a-z][a-z-]*)'", source))
+
+
+def test_the_packaged_app_serves_every_endpoint_the_interface_calls():
+    missing = sorted(interface_endpoints() - packaged_endpoints())
+    assert not missing, (
+        "the interface fetches these and app.py does not route them, so they 404 "
+        f"in the packaged application: {missing}"
+    )
+
+
+def test_the_development_server_serves_every_endpoint_the_interface_calls():
+    missing = sorted(interface_endpoints() - node_endpoints())
+    assert not missing, (
+        f"the interface fetches these and ui/server.js does not route them: {missing}"
+    )
+
+
+# Routes app.py offers that ui/server.js does not. These are not drift: the
+# packaged server exposes the run lifecycle over REST as well as over the
+# WebSocket, where the Node server uses the socket alone. Anything NOT listed
+# here that exists on one side only is drift, and the test below says so.
+_PACKAGED_ONLY_ENDPOINTS = {"/api/run", "/api/runs", "/api/cancel", "/api/report"}
+
+
+def test_no_endpoint_exists_on_only_one_server_by_accident():
+    """
+    An endpoint that exists only in development is a feature that works while
+    it is being written and stops working once it ships. That is how /api/probe
+    and /api/health came to 404 in the packaged application.
+    """
+    only_node = sorted(node_endpoints() - packaged_endpoints())
+    only_packaged = sorted(packaged_endpoints() - node_endpoints() - _PACKAGED_ONLY_ENDPOINTS)
+    assert not only_node, f"only in ui/server.js, so missing once packaged: {only_node}"
+    assert not only_packaged, (
+        f"only in app.py, so never exercised by a development run: {only_packaged}"
+    )
+
+
 @pytest.mark.parametrize("payload,expect_calibrated,expect_method", [
     ({"uncalibrated": True}, False, "uncalibrated"),
     ({"sensitivityMv": 12.5, "preampGainDb": 0.0, "adcFullScaleV": 1.0}, True, "recording_chain"),

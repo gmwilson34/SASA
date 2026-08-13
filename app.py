@@ -34,6 +34,7 @@ import hashlib
 import http.server
 import inspect
 import json
+import math
 import os
 import re
 import shutil
@@ -151,6 +152,15 @@ ANALYSIS_DIR = DATA_DIR / 'Audio' / 'analysis'
 EXTRACT_DIR = DATA_DIR / 'Audio' / 'extracted'
 
 PORT = int(os.environ.get('SASA_PORT', '3847'))
+
+# The WebSocket message contract this server speaks. Must match ui/server.js:
+# the interface reads it off the hello frame and off /api/health, and the two
+# back ends are behind the same renderer.
+PROTOCOL_VERSION = 1
+
+# For /api/health's uptime. Stamped at import, which is the same moment the
+# process starts for a packaged build.
+SERVER_STARTED_AT = time.time()
 
 # ── MIME map. Also the allow-list of file types /api/image will serve. ──
 MIME_MAP = {
@@ -1143,8 +1153,11 @@ _CONFIG_ALIASES: Dict[str, Tuple[str, ...]] = {
     'refractory_ms': ('refractory_ms',),
     'pre_ms': ('pre_shot_ms', 'pre_ms'),
     'post_ms': ('post_shot_ms', 'post_ms'),
+    'auto_detect': ('auto_detect',),
+    'expected_shots': ('expected_shots',),
     'nperseg': ('nperseg',),
     'overlap_fraction': ('overlap_fraction',),
+    'plot_span': ('plot_span',),
     'compute_bands': ('compute_bands',),
     'save_per_shot_plots': ('save_per_shot_plots',),
     'plot_formats': ('plot_formats',),
@@ -1308,6 +1321,19 @@ def build_analysis_config(config: dict, AnalysisConfig, Calibration, analyze_fn=
             _assign(kwargs, available, _CONFIG_ALIASES[alias_key], value)
             settings[alias_key] = value
 
+    # Detection settings are measured from the recording unless this is set.
+    # The inverted spelling matches the interface's control and the CLI flag;
+    # False must be honoured as "measure them", not treated as absent.
+    no_auto = _get_bool(config, 'noAutoDetect')
+    if no_auto is not None:
+        _assign(kwargs, available, _CONFIG_ALIASES['auto_detect'], not no_auto)
+        settings['auto_detect'] = not no_auto
+
+    expected = _get_int(config, 'expectedShots', minimum=1, maximum=100_000)
+    if expected is not None:
+        _assign(kwargs, available, _CONFIG_ALIASES['expected_shots'], expected)
+        settings['expected_shots'] = expected
+
     nperseg = _get_int(config, 'nperseg', minimum=64, maximum=1_048_576)
     if nperseg is not None:
         _assign(kwargs, available, _CONFIG_ALIASES['nperseg'], nperseg)
@@ -1327,6 +1353,14 @@ def build_analysis_config(config: dict, AnalysisConfig, Calibration, analyze_fn=
                               [{'field': 'dtype', 'message': 'Must be float32 or float64.'}])
         _assign(kwargs, available, _CONFIG_ALIASES['load_dtype'], dtype)
         settings['load_dtype'] = dtype
+
+    plot_span = _get_str(config, 'plotSpan', max_length=8)
+    if plot_span is not None:
+        if plot_span not in ('shots', 'full'):
+            raise ConfigError('plotSpan must be shots or full.',
+                              [{'field': 'plotSpan', 'message': 'Must be shots or full.'}])
+        _assign(kwargs, available, _CONFIG_ALIASES['plot_span'], plot_span)
+        settings['plot_span'] = plot_span
 
     nrr = _get_number(config, 'protectionNrrDb', minimum=0, maximum=60)
     if nrr is not None:
@@ -2101,6 +2135,12 @@ class SASAHandler(http.server.BaseHTTPRequestHandler):
             return self._api_run(query)
         if path == '/api/report':
             return self._api_report(query)
+        if path == '/api/health':
+            return self._api_health()
+        if path == '/api/probe':
+            return self._api_probe(query)
+        if path == '/api/detect':
+            return self._api_detect(query)
 
         self._serve_static(path)
 
@@ -2290,6 +2330,121 @@ class SASAHandler(http.server.BaseHTTPRequestHandler):
         })
 
     # ── API: Serve a file from an analysis output ──
+
+    # ── API: Health ──
+    #
+    # The interface asks for this on load and uses the answer for the version
+    # in the sidebar, the engine line in About, and the Output directory
+    # placeholder. Without it the packaged application showed "The local
+    # service did not answer /api/health" beside a blank version — an accurate
+    # message about a server that was in fact running perfectly well, and had
+    # simply never been given the route.
+
+    def _api_health(self):
+        try:
+            from provenance import __version__ as engine_version  # noqa: PLC0415
+        except Exception:                                          # noqa: BLE001
+            engine_version = None
+        return self._send_json({
+            'status': 'ok',
+            'name': 'SASA',
+            'version': engine_version,
+            'protocolVersion': PROTOCOL_VERSION,
+            'uptime_s': int(max(0.0, time.time() - SERVER_STARTED_AT)),
+            # No Node in the packaged build: the server IS this file. Reported
+            # as the interpreter rather than left blank, so the About panel
+            # names what is actually running.
+            'backend': {
+                'interpreter': f'python {sys.version_info.major}.{sys.version_info.minor} (packaged)',
+                'scriptPresent': True,          # main.py is imported, not spawned
+            },
+            'defaultOutputDir': str(ANALYSIS_DIR),
+            'limits': {
+                'maxUploadBytes': MAX_UPLOAD_BYTES,
+                'allowedExtensions': sorted(MEDIA_EXTS),
+            },
+            'activeRuns': sum(1 for r in RUNS.all() if getattr(r, 'state', None) == 'running'),
+        })
+
+    # ── API: Describe and examine an input, before any run ──
+    #
+    # Both of these are read-only and answer about a file the operator has
+    # chosen but not yet analysed. They were reachable in the Node development
+    # server and NOT here, so in the packaged application the setup page asked
+    # its questions and got a 404: the recording's sample rate, its channel
+    # count and its shot count all silently went missing exactly where they
+    # were most useful.
+
+    def _input_path(self, query: dict) -> Optional[Path]:
+        """Resolve a ?path= parameter inside the workspace, or None."""
+        raw = query.get('path', [''])[0]
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        roots = [UPLOAD_DIR, EXTRACT_DIR, ANALYSIS_DIR, DATA_DIR / 'Audio']
+        resolved = resolve_within_roots(raw, roots)
+        if resolved is None or not resolved.is_file():
+            return None
+        return resolved
+
+    def _api_probe(self, query: dict):
+        resolved = self._input_path(query)
+        if resolved is None:
+            return self._send_json(
+                {'readable': False, 'notes': [],
+                 'problem': 'That file is not an accessible recording in this workspace.'}, 400)
+        try:
+            from main import probe_input          # noqa: PLC0415
+            return self._send_json(probe_input(resolved))
+        except Exception as exc:                  # noqa: BLE001
+            return self._send_json(
+                {'readable': False, 'notes': [],
+                 'problem': f'That file could not be described: {exc}'}, 200)
+
+    # Query parameters the preview accepts, with the range each must lie in.
+    # Values are REJECTED rather than clamped: a threshold silently changed to
+    # fit is a different measurement from the one that was asked for.
+    _DETECT_PARAMS = (
+        ('thresholdRelativeDb', 'threshold_relative_dB', 0.0, 200.0, False),
+        ('refractoryMs', 'refractory_ms', 0.0, 600000.0, False),
+        ('preMs', 'pre_ms', 0.0, 600000.0, False),
+        ('postMs', 'post_ms', 0.0, 600000.0, False),
+        ('expectedShots', 'expected_shots', 1.0, 100000.0, True),
+        ('channel', 'channel', 0.0, 1024.0, True),
+    )
+
+    def _api_detect(self, query: dict):
+        resolved = self._input_path(query)
+        if resolved is None:
+            return self._send_json(
+                {'readable': False, 'shots': [],
+                 'problem': 'That file is not an accessible recording in this workspace.'}, 400)
+
+        kwargs: Dict[str, Any] = {}
+        for name, keyword, low, high, whole in self._DETECT_PARAMS:
+            raw = query.get(name, [''])[0]
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                value = float('nan')
+            if not math.isfinite(value) or not (low <= value <= high) \
+                    or (whole and value != int(value)):
+                return self._send_json(
+                    {'readable': False, 'shots': [],
+                     'problem': f'{name} must be a number between {low:g} and {high:g}.'}, 400)
+            kwargs[keyword] = int(value) if whole else value
+
+        if query.get('autoDetect', [''])[0] == 'false':
+            kwargs['auto_detect'] = False
+
+        try:
+            from main import detect_preview       # noqa: PLC0415
+            return self._send_json(detect_preview(resolved, **kwargs))
+        except Exception as exc:                  # noqa: BLE001
+            return self._send_json(
+                {'readable': False, 'shots': [],
+                 'problem': f'That file could not be examined: {exc}'}, 200)
 
     def _api_image(self, query: dict):
         dir_param = query.get('dir', [''])[0]

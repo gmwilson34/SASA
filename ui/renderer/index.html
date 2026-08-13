@@ -1131,7 +1131,55 @@
             </div>
 
             <div class="card-body">
-              <fieldset class="fieldset" id="threshold-mode-group">
+              <fieldset class="fieldset" id="detect-mode-group">
+                <legend class="fieldset-legend">Sensitivity</legend>
+                <div class="row">
+                  <label class="radio">
+                    <input type="radio" name="detect-mode" id="detect-mode-auto"
+                           value="auto" checked />
+                    <span class="check-text">
+                      <span>Automatic — measured from this recording</span>
+                      <span class="field-hint">
+                        Recommended. The threshold is swept across its whole range and the
+                        setting chosen is the one the shot count is least sensitive to. The
+                        refractory period comes from the tightest spacing found, the
+                        post-trigger window from the measured decay. The run reports each
+                        number and how it was arrived at.
+                      </span>
+                    </span>
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="detect-mode" id="detect-mode-manual" value="manual" />
+                    <span class="check-text">
+                      <span>Manual — I will set the values</span>
+                      <span class="field-hint">
+                        Nothing is measured. Use this to reproduce an earlier run, or when
+                        you know something about the string that the recording does not show.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <div class="field-grid-3 mt-5">
+                <div class="field" id="field-expected-shots">
+                  <label class="field-label" for="expected-shots">Rounds fired</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="expected-shots" value=""
+                           min="1" max="1000" step="1" placeholder="unknown"
+                           aria-describedby="expected-shots-hint" />
+                    <span class="input-suffix">shots</span>
+                  </div>
+                  <p class="field-hint" id="expected-shots-hint">
+                    Optional. If a threshold produces this count it is preferred; if none
+                    does, the run says so rather than forcing it.
+                  </p>
+                </div>
+              </div>
+
+              <hr class="rule" />
+
+              <fieldset class="fieldset" id="threshold-mode-group" disabled>
                 <legend class="fieldset-legend">Threshold mode</legend>
                 <div class="row">
                   <label class="radio">
@@ -1152,7 +1200,7 @@
                 </div>
               </fieldset>
 
-              <div class="field-grid-3 mt-5">
+              <fieldset class="fieldset-bare field-grid-3 mt-5" id="manual-detection-group" disabled>
                 <div class="field" id="field-threshold">
                   <label class="field-label" for="threshold-value">Threshold</label>
                   <div class="input-group">
@@ -1204,7 +1252,52 @@
                     Must outlast the decay or B-duration will be truncated. Range 50–5 000 ms.
                   </p>
                 </div>
+              </fieldset>
+            </div>
+
+            <div class="card-footer">
+              <!-- Replaced by renderDetectionMode(); this is the pre-script
+                   state, so it claims nothing it cannot yet know. -->
+              <span id="detection-mode-note">Detection settings will be measured from the recording.</span>
+              <div class="card-footer-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detect-preview">
+                  <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>Find the shots
+                </button>
               </div>
+            </div>
+          </div>
+
+          <!-- ---- DETECTION PREVIEW ---------------------------------------
+               Detection settings used to be knobs you turned before a run and
+               judged after it, by reading a shot count in a verdict. That is a
+               slow loop over an expensive operation, and it puts the one
+               decision that determines every later number — which events are
+               shots — furthest from the evidence. This runs detection alone,
+               in about a second, and draws what it found. -->
+          <div class="card" id="card-detect-preview" hidden>
+            <div class="card-header">
+              <div>
+                <h3 class="card-title">What these settings find</h3>
+                <p class="card-subtitle" id="detect-preview-subtitle">
+                  Detection only — no metrics, no calibration, no output written
+                </p>
+              </div>
+              <div class="card-header-actions">
+                <span class="pill" id="detect-preview-pill" data-tone="neutral">—</span>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <div class="figure-canvas" id="detect-preview-figure">
+                <canvas id="detect-preview-canvas" width="960" height="200" role="img"
+                        aria-label="The recording's envelope, with each detected shot marked."></canvas>
+              </div>
+              <div class="figure-legend">
+                <span class="legend-item"><span class="legend-swatch" data-series="1"></span>Signal envelope</span>
+                <span class="legend-item"><span class="legend-swatch" data-shot-marker></span>Detected shot</span>
+              </div>
+              <p class="figure-caption" id="detect-preview-caption">—</p>
+              <ul class="stack-2 mt-3" id="detect-preview-notes"></ul>
             </div>
           </div>
 
@@ -1286,6 +1379,17 @@
                     <option value="png,pdf">PNG + PDF</option>
                     <option value="png,svg">PNG + SVG</option>
                   </select>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="plot-span">Figures cover</label>
+                  <select class="select" id="plot-span" aria-describedby="plot-span-hint">
+                    <option value="shots" selected>The shot string</option>
+                    <option value="full">The whole recording</option>
+                  </select>
+                  <p class="field-hint" id="plot-span-hint">
+                    Metrics use every sample either way.
+                  </p>
                 </div>
               </div>
 

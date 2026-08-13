@@ -46,7 +46,8 @@
 ## Features
 
 - **Calibrated SPL measurements** — converts digital samples to physical Pascals using microphone sensitivity data
-- **Automatic shot detection** — finds gunshot events using RMS envelope peak-picking with configurable thresholds and refractory periods
+- **Shot detection that tunes itself** — the threshold, refractory period and analysis window are measured from the recording by sweeping every plausible setting and taking the one the shot count is least sensitive to. Each number is reported with the basis it was chosen on, and every one can be overridden
+- **Reflection detection** — quieter events arriving at a repeated delay after louder ones are flagged as probable reflections rather than counted as shots
 - **Three frequency weightings** — Z (flat/unweighted), A (human hearing), C (peak measurements), all per IEC 61672-1
 - **Three time weightings** — Fast (125 ms), Slow (1 s), Impulse (35 ms attack / 1500 ms decay)
 - **STFT spectrograms** — calibrated time-frequency display with Hann windowing and 75% overlap
@@ -304,13 +305,43 @@ where $W$ is the window length in samples and $H$ is the hop size.
 e[n] > p_{\mathrm{ref}} \times 10^{\,L_{\mathrm{threshold}} / 20}
 ```
 
-3. **Peak picking** — within each contiguous above-threshold region, find the sample with maximum envelope value.
+3. **Peak picking by prominence** — candidates are found by prominence, not by collapsing each contiguous above-threshold region to one peak. Region maxima silently merge shots whose reverberant tails overlap, which is exactly what a rapid-fire string does.
 
-4. **Refractory period** — suppress detections within a configurable dead time (default 200 ms) of a previous detection. This prevents echoes, reflections, and reverberant tails from being counted as separate shots.
+4. **Refractory period** — where two candidates are closer than the refractory period, the LOUDER one is kept and the number suppressed is reported. Scanning left to right and dropping whatever comes too soon biases against a loud shot that follows a quiet one.
 
-5. **Peak refinement** — the approximate peak from the envelope is refined by searching for the exact maximum absolute pressure within ±500 samples of the envelope peak.
+5. **Peak refinement** — the approximate peak from the envelope is refined by searching for the exact maximum absolute pressure within ±5 ms of the envelope peak.
 
-6. **Window extraction** — each shot is assigned a pre-trigger (default 50 ms) and post-trigger (default 200 ms) window for per-shot analysis.
+6. **Window extraction** — each shot is assigned a pre-trigger and post-trigger window for per-shot analysis.
+
+#### The settings are measured from the recording, not guessed
+
+By default SASA chooses the threshold, the refractory period and the post-trigger window from the recording itself, and reports each number with the basis it was chosen on. `--no-auto-detect` turns this off and uses your values, or the defaults, unchanged.
+
+**The threshold is chosen by stability, not by taste.** The candidate count is swept across every plausible threshold — 6 to 40 dB below the recording's own peak — at every plausible refractory period, and the setting taken is the centre of the widest span over which the count does not change. A recording that yields five shots anywhere from 18 to 41 dB below peak is not a lucky choice of threshold; it is the recording telling you there are five shots. One whose answer changes every decibel is telling you the opposite, and the run says so instead of picking the middle of the confusion.
+
+Two rules keep that search honest:
+
+- **The refractory period may not be what sets the spacing.** If the closest two events sit within 20 % of the minimum spacing the setting imposed, the count is a fact about the setting. This rejects a short refractory period chopping one blast's decay into a string of evenly-spaced "shots".
+- **The sweep stops at 40 dB below the loudest event.** One hundredth of the peak pressure is not another discharge at the same station; it is that weapon's own reverberation. Searching past it does not find quieter shots — it finds a hundred stable, confident, wrong ones.
+
+**The refractory period** is half the tightest spacing actually observed, which cannot merge two shots that far apart. **The post-trigger window** is the measured decay of the shot with the most room after it: the time to fall 40 dB, or into the noise floor. 40 dB is twice the 20 dB drop that defines B-duration, so the window outlasts the quantity it has to contain.
+
+**A repeated delay is reported as a probable reflection.** When quieter events arrive at a near-constant delay after louder ones, that is the signature of a reflection off fixed geometry rather than of separate discharges. SASA does not decide which it is — two shots at a metronomic rate look the same, and only the person who was there knows — but it says so, names the shots, and lets you reject them. A reflection averaged into a suppressor's rated level understates it.
+
+**`--expected-shots N`** prefers a threshold that produces the count you know was fired. If no threshold produces it, the run reports that and uses the most stable reading it found. It never widens the threshold until the expected number appears: that is choosing the answer before measuring it.
+
+#### Looking before you run
+
+`--detect-only` runs detection and prints what it found as JSON — shot times, levels, the settings used and how they were arrived at — with no metrics, no figures, no output directory and no calibration required. Every level it reports is dB re FS. In the interface this is the **Find the shots** button on the Detection step, which draws the envelope with each detected shot marked.
+
+```console
+$ sasa string.wav --detect-only | jq '{n_shots, threshold: .tuning.threshold_relative_dB, basis: .tuning.basis.threshold}'
+{
+  "n_shots": 6,
+  "threshold": 26,
+  "basis": "6 events were found at every threshold from 17 to 35 dB below peak, the widest such span in the recording; the centre of that span was taken."
+}
+```
 
 ### 4. Frequency Weighting
 
@@ -688,12 +719,18 @@ HTML files with pan, zoom, and hover tooltips:
 
 ### Shot Detection
 
+Every setting below is measured from the recording unless you name it. A value given here is always obeyed; the rest are still measured.
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--threshold-dB` | 120 | Detection threshold in dB SPL |
-| `--refractory-ms` | 200 | Minimum time between shots (ms) |
-| `--pre-ms` | 50 | Pre-shot window (ms) |
-| `--post-ms` | 200 | Post-shot window (ms) |
+| `--no-auto-detect` | off | Do not measure anything; use the values below, or their defaults (30 dB below peak, 200 ms refractory, 50/200 ms window) |
+| `--expected-shots` | — | Rounds you know were fired. Preferred when a threshold produces it; never forced when none does |
+| `--threshold-dB` | — | Absolute detection threshold in dB SPL. Requires a real calibration |
+| `--threshold-relative-dB` | measured | Threshold this many dB below the loudest event |
+| `--refractory-ms` | measured | Minimum time between shots (ms) |
+| `--pre-ms` | measured | Pre-shot window (ms) |
+| `--post-ms` | measured | Post-shot window (ms) |
+| `--detect-only` | off | Detect and print JSON, then exit. No metrics, no figures, no calibration needed |
 
 ### Analysis
 
@@ -711,7 +748,9 @@ HTML files with pan, zoom, and hover tooltips:
 | `-o, --output` | `<input dir>/analysis` | Output base directory. Defaults to an `analysis/` folder next to the input file, not the current directory. |
 | `--config` | — | Load config from JSON file (overrides all other options) |
 | `--formats` | `png` | Plot formats, comma-separated: `png`, `pdf`, `svg` |
+| `--plot-span` | `shots` | Span the full-recording figures cover: `shots` (the shot string) or `full` (the whole file). Metrics are unaffected either way. |
 | `--probe` | — | Describe the input as JSON and exit. Headers only: nothing is decoded, extracted or analysed. |
+| `--detect-only` | — | Detect shots and print what was found as JSON, then exit. No metrics, no figures, no calibration needed. |
 
 The positional `input` argument is optional — omit it to get a native file
 picker. `--config` is read instead of, not merged with, the other flags.
@@ -811,7 +850,7 @@ rounding happens on write, so what is stored is exactly what the readout shows.
 | `main.py` | Application entry point, CLI, and orchestration | `AnalysisConfig`, `analyze_file()` |
 | `calibration.py` | Digital → Pascal conversion, dB SPL math | `Calibration`, `amplitude_to_dB_SPL()`, `power_to_dB_SPL()` |
 | `weighting.py` | A/C/Z frequency weighting IIR filters | `apply_a_weight()`, `apply_c_weight()`, `AWeightFilter` |
-| `shot_detect.py` | Gunshot event detection with refractory period | `detect_shots()`, `ShotEvent` |
+| `shot_detect.py` | Gunshot event detection, and the tuning that chooses its settings from the recording | `detect_shots()`, `autotune_detection()`, `find_reflection_pattern()`, `ShotEvent` |
 | `bands.py` | 1/3-octave band analysis (ISO 266) | `ThirdOctaveAnalyzer`, `compute_band_exposure()` |
 | `STFT.py` | STFT computation with calibrated dB SPL | `compute_stft_dB_SPL()`, `analyze_stft()`, `STFTResult` |
 | `metrics.py` | Per-shot and aggregate acoustic metrics | `compute_shot_metrics()`, `ShotMetrics`, `AggregateMetrics` |
