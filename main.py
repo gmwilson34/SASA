@@ -630,6 +630,7 @@ class AnalysisConfig:
     post_shot_ms: Optional[float] = None
     auto_detect: bool = True
     expected_shots: Optional[int] = None
+    min_snr_dB: Optional[float] = None
     min_shots: int = 0
     max_shots: int = 1000
 
@@ -698,6 +699,13 @@ class AnalysisConfig:
             self.expected_shots = _integer(
                 self.expected_shots, "expected_shots", minimum=1, maximum=100_000
             )
+        if self.min_snr_dB is not None:
+            self.min_snr_dB = _non_negative(self.min_snr_dB, "min_snr_dB")
+            if self.min_snr_dB > 80.0:
+                raise ConfigurationError(
+                    f"min_snr_dB of {self.min_snr_dB} dB would reject every real shot; "
+                    f"muzzle blast clears its noise floor by 30-60 dB"
+                )
         self.min_shots = _integer(self.min_shots, "min_shots", minimum=0, maximum=100_000)
         self.max_shots = _integer(self.max_shots, "max_shots", minimum=1, maximum=100_000)
         if self.min_shots > self.max_shots:
@@ -1208,6 +1216,7 @@ def detect_preview(
     refractory_ms: Optional[float] = None,
     pre_ms: Optional[float] = None,
     post_ms: Optional[float] = None,
+    min_snr_dB: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Detect shots and report what was found, without analysing anything.
@@ -1271,9 +1280,12 @@ def detect_preview(
         "errors": list(quality.errors),
     }
 
+    gate = FALLBACK_MIN_SNR_DB if min_snr_dB is None else float(min_snr_dB)
     tuning: Optional[DetectionTuning] = None
     if auto_detect:
-        tuning = autotune_detection(x, sample_rate, expected_shots=expected_shots)
+        tuning = autotune_detection(
+            x, sample_rate, expected_shots=expected_shots, min_snr_dB=gate,
+        )
         # DetectionTuning reports levels the way detect_shots() does, which on a
         # calibrated run is dB SPL. Here there is no calibration, so those two
         # fields are neither SPL nor dB re FS until the full-scale offset is
@@ -1295,6 +1307,7 @@ def detect_preview(
         refractory_ms=refractory_ms,
         pre_shot_ms=pre_ms,
         post_shot_ms=post_ms,
+        min_snr_dB=gate,
     )
     resolved = resolve_detection(config, tuning)
 
@@ -1306,6 +1319,7 @@ def detect_preview(
         pre_ms=resolved.pre_ms,
         post_ms=resolved.post_ms,
         refractory_ms=resolved.refractory_ms,
+        min_snr_dB=resolved.min_snr_dB,
         samples_FS=x,
         ceiling_FS=quality.ceiling.ceiling_FS if quality.ceiling.detected else None,
         report=reports,
@@ -2710,6 +2724,13 @@ FALLBACK_PRE_SHOT_MS: float = 50.0
 FALLBACK_POST_SHOT_MS: float = 200.0
 FALLBACK_THRESHOLD_RELATIVE_DB: float = 30.0
 
+# The impulsiveness gate. A candidate that does not clear the noise floor by
+# this much is not a shot: a Gaussian noise peak sits about 13 dB above the RMS,
+# so without a gate a recording with no gunfire in it yields a confident "shot"
+# and a full metrics record. Real muzzle blast clears its floor by 30-60 dB, so
+# 15 dB rejects noise while remaining far below anything genuine.
+FALLBACK_MIN_SNR_DB: float = 15.0
+
 
 @dataclass
 class ResolvedDetection:
@@ -2725,6 +2746,7 @@ class ResolvedDetection:
     refractory_ms: float
     pre_ms: float
     post_ms: float
+    min_snr_dB: float = FALLBACK_MIN_SNR_DB
     source: Dict[str, str] = field(default_factory=dict)
     tuning: Optional[DetectionTuning] = None
 
@@ -2739,9 +2761,21 @@ class ResolvedDetection:
             "refractory_ms": self.refractory_ms,
             "pre_ms": self.pre_ms,
             "post_ms": self.post_ms,
+            "min_snr_dB": self.min_snr_dB,
             "source": dict(self.source),
             "tuning": self.tuning.to_dict() if self.tuning else None,
         }
+
+
+def resolve_min_snr(config: AnalysisConfig) -> float:
+    """
+    The impulsiveness gate, resolved on its own.
+
+    The tuner needs this before it runs - its sweep stops where the gate would
+    reject everything below - and the gate is never something the tuner
+    chooses, so it can be settled without one.
+    """
+    return FALLBACK_MIN_SNR_DB if config.min_snr_dB is None else float(config.min_snr_dB)
 
 
 def resolve_detection(
@@ -2794,6 +2828,10 @@ def resolve_detection(
                     usable.pre_ms if usable else None, FALLBACK_PRE_SHOT_MS),
         post_ms=pick("post", config.post_shot_ms,
                      usable.post_ms if usable else None, FALLBACK_POST_SHOT_MS),
+        # Not tuned: this one is a policy about what counts as impulsive, and
+        # nothing in the recording can decide it. It is resolved here anyway so
+        # the value the run used is reported beside the ones that were measured.
+        min_snr_dB=pick("min_snr", config.min_snr_dB, None, FALLBACK_MIN_SNR_DB),
         source=source,
         tuning=tuning,
     )
@@ -2827,6 +2865,7 @@ def _settings_block(
         "post_shot_ms": resolved.post_ms,
         "auto_detect": config.auto_detect,
         "expected_shots": config.expected_shots,
+        "min_snr_dB": resolved.min_snr_dB,
         "detection_source": dict(resolved.source),
         "detection_tuning": resolved.tuning.to_dict() if resolved.tuning else None,
         "min_shots": config.min_shots,
@@ -2891,7 +2930,9 @@ def _analyze_in_memory(
     if config.auto_detect:
         progress(18, "Measuring detection settings")
         tuning = autotune_detection(
-            pressure, sample_rate, expected_shots=config.expected_shots
+            pressure, sample_rate,
+            expected_shots=config.expected_shots,
+            min_snr_dB=resolve_min_snr(config),
         )
         logger.info("%s", tuning.summary().strip())
     resolved = resolve_detection(config, tuning)
@@ -2905,6 +2946,7 @@ def _analyze_in_memory(
         pre_ms=resolved.pre_ms,
         post_ms=resolved.post_ms,
         refractory_ms=resolved.refractory_ms,
+        min_snr_dB=resolved.min_snr_dB,
         min_shots=config.min_shots,
         max_shots=config.max_shots,
         full_scale_dB=calibration.full_scale_dB if calibration.calibrated else None,
@@ -3067,6 +3109,7 @@ def _analyze_chunked(
             np.concatenate(tune_indices),
             sample_rate, env_hop,
             expected_shots=config.expected_shots,
+            min_snr_dB=resolve_min_snr(config),
         )
         logger.info("%s", tuning.summary().strip())
     tune_envelope.clear()
@@ -3121,6 +3164,7 @@ def _analyze_chunked(
             pre_ms=resolved.pre_ms,
             post_ms=resolved.post_ms,
             refractory_ms=resolved.refractory_ms,
+            min_snr_dB=resolved.min_snr_dB,
             max_shots=config.max_shots,
             full_scale_dB=calibration.full_scale_dB if calibration.calibrated else None,
             samples_FS=block,
@@ -4281,6 +4325,10 @@ Exit codes: 0 ok, 1 error, 2 no shots detected, 3 measurement inadmissible.
                      help="Window before each peak. Overrides the measured value.")
     det.add_argument("--post-ms", type=float, default=None, metavar="ms",
                      help="Window after each peak. Overrides the measured value.")
+    det.add_argument("--min-snr-dB", type=float, default=None, metavar="dB",
+                     help="How far above the noise floor a candidate must be to count as "
+                          "a shot. Default: 15. Raising it also narrows the range the "
+                          "automatic tuner searches.")
     det.add_argument("--min-shots", type=int, default=0, metavar="N",
                      help="Warn if fewer than N shots are found. Default: 0.")
     det.add_argument("--max-shots", type=int, default=1000, metavar="N",
@@ -4423,6 +4471,8 @@ def _config_from_args(args: argparse.Namespace, typed: set, warnings: List[str])
           always=always and not args.auto_detect)
     apply("--expected-shots", "expected_shots", args.expected_shots,
           always=always and args.expected_shots is not None)
+    apply("--min-snr-dB", "min_snr_dB", args.min_snr_dB,
+          always=always and args.min_snr_dB is not None)
     apply("--min-shots", "min_shots", args.min_shots, always=always)
     apply("--max-shots", "max_shots", args.max_shots, always=always)
 
@@ -4574,6 +4624,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             refractory_ms=args.refractory_ms,
             pre_ms=args.pre_ms,
             post_ms=args.post_ms,
+            min_snr_dB=args.min_snr_dB,
         )
         print(json.dumps(preview))
         return EXIT_OK if preview.get("readable") else EXIT_ERROR

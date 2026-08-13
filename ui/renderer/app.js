@@ -212,6 +212,7 @@ const CONFIG_TO_FIELD = {
   refractoryMs:        { field: null,               input: 'refractory-ms' },
   preMs:               { field: null,               input: 'pre-ms' },
   postMs:              { field: null,               input: 'post-ms' },
+  minSnrDb:            { field: null,               input: 'min-snr' },
   expectedShots:       { field: 'field-expected-shots', input: 'expected-shots' },
   overlapFraction:     { field: null,               input: 'stft-overlap' },
   nperseg:             { field: null,               input: 'stft-nperseg' },
@@ -2151,15 +2152,19 @@ let detectPreviewKey = null;
 /** Guard so a deferred repaint cannot queue itself more than once. */
 let detectPreviewRedrawPending = false;
 
+/* Everything the preview's answer depends on. A setting missing from this key
+   is a setting the operator can change without the held preview admitting it
+   is out of date - which is a stale count presented as a current one. The
+   minimum SNR is in both branches because it applies in both modes. */
 function detectPreviewSettingsKey() {
-  const mode = detectMode();
-  if (mode === 'auto') {
-    return `${state.input.path}|auto|${readNumber('expected-shots').value ?? ''}`;
-  }
-  return [state.input.path, 'manual', thresholdMode(),
-    readNumber('threshold-value').value, readNumber('refractory-ms').value,
-    readNumber('pre-ms').value, readNumber('post-ms').value,
-    readNumber('expected-shots').value ?? ''].join('|');
+  const value = (id) => {
+    const read = readNumber(id);
+    return read.ok && !read.empty ? String(read.value) : '';
+  };
+  const shared = [state.input.path, value('expected-shots'), value('min-snr')];
+  if (detectMode() === 'auto') return ['auto', ...shared].join('|');
+  return ['manual', ...shared, thresholdMode(), value('threshold-value'),
+    value('refractory-ms'), value('pre-ms'), value('post-ms')].join('|');
 }
 
 async function runDetectPreview() {
@@ -2194,6 +2199,12 @@ async function runDetectPreview() {
       if (value.ok && !value.empty) params.set(key, String(value.value));
     }
   }
+
+  // The impulsiveness gate applies in BOTH modes: it is a policy about what
+  // counts as a shot, not a setting the recording can choose, and it bounds
+  // the tuner's own search.
+  const snr = readNumber('min-snr');
+  if (snr.ok && !snr.empty) params.set('minSnrDb', String(snr.value));
 
   const key = detectPreviewSettingsKey();
   detectPreviewBusy = true;
@@ -2674,6 +2685,11 @@ function buildRunConfig() {
   const expected = readNumber('expected-shots');
   if (expected.ok && !expected.empty) config.expectedShots = expected.value;
   else if (!expected.ok) problems.push(expected.error || 'Rounds fired must be a whole number.');
+
+  // Sent in both modes, for the same reason the preview sends it in both.
+  const minSnr = readNumber('min-snr');
+  if (minSnr.ok && !minSnr.empty) config.minSnrDb = minSnr.value;
+  else if (!minSnr.ok) problems.push(minSnr.error || 'Minimum shot SNR must have a value.');
 
   // ---- spectral ----
   const nperseg = Number($('stft-nperseg') ? $('stft-nperseg').value : NaN);

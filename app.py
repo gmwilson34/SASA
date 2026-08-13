@@ -1153,6 +1153,7 @@ _CONFIG_ALIASES: Dict[str, Tuple[str, ...]] = {
     'refractory_ms': ('refractory_ms',),
     'pre_ms': ('pre_shot_ms', 'pre_ms'),
     'post_ms': ('post_shot_ms', 'post_ms'),
+    'min_snr_dB': ('min_snr_dB',),
     'auto_detect': ('auto_detect',),
     'expected_shots': ('expected_shots',),
     'nperseg': ('nperseg',),
@@ -1320,6 +1321,14 @@ def build_analysis_config(config: dict, AnalysisConfig, Calibration, analyze_fn=
         if value is not None:
             _assign(kwargs, available, _CONFIG_ALIASES[alias_key], value)
             settings[alias_key] = value
+
+    # Read by name rather than through the loop above, so the interface-contract
+    # test can see it: that test matches literal key names, and a key reached
+    # only through a loop variable is invisible to it.
+    min_snr = _get_number(config, 'minSnrDb', minimum=0, maximum=80)
+    if min_snr is not None:
+        _assign(kwargs, available, _CONFIG_ALIASES['min_snr_dB'], min_snr)
+        settings['min_snr_dB'] = min_snr
 
     # Detection settings are measured from the recording unless this is set.
     # The inverted spelling matches the interface's control and the CLI flag;
@@ -2409,6 +2418,7 @@ class SASAHandler(http.server.BaseHTTPRequestHandler):
         ('preMs', 'pre_ms', 0.0, 600000.0, False),
         ('postMs', 'post_ms', 0.0, 600000.0, False),
         ('expectedShots', 'expected_shots', 1.0, 100000.0, True),
+        ('minSnrDb', 'min_snr_dB', 0.0, 80.0, False),
         ('channel', 'channel', 0.0, 1024.0, True),
     )
 

@@ -146,6 +146,7 @@ const NUMBER_FIELDS = {
   refractoryMs:        { flag: '--refractory-ms',         min: 0,    max: 600000 },
   preMs:               { flag: '--pre-ms',                min: 0,    max: 600000 },
   postMs:              { flag: '--post-ms',               min: 0,    max: 600000 },
+  minSnrDb:            { flag: '--min-snr-dB',            min: 0,    max: 80 },
   // Analysis
   overlapFraction: { flag: '--overlap-fraction', min: 0,     max: 0.99 },
   bandHopMs:       { flag: '--band-hop-ms',      min: 0,     max: 10000, exclusiveMin: true },

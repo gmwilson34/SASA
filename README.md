@@ -328,6 +328,8 @@ Two rules keep that search honest:
 
 **A repeated delay is reported as a probable reflection.** When quieter events arrive at a near-constant delay after louder ones, that is the signature of a reflection off fixed geometry rather than of separate discharges. SASA does not decide which it is — two shots at a metronomic rate look the same, and only the person who was there knows — but it says so, names the shots, and lets you reject them. A reflection averaged into a suppressor's rated level understates it.
 
+**`--min-snr-dB`** is the impulsiveness gate: how far above the noise floor a candidate has to be before it counts as a shot. It is a policy about what a shot *is*, not something the recording can decide, so it is never tuned — but it does bound the tuner's search, because there is no point sweeping thresholds that the gate would reject everything below. A Gaussian noise peak sits about 13 dB above the RMS, so without a gate a recording containing no gunfire yields a confident "shot" and a full metrics record; real muzzle blast clears its floor by 30–60 dB, so the 15 dB default rejects noise and nothing else. Raise it past what the recording's dynamic range can support and the tuner refuses to tune rather than inventing a span, and says so.
+
 **`--expected-shots N`** prefers a threshold that produces the count you know was fired. If no threshold produces it, the run reports that and uses the most stable reading it found. It never widens the threshold until the expected number appears: that is choosing the answer before measuring it.
 
 #### Looking before you run
@@ -730,6 +732,7 @@ Every setting below is measured from the recording unless you name it. A value g
 | `--refractory-ms` | measured | Minimum time between shots (ms) |
 | `--pre-ms` | measured | Pre-shot window (ms) |
 | `--post-ms` | measured | Post-shot window (ms) |
+| `--min-snr-dB` | 15 | How far above the noise floor a candidate must be to count as a shot. Candidates below it are rejected, not flagged. Raising it also narrows the range the tuner searches |
 | `--detect-only` | off | Detect and print JSON, then exit. No metrics, no figures, no calibration needed |
 
 ### Analysis

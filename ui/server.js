@@ -738,6 +738,7 @@ const DETECT_PARAMS = [
   { query: 'preMs', flag: '--pre-ms', min: 0, max: 600000 },
   { query: 'postMs', flag: '--post-ms', min: 0, max: 600000 },
   { query: 'expectedShots', flag: '--expected-shots', min: 1, max: 100000, integer: true },
+  { query: 'minSnrDb', flag: '--min-snr-dB', min: 0, max: 80 },
   { query: 'channel', flag: '--channel', min: 0, max: 1024, integer: true },
 ];
 

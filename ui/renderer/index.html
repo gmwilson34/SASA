@@ -1175,6 +1175,26 @@
                     does, the run says so rather than forcing it.
                   </p>
                 </div>
+
+                <!-- Lives here, outside the manual group, because it applies in
+                     BOTH modes: it is a policy about what counts as a shot, not
+                     a setting the recording can choose, and it bounds the
+                     automatic tuner's own search. Dimming it under Automatic
+                     would say it did not apply, which is untrue. -->
+                <div class="field">
+                  <label class="field-label" for="min-snr">Minimum shot SNR</label>
+                  <div class="input-group">
+                    <input type="number" class="input" id="min-snr" value="20"
+                           min="0" max="80" step="1" aria-describedby="min-snr-hint" />
+                    <span class="input-suffix">dB</span>
+                  </div>
+                  <p class="field-hint" id="min-snr-hint">
+                    How far above the noise floor a candidate must be to count as a shot.
+                    Candidates below it are rejected, not flagged — real muzzle blast clears
+                    its noise floor by 30–60 dB. Applies in both modes, and raising it
+                    narrows the range the tuner searches. Range 0–80 dB.
+                  </p>
+                </div>
               </div>
 
               <hr class="rule" />
@@ -1219,16 +1239,6 @@
                     <span class="input-suffix">ms</span>
                   </div>
                   <p class="field-hint" id="refractory-hint">Minimum gap between shots. Range 10–5 000 ms.</p>
-                </div>
-
-                <div class="field">
-                  <label class="field-label" for="min-snr">Minimum shot SNR</label>
-                  <div class="input-group">
-                    <input type="number" class="input" id="min-snr" value="20"
-                           min="0" max="80" step="1" aria-describedby="min-snr-hint" />
-                    <span class="input-suffix">dB</span>
-                  </div>
-                  <p class="field-hint" id="min-snr-hint">Shots below this are kept but flagged. Range 0–80 dB.</p>
                 </div>
 
                 <div class="field">
