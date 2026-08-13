@@ -119,18 +119,71 @@ jobs:
       - name: Build macOS app
         run: pyinstaller sasa.spec --noconfirm --clean
 
-      - name: Package macOS app
+      # Signing runs only when the certificate secret exists, so the workflow
+      # keeps working unchanged until it is added and starts signing the moment
+      # it is. The certificate goes into a throwaway keychain that is deleted
+      # in the cleanup step below, whatever the outcome.
+      # `secrets` is available to a step's `if`; a step-level `env` is not
+      # available to its own `if`, which would have made this never run.
+      - name: Import the signing certificate
+        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
-          cd dist
-          if [ -d "SASA.app" ]; then
-            zip -r -y ../SASA-macOS.zip SASA.app
+          KEYCHAIN="$RUNNER_TEMP/sasa-signing.keychain-db"
+          PASSWORD="$(openssl rand -base64 24)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" \
+              -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # Without this, codesign blocks on a GUI prompt no one can answer.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Package, sign and notarize the macOS app
+        env:
+          SASA_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          SASA_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          SASA_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          # A release tag must not ship silently unsigned once signing is set
+          # up; an ordinary branch build may.
+          SASA_REQUIRE_SIGNED: ${{ (secrets.MACOS_CERTIFICATE != '' && startsWith(github.ref, 'refs/tags/')) && '1' || '0' }}
+        run: |
+          if [ -d dist/SASA.app ]; then
+            ./scripts/sign_macos.sh
           else
-            zip -r ../SASA-macOS.zip SASA/
+            # One-file build: nothing signable, package it as before.
+            (cd dist && zip -r ../SASA-macOS.zip SASA/)
+          fi
+          # sign_macos.sh produces the zip when it signs; when it could not, it
+          # exits 0 without one, so make the unsigned zip here.
+          if [ ! -f SASA-macOS.zip ] && [ -d dist/SASA.app ]; then
+            ditto -c -k --keepParent dist/SASA.app SASA-macOS.zip
           fi
 
-      - name: Note signing status
+      - name: Report signing status
         run: |
-          echo "::warning title=Unsigned build::SASA-macOS.zip is NOT code-signed or notarized. Gatekeeper will block it on other Macs. See build_macos.sh for the codesign/notarytool commands."
+          if codesign -dv --verbose=2 dist/SASA.app 2>&1 | grep -q "Developer ID Application"; then
+            if xcrun stapler validate dist/SASA.app > /dev/null 2>&1; then
+              echo "::notice title=Signed and notarized::SASA-macOS.zip is signed with a Developer ID certificate and has a stapled notarization ticket."
+            else
+              echo "::warning title=Signed, not notarized::SASA-macOS.zip is signed but has no stapled ticket. Gatekeeper will still warn on first launch."
+            fi
+          else
+            echo "::warning title=Unsigned build::SASA-macOS.zip is NOT signed with a Developer ID certificate. Gatekeeper will block it on other Macs. Add the MACOS_CERTIFICATE secret; see scripts/sign_macos.sh."
+          fi
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/sasa-signing.keychain-db" || true
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

@@ -10,11 +10,14 @@
 # Prerequisites:
 #   pip install '.[video,build]'
 #
-# ⚠️  THE OUTPUT IS UNSIGNED AND UN-NOTARIZED.
-#     It runs on the machine that built it and nowhere else without manual
-#     intervention. See the "CODE SIGNING" section printed at the end of this
-#     script for the exact commands. This script deliberately does not attempt
-#     to sign anything — that needs a Developer ID certificate and credentials.
+# Signing:
+#   The build signs, notarizes and staples automatically when a
+#   "Developer ID Application" certificate and notarization credentials are
+#   present, via scripts/sign_macos.sh. When they are not, it says which piece
+#   is missing and leaves an unsigned build — it never ships something that
+#   claims to be signed and is not.
+#
+#   SASA_SKIP_SIGN=1   build only, do not attempt to sign.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -59,12 +62,12 @@ pip install '.[video,build]'
 # needed if you want to run the Node development server (`node ui/server.js`).
 
 # ── 4. Build with PyInstaller ──
-echo "[4/5] Building macOS app..."
+echo "[4/6] Building macOS app..."
 pyinstaller sasa.spec --noconfirm --clean
 
 # ── 5. Report ──
 echo ""
-echo "[5/5] Build complete!"
+echo "[5/6] Build complete!"
 echo ""
 
 if [ -d "dist/SASA.app" ]; then
@@ -78,58 +81,18 @@ else
     echo "  To run:     ./dist/SASA/SASA"
 fi
 
-cat <<'SIGNING_NOTICE'
-
-╔══════════════════════════════════════════════════════════════════════╗
-║  ⚠️  UNSIGNED / UN-NOTARIZED BUILD                                    ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-This build is NOT code-signed and NOT notarized.
-
-  • It will launch on THIS machine.
-  • On any other Mac, Gatekeeper will block it. Because the .zip carries the
-    com.apple.quarantine attribute, the user sees
-    "SASA.app is damaged and can't be opened. You should move it to the Trash."
-    That message means "unsigned", not "corrupt".
-  • Right-click > Open does NOT work around this for an app that was never
-    signed at all — the ad-hoc workaround is:
-        xattr -dr com.apple.quarantine /Applications/SASA.app
-
-To ship this properly you need an Apple Developer Program membership and a
-"Developer ID Application" certificate in your login keychain. Then:
-
-  # 1. Sign every nested binary, then the bundle, with a hardened runtime.
-  #    PyInstaller bundles dylibs/.so files that must each be signed.
-  codesign --force --deep --options runtime --timestamp \
-      --sign "Developer ID Application: Ridgeback Defense (TEAMID)" \
-      dist/SASA.app
-
-  # 2. Verify before submitting.
-  codesign --verify --deep --strict --verbose=2 dist/SASA.app
-
-  # 3. Notarization requires a ZIP (or DMG/PKG), not a bare .app.
-  ditto -c -k --keepParent dist/SASA.app SASA-macOS.zip
-
-  # 4. Store credentials once (app-specific password from appleid.apple.com):
-  xcrun notarytool store-credentials "SASA-NOTARY" \
-      --apple-id "you@ridgebackdefense.com" \
-      --team-id  "TEAMID" \
-      --password "abcd-efgh-ijkl-mnop"
-
-  # 5. Submit and wait for the result.
-  xcrun notarytool submit SASA-macOS.zip --keychain-profile "SASA-NOTARY" --wait
-
-  # 6. Staple the ticket to the .app, then re-zip THAT for distribution.
-  xcrun stapler staple dist/SASA.app
-  xcrun stapler validate dist/SASA.app
-  ditto -c -k --keepParent dist/SASA.app SASA-macOS.zip
-
-  # 7. Final check - this is what Gatekeeper will do on the user's machine.
-  spctl --assess --type execute --verbose=4 dist/SASA.app
-
-Replace TEAMID with your 10-character Apple Developer Team ID
-(`xcrun notarytool store-credentials` will not accept a placeholder).
-
-SIGNING_NOTICE
+# ── 6. Sign, notarize and staple ──
+#
+# One description of how a release is signed, shared with the CI workflow, so
+# the two cannot drift. The script explains what is missing when it cannot
+# finish, and exits 0 so an unsigned local build is still usable.
+if [ "${SASA_SKIP_SIGN:-0}" = "1" ]; then
+    echo ""
+    echo "  Signing skipped (SASA_SKIP_SIGN=1)."
+else
+    echo ""
+    echo "[6/6] Signing..."
+    "$SCRIPT_DIR/scripts/sign_macos.sh"
+fi
 
 echo "Done."

@@ -38,6 +38,7 @@
 - [Output Files](#output-files)
 - [Module Reference](#module-reference)
 - [Building from Source](#building-from-source)
+  - [Code signing](#code-signing)
 - [Standards Compliance](#standards-compliance)
 - [License](#license)
 
@@ -136,12 +137,16 @@ Download the latest release from the [Releases](https://github.com/gmwilson34/SA
 | **macOS** | `SASA-macOS.zip` | Unzip → double-click `SASA.app` |
 | **Windows** | `SASA-Windows.zip` | Unzip → run `SASA.exe` |
 
-> **The released binaries are not code-signed or notarized.** macOS Gatekeeper
-> will refuse to open `SASA.app` on any machine other than the one that built
-> it ("SASA.app is damaged and can't be opened"). Until signing is set up, run
+> **The released binaries are not yet code-signed or notarized.** macOS
+> Gatekeeper will refuse to open `SASA.app` on any machine other than the one
+> that built it ("SASA.app is damaged and can't be opened" — that message means
+> *unsigned*, not *corrupt*). Until then, run
 > `xattr -dr com.apple.quarantine /Applications/SASA.app` after unzipping, or
 > run from source. Windows SmartScreen will likewise warn on the unsigned
-> `SASA.exe`. See `build_macos.sh` for the signing commands.
+> `SASA.exe`.
+>
+> The build already does everything except hold the certificate — see
+> [Code signing](#code-signing).
 
 Or build it yourself:
 
@@ -930,6 +935,59 @@ build_windows.bat
 
 REM Output: dist\SASA.exe
 ```
+
+### Code signing
+
+`scripts/sign_macos.sh` signs, notarizes and staples the bundle, and is called
+by both `build_macos.sh` and the CI workflow so the two cannot drift. It runs
+on every macOS build; when it cannot finish it says which piece is missing and
+leaves an unsigned build rather than shipping something that claims to be
+signed.
+
+Gatekeeper needs three things on macOS 10.15 and later, and missing any one of
+them blocks the download:
+
+1. a **Developer ID Application** certificate — *not* "Apple Development" and
+   *not* "Apple Distribution", neither of which Gatekeeper accepts for an app
+   distributed outside the App Store;
+2. the hardened runtime and a secure timestamp — the script always applies
+   both;
+3. **notarization** by Apple, with the ticket **stapled** to the bundle so a
+   machine with no network still passes.
+
+To turn it on locally:
+
+```bash
+# 1. Create a Developer ID Application certificate (Account Holder only, not
+#    an Admin), download it, and double-click to install it:
+#    https://developer.apple.com/account/resources/certificates/add
+#
+# 2. Store notarization credentials once, using an app-specific password from
+#    https://appleid.apple.com > Sign-In and Security > App-Specific Passwords
+xcrun notarytool store-credentials "SASA-NOTARY" \
+    --apple-id "you@example.com" --team-id "YOURTEAMID" --password "abcd-efgh-ijkl-mnop"
+
+# 3. Build. Signing now happens by itself.
+./build_macos.sh
+```
+
+To turn it on in CI, add these repository secrets. Until `MACOS_CERTIFICATE`
+exists the workflow behaves exactly as before; once it does, release tags fail
+rather than publishing an unsigned build.
+
+| Secret | What it is |
+|--------|------------|
+| `MACOS_CERTIFICATE` | The Developer ID Application certificate exported as a `.p12`, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
+| `MACOS_CERTIFICATE_PASSWORD` | The password set when exporting the `.p12` |
+| `MACOS_NOTARY_APPLE_ID` | The Apple ID used for notarization |
+| `MACOS_NOTARY_PASSWORD` | An app-specific password for that Apple ID |
+| `MACOS_NOTARY_TEAM_ID` | The 10-character Apple Developer Team ID |
+
+> One trap worth knowing: `codesign` refuses any file carrying a resource fork
+> or Finder information. A working copy kept in Google Drive, Dropbox or
+> iCloud picks these up on everything it syncs, and the failure reads
+> "resource fork, Finder information, or similar detritus not allowed". The
+> script clears them with `xattr -cr` before signing.
 
 ### GitHub Actions (CI/CD)
 
