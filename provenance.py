@@ -44,7 +44,7 @@ from textutil import count
 # The version of SASA, for the whole application: main.py re-exports this one
 # rather than keeping its own. See the note there -- this constant was stale by
 # two releases and every record it stamped named the wrong producer.
-__version__ = "2.4.1"
+__version__ = "2.4.2"
 
 # Fields required for a measurement record that another lab could reproduce.
 REQUIRED_FOR_DEFENSIBLE: tuple[str, ...] = (

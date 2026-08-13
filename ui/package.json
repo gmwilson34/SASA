@@ -1,6 +1,6 @@
 {
   "name": "sasa-ui",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "description": "SASA - Shot Acoustic Spectral Analysis",
   "main": "server.js",
   "private": true,

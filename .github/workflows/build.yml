@@ -175,32 +175,46 @@ jobs:
           fi
 
       - name: Report signing status
+        id: signing
         run: |
-          if codesign -dv --verbose=2 dist/SASA.app 2>&1 | grep -q "Developer ID Application"; then
-            if xcrun stapler validate dist/SASA.app > /dev/null 2>&1; then
-              echo "::notice title=Signed and notarized::SASA-macOS.zip is signed with a Developer ID certificate and has a stapled notarization ticket."
-            else
-              echo "::warning title=Signed, not notarized::SASA-macOS.zip is signed but has no stapled ticket. Gatekeeper will still warn on first launch."
-            fi
+          if xcrun stapler validate dist/SASA.app > /dev/null 2>&1; then
+            echo "notarized=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Signed and notarized::SASA-macOS.zip is signed with a Developer ID certificate and carries a stapled notarization ticket."
+          elif codesign -dv --verbose=2 dist/SASA.app 2>&1 | grep -q "Developer ID Application"; then
+            echo "notarized=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Signed, not notarized::SASA-macOS.zip is signed but has no stapled ticket. Gatekeeper will still block it on first launch."
           else
-            echo "::warning title=Unsigned build::SASA-macOS.zip is NOT signed with a Developer ID certificate. Gatekeeper will block it on other Macs. Add the MACOS_CERTIFICATE secret; see scripts/sign_macos.sh."
+            echo "notarized=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Unsigned build::SASA-macOS.zip is NOT signed with a Developer ID certificate. Gatekeeper will block it on other Macs."
           fi
 
       - name: Remove the signing keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/sasa-signing.keychain-db" || true
 
+      # Always kept as a workflow artifact, signed or not: it is useful for
+      # debugging and reaches nobody who has not gone looking for it.
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: SASA-macOS
           path: SASA-macOS.zip
 
+      # A release asset is different. An unsigned macOS build attached to a
+      # release is a download that Gatekeeper refuses with "SASA.app is
+      # damaged", which reads to whoever downloaded it as a corrupt file and a
+      # broken product. Publishing nothing is recoverable; publishing that is
+      # not, so the upload is gated on the ticket actually being stapled.
       - name: Upload to release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.notarized == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: SASA-macOS.zip
+
+      - name: Explain the missing macOS asset
+        if: startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.notarized != 'true'
+        run: |
+          echo "::warning title=macOS asset not attached::The macOS build is not notarized, so it was NOT attached to the release — an unsigned build would be refused by Gatekeeper on every machine but the builder's. Attach a locally signed build (./build_macos.sh, then upload SASA-macOS.zip), or add the signing secrets so CI can do it. See the README's Code signing section."
 
   build-windows:
     name: Build Windows exe

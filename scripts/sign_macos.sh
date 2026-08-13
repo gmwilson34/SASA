@@ -128,13 +128,37 @@ fi
 # as unsuitable here because it applies one set of entitlements to everything it
 # finds and skips things it does not recognise as code.
 
-# Extended attributes first. codesign refuses any file carrying a resource
-# fork or Finder information — "resource fork, Finder information, or similar
-# detritus not allowed" — and this repository lives inside a Google Drive
-# folder, which attaches them to everything it syncs. Without this the very
-# first binary fails and the cause is not obvious from the message.
-say "Clearing extended attributes..."
-xattr -cr "$APP"
+# ── Stage a clean copy, off the working tree ─────────────────────────────────
+#
+# Everything below signs a copy on local disk rather than the bundle in place.
+# Two reasons, both found by running this rather than reasoning about it:
+#
+#   * codesign refuses com.apple.FinderInfo — "resource fork, Finder
+#     information, or similar detritus not allowed" — and `xattr -cr` does NOT
+#     remove it from a framework directory. It exits 0, reports nothing, and
+#     leaves the attribute exactly where it was; the signature then fails on
+#     the bundle AFTER every nested binary has already been signed.
+#     `ditto --norsrc --noextattr --noacl` is what actually produces a clean
+#     tree, and it drops the cloud-provider attributes along with it.
+#
+#   * this working copy lives inside a Google Drive folder. Signing in place
+#     means a sync daemon is writing to a bundle while it is being signed, and
+#     again after the notarization ticket has been stapled to it.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sasa-sign.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+SOURCE_APP="$APP"
+APP="$WORK/$(basename "$SOURCE_APP")"
+
+say "Staging a clean copy for signing..."
+ditto --norsrc --noextattr --noacl "$SOURCE_APP" "$APP"
+
+# Proven, not assumed: this is the failure that cost a whole signing pass, and
+# it is completely silent at the point it is introduced.
+if xattr -lr "$APP" 2>/dev/null | grep -q "com.apple.FinderInfo"; then
+    warn "the staged copy still carries com.apple.FinderInfo; codesign will refuse it"
+    xattr -lr "$APP" 2>/dev/null | grep "com.apple.FinderInfo" | head -5 >&2
+    exit 1
+fi
 
 say "Signing nested binaries..."
 signed=0
@@ -225,5 +249,13 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 
 say "Assessing as Gatekeeper will..."
 spctl --assess --type execute --verbose=4 "$APP"
+
+# Put the notarized bundle back where the caller expects it. The ZIP is the
+# artifact that ships; this only makes `open dist/SASA.app` run the real thing.
+# Google Drive will re-attach its own attributes to this copy, which is exactly
+# why the ZIP was made from the staged copy and not from here.
+say "Returning the stapled bundle to $SOURCE_APP..."
+rm -rf "$SOURCE_APP"
+ditto --norsrc --noextattr --noacl "$APP" "$SOURCE_APP"
 
 say "Signed, notarized and stapled: $ZIP"

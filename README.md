@@ -137,15 +137,17 @@ Download the latest release from the [Releases](https://github.com/gmwilson34/SA
 | **macOS** | `SASA-macOS.zip` | Unzip → double-click `SASA.app` |
 | **Windows** | `SASA-Windows.zip` | Unzip → run `SASA.exe` |
 
-> **The released binaries are not yet code-signed or notarized.** macOS
-> Gatekeeper will refuse to open `SASA.app` on any machine other than the one
-> that built it ("SASA.app is damaged and can't be opened" — that message means
-> *unsigned*, not *corrupt*). Until then, run
-> `xattr -dr com.apple.quarantine /Applications/SASA.app` after unzipping, or
-> run from source. Windows SmartScreen will likewise warn on the unsigned
-> `SASA.exe`.
+> **The macOS build is signed with a Developer ID certificate and notarized by
+> Apple**, with the ticket stapled, so it opens normally on any Mac and works
+> offline. Verify it yourself before trusting it:
+> `spctl --assess --type execute --verbose=4 /Applications/SASA.app` should say
+> `accepted` and `source=Notarized Developer ID`.
 >
-> The build already does everything except hold the certificate — see
+> **The Windows build is not signed** — SmartScreen will warn on `SASA.exe`,
+> and you will need "More info" → "Run anyway". Authenticode signing needs a
+> certificate we do not yet hold.
+>
+> Releases before v2.4.2 have an unsigned macOS build, or none attached. See
 > [Code signing](#code-signing).
 
 Or build it yourself:
@@ -971,9 +973,36 @@ xcrun notarytool store-credentials "SASA-NOTARY" \
 ./build_macos.sh
 ```
 
-To turn it on in CI, add these repository secrets. Until `MACOS_CERTIFICATE`
-exists the workflow behaves exactly as before; once it does, release tags fail
-rather than publishing an unsigned build.
+#### Where the signing key lives
+
+**Releases are signed on the build machine, not in CI.** The Developer ID
+private key never leaves this Mac.
+
+That is a deliberate trade of convenience for blast radius. A Developer ID key
+in a CI secret can be used by anyone who can run a workflow in the repository,
+and a key that signs malware once gets the certificate revoked by Apple —
+which invalidates every copy of SASA already installed, not just the forgery.
+Keeping it in the login keychain means signing needs physical access to this
+machine.
+
+The consequence is that CI cannot produce a shippable macOS build, so **it does
+not attach one to a release**. An unsigned build published as a release asset
+is refused by Gatekeeper with "SASA.app is damaged", which reads as a corrupt
+download and a broken product; publishing nothing is recoverable, publishing
+that is not. CI still builds the app and keeps it as a workflow artifact, and
+annotates the run to say why the asset is missing.
+
+So a macOS release is two steps:
+
+```bash
+git tag -a vX.Y.Z -m "SASA vX.Y.Z" && git push origin vX.Y.Z   # CI builds and tests
+./build_macos.sh                                               # builds, signs, notarizes, staples
+gh release upload vX.Y.Z SASA-macOS.zip --clobber              # attach the signed artifact
+```
+
+If you later decide the convenience is worth it, the workflow already supports
+signing in CI — add these repository secrets and it takes over. Until
+`MACOS_CERTIFICATE` exists nothing changes.
 
 | Secret | What it is |
 |--------|------------|
@@ -983,11 +1012,20 @@ rather than publishing an unsigned build.
 | `MACOS_NOTARY_PASSWORD` | An app-specific password for that Apple ID |
 | `MACOS_NOTARY_TEAM_ID` | The 10-character Apple Developer Team ID |
 
-> One trap worth knowing: `codesign` refuses any file carrying a resource fork
-> or Finder information. A working copy kept in Google Drive, Dropbox or
-> iCloud picks these up on everything it syncs, and the failure reads
-> "resource fork, Finder information, or similar detritus not allowed". The
-> script clears them with `xattr -cr` before signing.
+> Two traps worth knowing, both of which cost a signing pass here:
+>
+> `codesign` refuses any file carrying a resource fork or Finder information,
+> and a working copy kept in Google Drive, Dropbox or iCloud picks these up on
+> everything it syncs. The failure reads "resource fork, Finder information, or
+> similar detritus not allowed".
+>
+> `xattr -cr` does **not** fix it. On a framework directory it exits 0, prints
+> nothing, and leaves `com.apple.FinderInfo` exactly where it was — so the
+> signature fails on the bundle *after* every nested binary has been signed.
+> The script instead stages a copy with `ditto --norsrc --noextattr --noacl`,
+> which genuinely strips them, and signs that. Staging also moves signing off
+> the synced volume, so a sync daemon cannot write into a bundle while it is
+> being signed or after the notarization ticket has been stapled to it.
 
 ### GitHub Actions (CI/CD)
 
