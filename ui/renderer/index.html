@@ -1718,6 +1718,10 @@
                     aria-controls="panel-overview" aria-selected="true" tabindex="0">
               <svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg>Overview
             </button>
+            <button type="button" class="tab" role="tab" id="tab-hazard"
+                    aria-controls="panel-hazard" aria-selected="false" tabindex="-1">
+              <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Hearing hazard
+            </button>
             <button type="button" class="tab" role="tab" id="tab-spectrogram"
                     aria-controls="panel-spectrogram" aria-selected="false" tabindex="-1">
               <svg class="icon" aria-hidden="true"><use href="#i-spectrogram"/></svg>Spectrogram
@@ -1739,10 +1743,6 @@
             <button type="button" class="tab" role="tab" id="tab-table"
                     aria-controls="panel-table" aria-selected="false" tabindex="-1">
               <svg class="icon" aria-hidden="true"><use href="#i-table"/></svg>Metrics table
-            </button>
-            <button type="button" class="tab" role="tab" id="tab-hazard"
-                    aria-controls="panel-hazard" aria-selected="false" tabindex="-1">
-              <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Hazard
             </button>
           </div>
 
@@ -1863,6 +1863,38 @@
                   </div>
                 </div>
               </section>
+            </div>
+          </div>
+
+          <!-- Hazard -->
+          <div class="tabpanel" role="tabpanel" id="panel-hazard"
+               aria-labelledby="tab-hazard" tabindex="0" data-print-title="Hearing hazard" hidden>
+            <div class="stack">
+              <div class="banner" data-tone="info" id="hazard-banner">
+                <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span>
+                <div class="banner-body">
+                  <p class="banner-title" id="hazard-headline">Hearing hazard assessment</p>
+                  <p class="banner-text" id="hazard-text">—</p>
+                </div>
+              </div>
+
+              <div class="metric-grid" id="hazard-metrics"></div>
+
+              <div class="panel">
+                <h3 class="subsection-title">Method and assumptions</h3>
+                <dl class="kv-list" id="hazard-method-list">
+                  <dt>Method</dt><dd id="hazard-method">—</dd>
+                  <dt>Criterion</dt><dd id="hazard-criterion-out">—</dd>
+                  <dt>Rounds assumed</dt><dd id="hazard-rounds-out">—</dd>
+                  <dt>Mean L<sub>AE</sub></dt><dd id="hazard-lae-mean">—</dd>
+                </dl>
+                <p class="prose mt-3">
+                  Dose is computed from the A-weighted sound exposure of the valid shots only,
+                  with no allowance for hearing protection. It is an occupational-exposure
+                  estimate, not a clinical judgement.
+                </p>
+              </div>
+
             </div>
           </div>
 
@@ -2351,63 +2383,6 @@
                 </thead>
                 <tbody id="metrics-tbody"></tbody>
               </table>
-            </div>
-          </div>
-
-          <!-- Hazard -->
-          <div class="tabpanel" role="tabpanel" id="panel-hazard"
-               aria-labelledby="tab-hazard" tabindex="0" data-print-title="Hearing hazard" hidden>
-            <div class="stack">
-              <div class="banner" data-tone="info" id="hazard-banner">
-                <span class="banner-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span>
-                <div class="banner-body">
-                  <p class="banner-title" id="hazard-headline">Hearing hazard assessment</p>
-                  <p class="banner-text" id="hazard-text">—</p>
-                </div>
-              </div>
-
-              <div class="metric-grid" id="hazard-metrics"></div>
-
-              <div class="panel">
-                <h3 class="subsection-title">Method and assumptions</h3>
-                <dl class="kv-list" id="hazard-method-list">
-                  <dt>Method</dt><dd id="hazard-method">—</dd>
-                  <dt>Criterion</dt><dd id="hazard-criterion-out">—</dd>
-                  <dt>Rounds assumed</dt><dd id="hazard-rounds-out">—</dd>
-                  <dt>Mean L<sub>AE</sub></dt><dd id="hazard-lae-mean">—</dd>
-                </dl>
-                <p class="prose mt-3">
-                  Dose is computed from the A-weighted sound exposure of the valid shots only,
-                  with no allowance for hearing protection. It is an occupational-exposure
-                  estimate, not a clinical judgement.
-                </p>
-              </div>
-
-              <!-- The second MIL-STD-1474E metric. It is computed on every
-                   analysis and it declines to produce a number; this card is
-                   where it says so, and why. -->
-              <section class="card" id="card-ahaah" aria-labelledby="ahaah-title" hidden>
-                <div class="card-header">
-                  <div>
-                    <span class="card-eyebrow">MIL-STD-1474E · second approved metric</span>
-                    <h3 class="card-title" id="ahaah-title">
-                      <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
-                      Auditory Risk Unit (AHAAH)
-                    </h3>
-                  </div>
-                  <div class="card-header-actions">
-                    <span class="pill" id="ahaah-pill" data-tone="warn">
-                      <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
-                      <span id="ahaah-pill-text">Unavailable</span>
-                    </span>
-                  </div>
-                </div>
-                <div class="card-body">
-                  <p class="prose" id="ahaah-headline">—</p>
-                  <ul class="finding-list mt-4" id="ahaah-notes"></ul>
-                  <dl class="kv-list mt-4" id="ahaah-detail"></dl>
-                </div>
-              </section>
             </div>
           </div>
         </div>

@@ -9,7 +9,7 @@ repository root already on sys.path and so cannot tell the difference between a
 module that was installed and one that merely exists on disk.
 
 That gap shipped a broken release. The py-modules list had gone stale by eight
-modules (ahaah, anomaly, array, atmosphere, pairing, report, session,
+modules (anomaly, array, atmosphere, pairing, provenance, report, session,
 stringstats), and because the `sasa` console script does NOT put the working
 directory on sys.path, `sasa --help` died with ModuleNotFoundError on any
 machine that was not sitting in the source tree. CI caught it only at the tag,

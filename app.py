@@ -3160,6 +3160,15 @@ def main() -> int:
 
 
 if __name__ == '__main__':
+    # BEFORE anything else, and before the server binds a port. The analysis
+    # draws its per-shot figures in worker processes (see render.py), and in a
+    # frozen build a worker is this executable started again with arguments
+    # multiprocessing understands. Without freeze_support() to recognise them,
+    # each worker would instead try to start another copy of the whole
+    # application -- server, port and all.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     try:
         raise SystemExit(main())
     except SystemExit:

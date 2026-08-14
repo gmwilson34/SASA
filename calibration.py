@@ -77,9 +77,9 @@ CLIP_RUN_SAMPLES: int = 2
 # peak is understated and rise time, crest factor and kurtosis are computed
 # from a plateau that the microphone never saw.
 #
-# The signature is the same one ahaah._detect_clipping() looks for in a
-# calibrated pressure history: several samples in a row pinned at the
-# waveform's OWN extreme. These constants set what "pinned" and "several" mean.
+# The signature to look for in a calibrated pressure history is several samples
+# in a row pinned at the waveform's OWN extreme. These constants set what
+# "pinned" and "several" mean.
 
 # How close to the extreme counts as sitting on it, as a fraction of the
 # extreme. 1e-4 is ~1.5 LSB at 16-bit and ~1700 LSB at 24-bit, so it absorbs

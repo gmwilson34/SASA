@@ -1851,8 +1851,8 @@ def _section_hazard(metadata: Dict[str, Any], validity: ValidityReport) -> str:
     </div>
   </div>
   <p class="sub" style="font-size:13px">Method: {_e(method)}. This is the
-  energy-based screening criterion, not a full MIL-STD-1474E AHAAH determination -
-  see the methods appendix.</p>
+  better-supported of the two impulse-noise metrics MIL-STD-1474E approves - see
+  the methods appendix for what it does and does not establish.</p>
 </section>
 """
 
@@ -2025,14 +2025,28 @@ def _section_appendix(metadata: Dict[str, Any], validity: ValidityReport) -> str
 
   <h3>Limitations — stated plainly</h3>
   <dl class="appendix">
-    <dt>The hazard figure is a screening criterion, not an AHAAH determination.</dt>
-    <dd>MIL-STD-1474E's impulse-noise limit is properly evaluated with the AHAAH
-    model, which simulates the middle-ear muscle reflex and the mechanics of the
-    cochlea for the specific waveform and warned/unwarned state of the listener.
-    That is outside the scope of this instrument. The energy-based
-    L<sub>Aeq,8h</sub> figure reported here is the widely used screening method and
-    is generally conservative for impulses, but it is NOT a MIL-STD-1474E compliance
-    determination and must not be presented as one.</dd>
+    <dt>Why the energy metric is the one reported.</dt>
+    <dd>MIL-STD-1474E approves two impulse-noise metrics: the A-weighted energy
+    method reported here, and the Auditory Risk Unit from ARL's AHAAH model. This
+    instrument computes the energy method, and that is a deliberate choice. The
+    2010 AIBS independent peer review, convened to compare four impulse-noise
+    models, recommended the energy method as the standard until AHAAH could be
+    verified, judged the correlation between AHAAH's predictions and observed
+    hearing damage to be weak, and found that AHAAH handles repeated exposures
+    less well than the energy method - which is the governing case for a string of
+    shots. Later comparisons against human threshold-shift data ranked AHAAH the
+    poorest of the three criteria tested and the energy method the best.</dd>
+
+    <dt>The hazard figure is a screening criterion, not a compliance
+    determination.</dt>
+    <dd>MIL-STD-1474E specifies its energy metric, L<sub>IAeq,8h</sub>, on a 100 ms
+    interval around each impulse, with a correction for long A-duration impulses.
+    This instrument integrates each shot over its detection window instead
+    (50 ms before to 200 ms after the arrival, by default), and applies no
+    A-duration correction. A longer window captures decay and reverberant tail that
+    a 100 ms window truncates, so the figure reported here is at least as high as
+    the standard's and never lower - conservative, but not the standard's number.
+    It must not be presented as a MIL-STD-1474E compliance determination.</dd>
 
     <dt>Free-field assumptions.</dt>
     <dd>Levels are reported as measured at the microphone. No correction is applied
@@ -2136,10 +2150,13 @@ def generate_report(
         _section_title(metadata_dict, validity),
         _section_validity(validity),
         _section_conditions(metadata_dict),
+        # Hazard leads the substantive sections. It is the conclusion the rest of
+        # the report supports, and the metric the reader is here for; the levels
+        # that produce it follow immediately after.
+        _section_hazard(metadata_dict, validity),
         _section_results(metadata_dict, validity),
         _section_insertion_loss(metadata_dict, validity),
         _section_string_behaviour(metadata_dict, validity),
-        _section_hazard(metadata_dict, validity),
         _section_shots(metadata_dict, validity),
         _section_figures(figure_items, validity),
         _section_appendix(metadata_dict, validity),

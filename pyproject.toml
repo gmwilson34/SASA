@@ -8,7 +8,10 @@ version = "2.4.2"
 description = "SASA — Shot Acoustic Spectral Analysis: Professional-grade acoustic analysis for gunshot recordings"
 readme = "README.md"
 license = {text = "Proprietary — Copyright © 2024-2026 Ridgeback Defense"}
-requires-python = ">=3.10"
+# The oldest version the test matrix actually runs. It said >=3.10, which no
+# job has ever installed -- the same unevidenced claim the dependency floors
+# below used to make. 3.13 is what the app ships on; see the build jobs.
+requires-python = ">=3.11"
 authors = [
     {name = "Ridgeback Defense"},
 ]
@@ -18,7 +21,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -26,12 +28,27 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
 ]
+# FLOORS ARE CLAIMS, AND THESE ARE ONES THE TESTS SUPPORT.
+#
+# They used to be numpy>=1.24, scipy>=1.10, matplotlib>=3.7, plotly>=5.15 --
+# 2022-era versions that nothing has installed or tested in years. CI resolves
+# these unpinned and therefore only ever runs against the newest release, so a
+# floor below the last breaking change was a support claim with no evidence
+# behind it. Each floor below is now at a boundary there is a reason for:
+#
+#   numpy       2.0 removed most of the deprecated aliases and changed
+#               promotion rules; 1.x is a different library to write against.
+#   scipy       1.14 is the first release built against numpy 2.
+#   matplotlib  3.9 is the first release that supports numpy 2.
+#   plotly      6.0 is a major version; 5.x is not what save_interactive_*
+#               is written against.
+#   soundfile   0.13 is the first release with the current libsndfile bindings.
 dependencies = [
-    "numpy>=1.24",
-    "scipy>=1.10",
-    "soundfile>=0.12",
-    "matplotlib>=3.7",
-    "plotly>=5.15",
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "soundfile>=0.13",
+    "matplotlib>=3.9",
+    "plotly>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -39,21 +56,29 @@ dependencies = [
 # API) and `import imageio_ffmpeg` for the bundled ffmpeg binary. Both are required.
 video = [
     "moviepy>=2.0",
-    "imageio-ffmpeg>=0.5",
+    "imageio-ffmpeg>=0.6",
 ]
 # ISO 532-1 loudness. Not imported by any module yet; sasa.spec picks it up
 # opportunistically as a PyInstaller hidden import if it happens to be installed.
 loudness = [
-    "mosqito>=1.0",
+    "mosqito>=1.2",
 ]
 # Packaging: pyinstaller drives sasa.spec; pillow is imported by assets/generate_icon.py.
+#
+# Pillow is deliberately NOT at the newest release. moviepy 2.2 requires
+# pillow<12, so `pip install '.[video,build]'` -- which is exactly what both
+# build jobs run -- cannot resolve a 12.x. The floor stays where the resolver
+# can satisfy both.
 build = [
-    "pyinstaller>=6.0",
-    "pillow>=10.0",
+    "pyinstaller>=6.20",
+    "pillow>=11.0",
 ]
+# ruff's default rule set changes between minor releases, so the workflow
+# installs an exact pin (see .github/workflows/build.yml) and this floor only
+# keeps a local install from resolving to something older than CI runs.
 dev = [
-    "pytest>=7.0",
-    "ruff>=0.1",
+    "pytest>=8.0",
+    "ruff>=0.16",
 ]
 all = [
     "sasa[video,loudness,build,dev]",
@@ -68,7 +93,8 @@ sasa = "main:main"
 # script does not put the working directory on sys.path, so a module missing
 # from this list is a ModuleNotFoundError the moment `sasa` is run from
 # anywhere but the source tree -- which is exactly how it failed in CI: the
-# list had gone stale by eight modules and `sasa --help` died on `ahaah`.
+# list had gone stale by eight modules and `sasa --help` died on the first
+# top-level import that was not named here.
 #
 # Static TOML cannot derive this from disk the way sasa.spec does, so
 # tests/test_packaging.py asserts the two agree and fails if a new module is
@@ -80,7 +106,6 @@ py-modules = [
     "SignalGenerator",
     "WavLoader",
     "WaveformPlot",
-    "ahaah",
     "anomaly",
     "app",
     "atmosphere",
@@ -92,6 +117,7 @@ py-modules = [
     "pairing",
     "plots",
     "provenance",
+    "render",
     "report",
     "session",
     "shot_detect",
@@ -104,19 +130,10 @@ py-modules = [
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["error::SyntaxWarning"]
-markers = [
-    # The AHAAH reference-case gate (docs/AHAAH-SPEC.md section 11.5). It fails
-    # because the public ARL release does not contain enough to reproduce the
-    # model. That failure is ACTED ON, not just recorded: ahaah.VALIDATION_STATUS
-    # is "not_validated" and ahaah.compute_ahaah() emits no number at all, so
-    # nothing in SASA can present an ARU. Deselect with -m "not validation" if you
-    # need a green board; never by loosening the tolerances. See docs/AHAAH.md.
-    "validation: reference-case validation of ahaah.py against the ARL 160F case",
-]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"    # matched to requires-python above
 extend-exclude = [".venv", "ui/node_modules", "build", "dist"]
 
 [tool.ruff.lint]

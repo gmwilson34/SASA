@@ -232,7 +232,7 @@ const VIEW_IDS = {
 
 // Order must match the tablist in index.html: arrow-key navigation walks this
 // array, so a tab missing here is unreachable by keyboard AND never revealed.
-const TABS = ['overview', 'spectrogram', 'bands', 'shots', 'string', 'table', 'hazard'];
+const TABS = ['overview', 'hazard', 'spectrogram', 'bands', 'shots', 'string', 'table'];
 
 /**
  * A-weighting at the nominal one-third-octave centres, IEC 61672-1:2013 Table 3.
@@ -5043,7 +5043,7 @@ function renderShotReview() {
   const rank = { exclude: 0, review: 1, info: 2 };
   const groups = new Map();
   for (const flag of flags) {
-    const key = `${flag.severity} ${flag.message}`;
+    const key = `${flag.severity}\u0000${flag.message}`;
     if (!groups.has(key)) groups.set(key, { severity: flag.severity, message: flag.message, flags: [] });
     groups.get(key).flags.push(flag);
   }

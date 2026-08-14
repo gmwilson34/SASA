@@ -813,9 +813,21 @@ class HazardAssessment:
     Hearing-hazard assessment for a string of shots.
 
     Uses the energy-based (3 dB exchange rate) criterion shared by MIL-STD-1474E's
-    LAeq8h limit and the NIOSH recommended exposure limit. This is the widely
-    accepted screening method; a full MIL-STD-1474E determination for impulse noise
-    uses AHAAH, which models the middle-ear reflex and is outside this scope.
+    LAeq8h limit and the NIOSH recommended exposure limit.
+
+    This is the metric SASA leads with, and that is a deliberate choice rather than
+    a fallback. MIL-STD-1474E approves two impulse-noise metrics -- this one and the
+    Auditory Risk Unit from ARL's AHAAH model -- and the energy method is the better
+    supported of the two. The 2010 AIBS independent peer review (convened by
+    USAMRMC to compare four impulse-noise models) recommended the energy method as
+    the standard until AHAAH could be verified, judged AHAAH's correlation with
+    observed hearing damage weak, and found it handles repeated exposures worse
+    than the energy method -- which is the governing case for a string of shots.
+    Later comparisons against human threshold-shift data ranked AHAAH the poorest
+    predictor of the three criteria tested and the energy method the best.
+
+    The caveat that remains is scope, not standing: see the note on the
+    integration window at compute_hazard().
     """
     n_rounds: int
     LAE_mean: float
@@ -851,6 +863,22 @@ def compute_hazard(
 
         LAeq8h = LAE_energy_mean + 10*log10(N) - 10*log10(28800)
         allowable N = 10^((criterion - LAE + 10*log10(28800)) / 10)
+
+    INTEGRATION WINDOW -- KNOWN DIFFERENCE FROM MIL-STD-1474E, NOT YET RESOLVED
+    --------------------------------------------------------------------------
+    This function is handed whatever LAE the per-shot metrics produced, and those
+    are integrated over SASA's detection window (--pre-ms/--post-ms, default 50 ms
+    before and 200 ms after the arrival). MIL-STD-1474E specifies its energy
+    metric, LIAeq,8h, on a 100 ms interval around the impulse, with a separate
+    correction for long A-duration impulses. Neither the 100 ms interval nor the
+    A-duration correction is implemented here.
+
+    The direction of the discrepancy is the safe one: a 250 ms window captures the
+    decay and any reverberant tail that a 100 ms window truncates, so this figure
+    is at least as high as the standard's, never lower. It is still not the
+    standard's number, and it must not be presented as a 1474E compliance
+    determination until the window and the A-duration correction are implemented
+    and tested against a worked example.
 
     Args:
         LAE_values: Per-shot A-weighted SEL, in dB.
