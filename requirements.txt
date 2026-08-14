@@ -3,29 +3,36 @@
 # in pyproject.toml. Prefer `pip install .` (or `pip install -e '.[all]'`);
 # this file exists for the build scripts and CI.
 #
+# The floors are the ones pyproject.toml explains: each sits at a boundary
+# there is a reason for -- mostly numpy 2 and the releases that first support
+# it -- rather than at a 2022 version nothing has installed since. Nothing here
+# is pinned to an exact release: CI resolves these fresh on every run, so the
+# suite is always run against the newest versions, and a release that breaks
+# SASA turns CI red rather than shipping.
+#
 # Note: FileSelector.py uses tkinter, which ships with CPython and cannot be
 # pip-installed. On Linux install the distro package (e.g. python3-tk).
 
 # ── Core (always required) ──
-numpy>=1.24
-scipy>=1.10          # scipy.signal: hilbert, find_peaks, sosfilt, sosfiltfilt, resample_poly, bilinear_zpk
-soundfile>=0.12
-matplotlib>=3.7
-plotly>=5.15         # interactive *_full.html outputs
+numpy>=2.0
+scipy>=1.14         # scipy.signal: hilbert, find_peaks, sosfilt, sosfiltfilt, resample_poly, bilinear_zpk
+soundfile>=0.13
+matplotlib>=3.9
+plotly>=6.0          # interactive *_full.html outputs
 
 # ── Video input — `pip install '.[video]'` ──
 # ExtractAudio.py needs BOTH: moviepy for the container/audio API and
 # imageio-ffmpeg for the bundled ffmpeg binary. Installing only one will fail.
 # moviepy>=2.0
-# imageio-ffmpeg>=0.5
+# imageio-ffmpeg>=0.6
 
 # ── ISO 532-1 loudness — `pip install '.[loudness]'` ──
-# mosqito>=1.0
+# mosqito>=1.2
 
 # ── Packaging — `pip install '.[build]'` ──
-# pyinstaller>=6.0
-# pillow>=10.0       # assets/generate_icon.py
+# pyinstaller>=6.20
+# pillow>=11.0       # assets/generate_icon.py; held below 12 by moviepy 2.2
 
 # ── Development — `pip install '.[dev]'` ──
-# pytest>=7.0
-# ruff>=0.1
+# pytest>=8.0
+# ruff>=0.16         # the workflow pins an exact version; this is only a floor

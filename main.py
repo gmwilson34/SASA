@@ -93,7 +93,6 @@ from metrics import (  # noqa: E402
     compute_insertion_loss,
     compute_shot_metrics,
 )
-from ahaah import VALIDATION_STATUS as AHAAH_STATUS, compute_ahaah_both  # noqa: E402
 from anomaly import review_shot_string  # noqa: E402
 from atmosphere import (  # noqa: E402
     Atmosphere,
@@ -102,6 +101,10 @@ from atmosphere import (  # noqa: E402
 )
 from bands import ThirdOctaveAnalyzer, band_insertion_loss  # noqa: E402
 from pairing import assess_comparability  # noqa: E402
+# Imported at the top even though it is only used in the plotting stage: it
+# pulls in nothing heavy of its own (matplotlib and scipy are imported inside
+# its worker function), and a lazy import would be invisible to PyInstaller.
+import render  # noqa: E402
 from stringstats import string_summary  # noqa: E402
 from STFT import STFTResult, analyze_stft, recommended_nperseg  # noqa: E402
 from weighting import weighting_settling_samples  # noqa: E402
@@ -126,6 +129,11 @@ from textutil import count, plural
 # main imports provenance, so the constant lives there and is re-exported
 # here. tests/test_packaging.py holds it to pyproject.toml.
 __version__ = _PROVENANCE_VERSION
+
+# Where the analysis modules live, for workers that do not inherit this
+# process's sys.path -- see render.py. Resolved once, here, because a worker
+# is a fresh interpreter with a different working directory.
+_SOURCE_DIR = str(Path(__file__).resolve().parent)
 
 SCHEMA_VERSION = "2.0"
 
@@ -2277,17 +2285,6 @@ def _run_pipeline(
         for line in atmospheric_effect.summary().splitlines():
             say(line)
 
-    ahaah_block = _ahaah_block(
-        analysis.get("pressure"), shots, shot_metrics, sample_rate,
-        calibrated=bool(calibration.calibrated),
-    )
-    if ahaah_block.get("attempted"):
-        say("")
-        say("  Auditory Risk Unit (AHAAH):")
-        say(f"    {ahaah_block.get('headline', 'unavailable')}")
-        for note in (ahaah_block.get("notes") or [])[:2]:
-            say(f"    {note}")
-
     record = {
         "schema_version": SCHEMA_VERSION,
         "software": record["software"],
@@ -2304,7 +2301,6 @@ def _run_pipeline(
         "test_metadata": record["test_metadata"],
         "atmosphere": air.to_dict(),
         "atmospheric_effect": atmospheric_effect.to_dict(),
-        "ahaah": ahaah_block,
         "shots": [s.to_dict() for s in shots],
         "per_shot_metrics": [m.to_dict() for m in shot_metrics],
         "shot_review": shot_review.to_dict(),
@@ -2614,105 +2610,6 @@ def _shot_levels_block(shot_metrics, *, level_unit: str) -> Optional[Dict[str, A
     if not shots:
         return None
     return {"level_unit": level_unit, "shots": shots}
-
-
-def _ahaah_block(
-    pressure,
-    shots,
-    shot_metrics,
-    sample_rate: float,
-    *,
-    calibrated: bool,
-) -> Dict[str, Any]:
-    """
-    Run the AHAAH model over the loudest valid shot and record what came back.
-
-    WHAT THIS IS FOR, GIVEN THAT IT NEVER RETURNS A NUMBER
-    ------------------------------------------------------
-    MIL-STD-1474E approves two impulse-noise metrics: the A-weighted energy
-    method, which SASA computes exactly, and the Auditory Risk Unit from ARL's
-    AHAAH model. Customers ask for the ARU. ahaah.py implements the model to
-    the limit of what ARL has published and then REFUSES to emit the number,
-    because four specifications the answer depends on are absent from the
-    public release and there is one reference case to test against -- see the
-    header of ahaah.py and docs/AHAAH-SPEC.md section 11.
-
-    Until this ran, none of that reached the operator: the module existed and
-    nothing called it, so the application was silent on a metric its customers
-    ask for by name. It now runs on every analysis and the record carries the
-    refusal, the reason, and the model's own diagnostics. A refusal that is
-    visible and argued is a deliverable. A number would not be.
-
-    The LOUDEST shot is the one submitted, because ARU is assessed per impulse
-    and the worst impulse is the one that governs.
-
-    Args:
-        pressure: the full calibrated pressure history, or None on the chunked
-            path where no contiguous array is retained.
-        shots: detected shot events, carrying their window bounds.
-        shot_metrics: per-shot metrics, for choosing the loudest.
-        sample_rate: sample rate of `pressure`, Hz.
-        calibrated: False produces the model's uncalibrated refusal rather than
-            a silent skip, so the reason is still on the record.
-
-    Returns:
-        A JSON-serialisable block. `attempted` is False when there was nothing
-        to submit, and then `reason` says which.
-    """
-    block: Dict[str, Any] = {
-        "attempted": False,
-        "validation_status": AHAAH_STATUS,
-        "reason": None,
-        "shot_number": None,
-        "headline": None,
-        "notes": [],
-        "unwarned": None,
-        "warned": None,
-    }
-
-    if pressure is None:
-        block["reason"] = ("The recording was analysed in chunks, so no contiguous "
-                           "pressure history was retained to submit.")
-        return block
-    if not shots or not shot_metrics:
-        block["reason"] = "No shots were detected."
-        return block
-
-    valid = [(m, s) for m, s in zip(shot_metrics, shots) if getattr(m, "valid", True)]
-    if not valid:
-        block["reason"] = "No valid shot to submit."
-        return block
-
-    metric, shot = max(
-        valid,
-        key=lambda pair: (pair[0].Lpeak_Z if math.isfinite(pair[0].Lpeak_Z) else -math.inf),
-    )
-    window = pressure[shot.window_start:shot.window_end]
-    if window.size == 0:
-        block["reason"] = "The loudest shot's window was empty."
-        return block
-
-    try:
-        unwarned, warned = compute_ahaah_both(
-            window, sample_rate,
-            calibrated=calibrated,
-            # 96 kHz is the model's own preference; refusing outright on a
-            # 48 kHz recording would replace the model's reasoned refusal with
-            # a gate, and the reasoned one is the more useful of the two.
-            allow_low_rate=True,
-        )
-    except Exception as err:                                   # noqa: BLE001
-        logger.warning("AHAAH did not run: %s", err)
-        block["reason"] = f"The model raised: {err}"
-        return block
-
-    block["attempted"] = True
-    block["shot_number"] = getattr(shot, "shot_number", None)
-    block["headline"] = unwarned.headline_label
-    block["notes"] = list(unwarned.notes)
-    block["unwarned"] = unwarned.to_dict()
-    block["warned"] = warned.to_dict()
-    return block
 
 
 # What the detection knobs fall back to when the operator has not set them and
@@ -3423,7 +3320,10 @@ def _generate_plots(
     reader = _make_reader(wav_path, config, channel, preloaded)
 
     try:
-        import matplotlib.pyplot as plt  # noqa: PLC0415
+        # plots imports matplotlib itself, so this is also the probe for
+        # whether there is a matplotlib to draw with. Figures are closed by
+        # whoever drew them (see render.render_figure), so pyplot is no longer
+        # needed by name here.
         import plots as plot_module  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001 - plotting is optional; data is already safe
         message = f"Plotting is unavailable ({exc}); the data artifacts are complete."
@@ -3444,13 +3344,15 @@ def _generate_plots(
         logger.warning(message)
         run_warnings.append(message)
 
-    def call(func_name: str, *args, **kwargs):
+    def _accepted(func_name: str, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Call an optional plots.py function only if it exists, passing only the
-        keyword arguments its current signature accepts.
+        The subset of kwargs this plots.py function will accept, or None if it
+        has no such function.
 
         plots.py is being rewritten in parallel, so this stays tolerant of a
-        function that has not landed yet or whose keywords have moved.
+        function that has not landed yet or whose keywords have moved. The
+        signature is inspected in this process rather than in a worker, so a
+        job is never sent out carrying an argument that would raise on arrival.
         """
         func = getattr(plot_module, func_name, None)
         if func is None:
@@ -3460,11 +3362,97 @@ def _generate_plots(
             import inspect  # noqa: PLC0415
 
             accepted = set(inspect.signature(func).parameters)
-            kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+            return {k: v for k, v in kwargs.items() if k in accepted}
         except (TypeError, ValueError):
-            pass
-        result = func(*args, **kwargs)
-        return result[0] if isinstance(result, tuple) else result
+            return dict(kwargs)
+
+    def draw(
+        func_name: str,
+        args: tuple,
+        kwargs: Dict[str, Any],
+        *,
+        stem: str,
+        key_prefix: str,
+        describe: str,
+    ) -> None:
+        """
+        Queue a figure to be drawn, here or in a worker.
+
+        The drawing function's arguments are passed as an explicit tuple and
+        dict rather than collected with *args/**kwargs. That is deliberate and
+        was not the first attempt: a figure whose own signature takes `label`
+        -- plot_level_distribution does -- had that argument silently eaten by
+        this function's parameter of the same name, and drew without it. Naming
+        the two sets separately means no plots.py keyword can ever collide with
+        a job's own metadata again.
+
+        Returns nothing. The figure is not drawn yet, and may not be drawn in
+        this process at all; what it produced is collected at the end of the
+        stage, which is also where its success or failure is reported. Anything
+        that must be true before the figure exists -- a matrix written, a
+        record updated -- must therefore already have happened by the time this
+        is called. That ordering is the one guarantee the parallel path
+        preserves by construction.
+        """
+        filtered = _accepted(func_name, kwargs)
+        if filtered is None:
+            return
+        pool.submit(render.FigureJob(
+            source_dir=_SOURCE_DIR,
+            out_dir=str(out_dir),
+            stem=stem,
+            func_name=func_name,
+            args=args,
+            kwargs=filtered,
+            formats=list(static_formats),
+            artifact_prefix=key_prefix,
+            label=describe,
+            provenance=getattr(plot_module, "_DEFAULT_PROVENANCE", None),
+            level_unit_default=getattr(plot_module, "_DEFAULT_LEVEL_UNIT", None),
+        ))
+
+    # One pool for every figure in the run, started before the first of them
+    # and closed by gather() after the last. Sized from what is about to be
+    # asked of it, because workers are only worth starting when there is enough
+    # drawing to pay for their imports -- see render.py.
+    #
+    # Held across the stage rather than wrapped around it: the alternative is a
+    # `with` block enclosing two hundred lines of unrelated figure code, and
+    # gather() closes the pool itself.
+    # An upper bound: four full-recording figures, one per shot, and the six
+    # optional ones that only some runs qualify for. Over-counting costs a
+    # progress bar that stops short; under-counting pushed it past the end of
+    # its own stage, which is worse.
+    expected_figures = (
+        (10 if static_formats else 0)
+        + (len(shots) if (config.save_per_shot_plots and shots) else 0)
+    )
+    finished = 0
+
+    def _figure_done(result) -> None:
+        """
+        Report one finished figure, wherever it was drawn.
+
+        A worker has no console and no run_warnings list, so this is where
+        anything it has to say is said. Figures finish out of order, so the bar
+        counts completions rather than positions -- it still only moves
+        forwards, and it moves while the workers are drawing rather than
+        sitting at 78% until the whole string is done.
+
+        The count is an upper bound, so the fraction is clamped: a run that
+        skips an optional figure must stop the bar short of the end of this
+        stage, never push it past it.
+        """
+        nonlocal finished
+        finished += 1
+        fraction = min(1.0, finished / max(expected_figures, 1))
+        progress(78 + 16.0 * fraction, f"Drawing figures ({finished})")
+        for message in result.warnings:
+            logger.warning(message)
+            run_warnings.append(message)
+            say(f"    WARNING: {message}")
+
+    pool = render.FigurePool(expected=expected_figures, on_result=_figure_done).start()
 
     # ---- The span the full-recording figures cover ----
     #
@@ -3491,7 +3479,6 @@ def _generate_plots(
             frame_start=view_start, frame_stop=view_stop,
         )
         if time_axis.size:
-            saved = False
             if plotly_available and want_html:
                 path = out_dir / "waveform_full.html"
                 if plot_module.save_interactive_waveform_html(
@@ -3499,20 +3486,14 @@ def _generate_plots(
                     title=f"Pressure Waveform: {wav_path.name}{artifacts_span}",
                 ):
                     artifacts["waveform_html"] = path.name
-                    saved = True
+                    if not static_formats:
+                        say("    waveform")
             if static_formats:
-                figure, _ = plot_module.plot_waveform_pa(
-                    time_axis, pressure_plot, shots=shots,
-                    title=f"Pressure Waveform: {wav_path.name}{artifacts_span}",
-                )
-                for path in plot_module.save_figure(
-                    figure, out_dir / "waveform_full", formats=static_formats
-                ):
-                    artifacts.setdefault(f"waveform_{path.suffix.lstrip('.')}", path.name)
-                plt.close(figure)
-                saved = True
-            if saved:
-                say("    waveform")
+                draw("plot_waveform_pa",
+                     (time_axis, pressure_plot),
+                     {"shots": shots,
+                      "title": f"Pressure Waveform: {wav_path.name}{artifacts_span}"},
+                     stem="waveform_full", key_prefix="waveform", describe="waveform")
         del time_axis, pressure_plot
         gc.collect()
 
@@ -3547,16 +3528,15 @@ def _generate_plots(
                 ):
                     artifacts[f"{key}_html"] = path.name
             if static_formats:
-                figure, _ = plot_module.plot_spectrogram_dB(
-                    stft, shots=shots,
-                    title=f"{weighting}-Weighted Spectrogram: {wav_path.name}{artifacts_span}",
-                )
-                for path in plot_module.save_figure(
-                    figure, out_dir / f"{key}_full", formats=static_formats
-                ):
-                    artifacts.setdefault(f"{key}_{path.suffix.lstrip('.')}", path.name)
-                plt.close(figure)
-            say(f"    {weighting}-weighted spectrogram")
+                draw("plot_spectrogram_dB",
+                     (stft,),
+                     {"shots": shots,
+                      "title": f"{weighting}-Weighted Spectrogram: "
+                               f"{wav_path.name}{artifacts_span}"},
+                     stem=f"{key}_full", key_prefix=key,
+                     describe=f"{weighting}-weighted spectrogram")
+            else:
+                say(f"    {weighting}-weighted spectrogram")
             del stft
             gc.collect()
 
@@ -3588,16 +3568,15 @@ def _generate_plots(
                         logger.warning("The band matrix could not be written: %s", exc)
 
                 if static_formats:
-                    figure, _ = plot_module.plot_third_octave_heatmap(
-                        times, freqs, levels, shots=shots,
-                        title=f"1/3-Octave Band Levels: {wav_path.name}{artifacts_span}",
-                    )
-                    for path in plot_module.save_figure(
-                        figure, out_dir / "bands_full", formats=static_formats
-                    ):
-                        artifacts.setdefault(f"bands_{path.suffix.lstrip('.')}", path.name)
-                    plt.close(figure)
-                say("    1/3-octave bands")
+                    draw("plot_third_octave_heatmap",
+                         (times, freqs, levels),
+                         {"shots": shots,
+                          "title": f"1/3-Octave Band Levels: "
+                                   f"{wav_path.name}{artifacts_span}"},
+                         stem="bands_full", key_prefix="bands",
+                         describe="1/3-octave bands")
+                else:
+                    say("    1/3-octave bands")
             del times, freqs, levels
             gc.collect()
 
@@ -3605,78 +3584,49 @@ def _generate_plots(
     # As above, the data is no longer conditional on wanting a picture. Each
     # shot's two spectrograms are written as their own file so the interface
     # fetches only the shot being looked at, however long the string is.
+    # This is the longest part of the run and the only part that grows with the
+    # string: one page per shot, three seconds of a five-second analysis at ten
+    # shots, and linear from there. render.py draws them in worker processes
+    # when there are enough to pay for starting them, and in this one when
+    # there are not or when a pool cannot be had. See render.py for why the
+    # unit of work is a whole shot rather than just its figure.
     if config.save_per_shot_plots and shots:
         shot_dir = out_dir / "shots"
         shot_dir.mkdir(exist_ok=True)
-        produced = 0
-        for position, (shot, metric) in enumerate(zip(shots, shot_metrics)):
-            progress(78 + 16.0 * (position + 1) / max(len(shots), 1),
-                     f"Plotting shot {shot.shot_number} of {len(shots)}")
-            with _plot_step(f"Shot {shot.shot_number} summary", run_warnings):
-                block = reader(shot.window_start, shot.window_end - shot.window_start)
-                window = calibration.to_pascals(block)
-                window_time = np.arange(window.size) / sample_rate
-                shot_nperseg = min(nperseg, max(64, 1 << int(math.log2(max(window.size, 64)))))
-                shot_noverlap = config.resolved_noverlap(shot_nperseg)
-                stft_z = analyze_stft(window, sample_rate, nperseg=shot_nperseg,
-                                      noverlap=shot_noverlap, weighting="Z",
-                                      calibrated=calibration.calibrated)
-                stft_c = analyze_stft(window, sample_rate, nperseg=shot_nperseg,
-                                      noverlap=shot_noverlap, weighting="C",
-                                      calibrated=calibration.calibrated)
+        jobs = [
+            render.ShotFigureJob(
+                source_dir=str(Path(__file__).resolve().parent),
+                wav_path=str(wav_path),
+                out_dir=str(out_dir),
+                shot_dir=str(shot_dir),
+                shot_number=shot.shot_number,
+                window_start=int(shot.window_start),
+                window_end=int(shot.window_end),
+                sample_rate=int(sample_rate),
+                nperseg=int(nperseg),
+                channel=channel,
+                level_unit=level_unit,
+                static_formats=list(static_formats),
+                config=config,
+                calibration=calibration,
+                metric=metric,
+                provenance=getattr(plot_module, "_DEFAULT_PROVENANCE", None),
+                level_unit_default=getattr(plot_module, "_DEFAULT_LEVEL_UNIT", None),
+            )
+            for shot, metric in zip(shots, shot_metrics)
+        ]
 
-                for stft, suffix in ((stft_z, "z"), (stft_c, "c")):
-                    matrix = _spectrogram_matrix_block(stft)
-                    if not matrix:
-                        continue
-                    matrix["time_offset_s"] = round(shot.window_start / sample_rate, 6)
-                    name = f"shot_{shot.shot_number:02d}_spectrogram_{suffix}.json"
-                    try:
-                        write_json(shot_dir / name, matrix)
-                        artifacts[f"shot_{shot.shot_number:02d}_spectrogram_{suffix}"] = (
-                            f"shots/{name}"
-                        )
-                    except OSError as exc:
-                        logger.warning("The shot %s spectrogram could not be written: %s",
-                                       shot.shot_number, exc)
-
-                if static_formats:
-                    figure = plot_module.create_shot_summary_figure(
-                        window_time, window, stft_z, stft_c, metric,
-                        title=f"Shot {shot.shot_number} Analysis ({level_unit})",
-                    )
-                    paths = plot_module.save_figure(
-                        figure, shot_dir / f"shot_{shot.shot_number:02d}_summary",
-                        formats=static_formats,
-                    )
-                    plt.close(figure)
-                    if paths:
-                        artifacts.setdefault(
-                            f"shot_{shot.shot_number:02d}_summary",
-                            str(paths[0].relative_to(out_dir)),
-                        )
-                produced += 1
-                del block, window, stft_z, stft_c
-                gc.collect()
-        if produced:
-            say(f"    per-shot summaries ({produced})")
+        for job in jobs:
+            pool.submit(job)
 
     # ---- Optional figures that plots.py is gaining in parallel ----
-    def save_optional(figure, stem: str, key_prefix: str) -> None:
-        if figure is None:
-            return
-        for path in plot_module.save_figure(figure, out_dir / stem, formats=static_formats):
-            artifacts.setdefault(f"{key_prefix}_{path.suffix.lstrip('.')}", path.name)
-        plt.close(figure)
-        say(f"    {stem.replace('_', ' ')}")
-
     if static_formats:
         with _plot_step("Measurement quality figure", run_warnings):
-            save_optional(
-                call("plot_measurement_quality", quality.to_dict(),
-                     title="Measurement Quality", level_unit=level_unit),
-                "measurement_quality", "quality",
-            )
+            draw("plot_measurement_quality",
+                 (quality.to_dict(),),
+                 {"title": "Measurement Quality", "level_unit": level_unit},
+                 stem="measurement_quality", key_prefix="quality",
+                 describe="measurement quality")
 
         if len(shots) > 1:
             with _plot_step("Shot overlay figure", run_warnings):
@@ -3686,12 +3636,13 @@ def _generate_plots(
                     block = reader(shot.window_start, shot.window_end - shot.window_start)
                     if block.size:
                         traces.append(calibration.to_pascals(block))
-                save_optional(
-                    call("plot_shot_overlay", traces, sample_rate=sample_rate,
-                         labels=[f"Shot {s.shot_number}" for s in shots[:16]],
-                         level_unit=level_unit),
-                    "shot_overlay", "overlay",
-                )
+                draw("plot_shot_overlay",
+                     (traces,),
+                     {"sample_rate": sample_rate,
+                      "labels": [f"Shot {s.shot_number}" for s in shots[:16]],
+                      "level_unit": level_unit},
+                     stem="shot_overlay", key_prefix="overlay",
+                     describe="shot overlay")
                 del traces
                 gc.collect()
 
@@ -3703,12 +3654,12 @@ def _generate_plots(
         ]
         if len(valid_peaks) > 1:
             with _plot_step("Level distribution figure", run_warnings):
-                save_optional(
-                    call("plot_level_distribution", valid_peaks,
-                         metric_label="Peak level, Z-weighted",
-                         label="This string", level_unit=level_unit),
-                    "level_distribution", "distribution",
-                )
+                draw("plot_level_distribution",
+                     (valid_peaks,),
+                     {"metric_label": "Peak level, Z-weighted",
+                      "label": "This string", "level_unit": level_unit},
+                     stem="level_distribution", key_prefix="distribution",
+                     describe="level distribution")
 
         pop_block = ((record.get("string_statistics") or {}).get("Lpeak_Z") or {}).get(
             "first_round_pop"
@@ -3719,38 +3670,58 @@ def _generate_plots(
                     float(m.Lpeak_Z) for m in shot_metrics
                     if m.valid and math.isfinite(m.Lpeak_Z)
                 ]
-                save_optional(
-                    call("plot_first_round_pop", ordered_peaks,
-                         pop=SimpleNamespace(**pop_block),
-                         metric_label="Peak level, Z-weighted",
-                         level_unit=level_unit),
-                    "first_round_pop", "first_round_pop",
-                )
+                draw("plot_first_round_pop",
+                     (ordered_peaks,),
+                     {"pop": SimpleNamespace(**pop_block),
+                      "metric_label": "Peak level, Z-weighted",
+                      "level_unit": level_unit},
+                     stem="first_round_pop", key_prefix="first_round_pop",
+                     describe="first round pop")
 
         # What the air took out of the signal on its way to the microphone.
         effect_block = record.get("atmospheric_effect") or {}
         if effect_block.get("absorption_dB"):
             with _plot_step("Atmospheric absorption figure", run_warnings):
-                save_optional(
-                    call("plot_atmospheric_absorption", effect_block,
-                         level_unit=level_unit),
-                    "atmospheric_absorption", "atmosphere",
-                )
+                draw("plot_atmospheric_absorption",
+                     (effect_block,),
+                     {"level_unit": level_unit},
+                     stem="atmospheric_absorption", key_prefix="atmosphere",
+                     describe="atmospheric absorption")
 
         comparison = record.get("insertion_loss")
         if comparison and (comparison.get("bands") or {}).get("insertion_loss_dB"):
             with _plot_step("Insertion loss figure", run_warnings):
                 bands = comparison["bands"]
-                save_optional(
-                    call(
-                        "plot_insertion_loss",
-                        np.asarray(bands["reference_dB"], dtype=float),
-                        np.asarray(bands["test_dB"], dtype=float),
-                        np.asarray(bands["frequencies_Hz"], dtype=float),
-                        level_unit=level_unit,
-                    ),
-                    "insertion_loss", "insertion_loss",
-                )
+                draw("plot_insertion_loss",
+                     (np.asarray(bands["reference_dB"], dtype=float),
+                      np.asarray(bands["test_dB"], dtype=float),
+                      np.asarray(bands["frequencies_Hz"], dtype=float)),
+                     {"level_unit": level_unit},
+                     stem="insertion_loss", key_prefix="insertion_loss",
+                     describe="insertion loss")
+
+    # ---- Collect everything that was queued ----
+    # Nothing above has drawn a figure; this is where they arrive, from
+    # whichever process drew them. gather() closes the pool and leaves nothing
+    # owed: every job is either a result here or a warning already reported.
+    #
+    # Reported from the gathered list rather than as they land, because the
+    # gathered list is in submission order: the figures are named in the order
+    # the operator asked for them, not in whatever order the workers happened
+    # to finish. The per-shot summaries are counted rather than listed, and
+    # they are identified by their result type -- naming them by a label
+    # prefix was tried, and counted "shot overlay" as an eleventh shot.
+    shot_count = 0
+    for result in pool.gather():
+        artifacts.update(result.artifacts)
+        if not result.drawn:
+            continue
+        if isinstance(result, render.ShotFigureResult):
+            shot_count += 1
+        elif result.label:
+            say(f"    {result.label}")
+    if shot_count:
+        say(f"    per-shot summaries ({shot_count})")
 
     return artifacts
 
@@ -4774,6 +4745,19 @@ def _final_status(results: Sequence[AnalysisResult]) -> int:
         if result.reference_requested and not result.insertion_loss_produced:
             deliverable_missing = True
         say(f"  {label}: {count(result.n_shots, 'shot')}, {state}")
+        # The hazard figure leads. It is the question the measurement exists to
+        # answer -- how much of a person's day this string costs -- and it is the
+        # better supported of the two impulse-noise metrics MIL-STD-1474E approves
+        # (see metrics.HazardAssessment). The levels below it are the evidence.
+        hazard = result.aggregate.hazard
+        if hazard and math.isfinite(hazard.LAeq8h_dB):
+            verdict = "EXCEEDS" if hazard.exceeds_limit else "within"
+            say(f"    LAeq8h       {hazard.LAeq8h_dB:.1f} dB  -  "
+                f"{hazard.dose_percent:.0f}% of the {hazard.criterion_dB:.0f} dB "
+                f"criterion ({verdict})")
+            say(f"    Allowable    {hazard.allowable_rounds:.0f} rounds/day"
+                + (f" at NRR {hazard.protection_NRR_dB:.0f} dB"
+                   if hazard.protection_NRR_dB else " unprotected"))
         if stat and math.isfinite(stat.maximum):
             say(f"    Peak (Z) max {stat.maximum:.1f} {unit}")
         if lae and math.isfinite(lae.mean):
@@ -4908,4 +4892,12 @@ def cli_main() -> None:
 
 
 if __name__ == "__main__":
+    # BEFORE anything else. render.py draws the per-shot figures in worker
+    # processes, and in a frozen build a worker is this executable started
+    # again with arguments multiprocessing understands. freeze_support() is
+    # what recognises them; without it the worker would not draw a figure, it
+    # would run a second copy of the analysis.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     cli_main()

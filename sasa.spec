@@ -68,9 +68,9 @@ ICON_ICO = os.path.join(PROJECT_ROOT, 'assets', 'sasa.ico')
 # it fails at runtime, not at build time.
 #
 # It is therefore derived from the filesystem rather than hand-maintained. The
-# previous hand-written list had gone stale: report.py, provenance.py and
-# ahaah.py were all absent, and app.py imports report, so the frozen app would
-# have raised ModuleNotFoundError on first use.
+# previous hand-written list had gone stale: report.py and provenance.py were
+# both absent, and app.py imports report, so the frozen app would have raised
+# ModuleNotFoundError on first use.
 _MODULE_DIR = Path(SPECPATH)
 _EXCLUDED_MODULES = {'sasa.spec'}  # nothing generated or build-only
 
@@ -87,7 +87,7 @@ datas += [(name, '.') for name in _ANALYSIS_MODULES]
 
 # Fail the BUILD rather than the running app if something the entry point needs
 # is not being shipped.
-for _required in ('main.py', 'app.py', 'report.py', 'provenance.py', 'ahaah.py',
+for _required in ('main.py', 'app.py', 'report.py', 'provenance.py',
                   'metrics.py', 'calibration.py', 'weighting.py', 'bands.py',
                   'shot_detect.py', 'STFT.py', 'plots.py'):
     if _required not in _ANALYSIS_MODULES:
